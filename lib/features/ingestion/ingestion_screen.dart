@@ -31,7 +31,14 @@ class _IngestionScreenState extends ConsumerState<IngestionScreen> {
                 onPressed: () async {
                   final chunk = await _docService.pickAndExtract();
                   if (chunk != null && mounted) {
-                    ref.read(appControllerProvider.notifier).addChunk(chunk);
+                    final controller = ref.read(appControllerProvider.notifier);
+                    controller.addChunk(chunk);
+                    controller.generateFlashcards(chunk);
+                    if (mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Document parsed and flashcards generated.')),
+                      );
+                    }
                   }
                 },
                 child: const Text('Upload PDF/Document'),
@@ -48,6 +55,19 @@ class _IngestionScreenState extends ConsumerState<IngestionScreen> {
             ],
           ),
           const SizedBox(height: 16),
+          FilledButton.icon(
+            onPressed: state.chunks.isEmpty
+                ? null
+                : () {
+                    ref.read(appControllerProvider.notifier).generateFlashcards(state.chunks.first);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Flashcards generated from latest upload.')),
+                    );
+                  },
+            icon: const Icon(Icons.auto_awesome),
+            label: const Text('Generate Flashcards (Latest Upload)'),
+          ),
+          const SizedBox(height: 12),
           const Text('Ingested Content'),
           const SizedBox(height: 8),
           Expanded(
@@ -63,9 +83,15 @@ class _IngestionScreenState extends ConsumerState<IngestionScreen> {
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                     ),
-                    trailing: IconButton(
+                    trailing: TextButton.icon(
                       icon: const Icon(Icons.auto_awesome),
-                      onPressed: () => ref.read(appControllerProvider.notifier).generateFlashcards(chunk),
+                      label: const Text('Generate'),
+                      onPressed: () {
+                        ref.read(appControllerProvider.notifier).generateFlashcards(chunk);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Flashcards generated from selected item.')),
+                        );
+                      },
                     ),
                   ),
                 );

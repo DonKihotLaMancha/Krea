@@ -79,9 +79,16 @@ class AppRepository {
   }
 
   void generateFlashcardsFromChunk(StudyChunk chunk) {
-    final sentences = chunk.content.split('.').where((s) => s.trim().isNotEmpty).take(8);
-    for (final sentence in sentences) {
+    final parts = chunk.content
+        .split(RegExp(r'[.!?\n]+'))
+        .map((s) => s.trim())
+        .where((s) => s.length > 12)
+        .take(12)
+        .toList();
+    final source = parts.isEmpty ? [chunk.content.trim()] : parts;
+    for (final sentence in source) {
       final text = sentence.trim();
+      if (text.isEmpty) continue;
       final question = 'What does this mean: "${text.length > 30 ? text.substring(0, 30) : text}"?';
       _flashcards.add(Flashcard(id: _uuid.v4(), question: question, answer: text));
     }
