@@ -1,0 +1,81 @@
+# Database/API Contracts
+
+This document maps current endpoints to normalized Supabase schema and defines the v2 route contracts.
+
+## Legacy-Compatible Routes
+
+### `POST /api/student`
+- Request: `{ studentId: string, name?: string }`
+- Writes:
+  - `profiles` (primary, when `studentId` is UUID from `auth.users`)
+  - `students` (legacy compatibility table, optional)
+- Response: `{ ok: true, studentId, name }`
+
+### `GET /api/library?studentId=...`
+- Reads:
+  - `sources` + `source_contents` (primary)
+  - `concept_maps` (+nodes/edges flattened to JSON)
+  - `notebook_outputs`
+- Optional fallback reads from legacy `student_pdfs`, `concept_maps`, `notebook_outputs`.
+- Response:
+  - `{ pdfs: [...], maps: [...], notebook: [...] }`
+
+### `POST /api/library/pdf`
+- Request: `{ studentId, name, content }`
+- Writes:
+  - `sources`
+  - `source_contents`
+  - optional compatibility write to `student_pdfs`
+
+### `POST /api/library/concept-map`
+- Request: `{ studentId, sourceName, title, map }`
+- Writes:
+  - `concept_maps`
+  - `concept_map_nodes`
+  - `concept_map_edges`
+  - optional compatibility write to legacy `concept_maps`
+
+### `POST /api/library/notebook`
+- Request: `{ studentId, sourceNames, outputType, output }`
+- Writes:
+  - `notebook_sessions` (auto-create default session)
+  - `notebook_outputs`
+  - optional compatibility write to legacy `notebook_outputs`
+
+## V2 Routes
+
+### `GET /api/v2/sources`
+- Query: `limit`, `cursor`
+- Reads `sources` by `owner_id`.
+
+### `GET /api/v2/sources/:id`
+- Reads source metadata + `source_contents` + `source_chunks`.
+
+### `POST /api/v2/sources`
+- Request: metadata-only source create.
+- Returns source id and upload path for Storage.
+
+### `POST /api/v2/flashcards`
+- Request: `{ sourceId, cards[] }`
+- Writes `flashcard_sets` + `flashcards`.
+
+### `POST /api/v2/notebook/sessions`
+- Request: `{ title, sourceIds[] }`
+- Writes `notebook_sessions` + `notebook_session_sources`.
+
+### `POST /api/v2/presentations`
+- Request: presentation object with slides/references.
+- Writes `presentations` + `presentation_slides` + `presentation_references`.
+
+### `POST /api/v2/quizzes`
+- Request: quiz with questions.
+- Writes `quizzes` + `quiz_questions`.
+
+### `POST /api/v2/academics/grades`
+- Writes `grades`.
+
+### `POST /api/v2/tasks`
+- Writes `tasks`.
+
+### `POST /api/v2/chat/rooms`
+- Writes `chat_rooms` + `chat_members`.

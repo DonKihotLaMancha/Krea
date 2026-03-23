@@ -1,0 +1,2 @@
+-- Apply security policies from repository root.
+-- Keep this file synchronized with supabase-rls.sql.

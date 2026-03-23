@@ -1,0 +1,2 @@
+-- Apply indexes and search optimizations from repository root.
+-- Keep this file synchronized with supabase-indexes.sql.

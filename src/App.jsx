@@ -13,11 +13,13 @@ import {
   Tooltip,
 } from 'chart.js';
 import AppShell from './components/AppShell';
+import AuthPanel from './components/AuthPanel';
 import UploadCard from './components/UploadCard';
 import FlashcardDeck from './components/FlashcardDeck';
 import SubirArchivoPanel from './components/SubirArchivoPanel';
 import TablaApartados from './components/TablaApartados';
 import NotebookWorkspace from './components/NotebookWorkspace';
+import { supabase as supabaseBrowser } from './lib/supabaseClient';
 const GraficasProgreso = lazy(() => import('./components/GraficasProgreso'));
 const SesionEstudio = lazy(() => import('./components/SesionEstudio'));
 const ConceptMap = lazy(() => import('./components/ConceptMap'));
@@ -26,8 +28,6 @@ ChartJS.register(ArcElement, BarElement, Tooltip, Legend, CategoryScale, LinearS
 GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).toString();
 
 const tabs = ['Ingest', 'Flashcards', 'Notebook', 'Concept Map', 'Tasks', 'Quizzes', 'Chat', 'Presentations', 'Academics', 'AI Tutor'];
-const STUDENT_ID_KEY = 'student-assistant-student-id';
-
 function cleanAcademicText(raw) {
   let text = (raw || '')
     .replace(/[^\S\r\n]+/g, ' ')
@@ -236,15 +236,8 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
   }
 }
 
-function getOrCreateStudentId() {
-  const existing = localStorage.getItem(STUDENT_ID_KEY);
-  if (existing) return existing;
-  const created = `student-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  localStorage.setItem(STUDENT_ID_KEY, created);
-  return created;
-}
-
 async function upsertStudent(studentId, name = 'Student') {
+  if (!studentId) return;
   await fetchWithTimeout('/api/student', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -253,6 +246,7 @@ async function upsertStudent(studentId, name = 'Student') {
 }
 
 async function savePdfToLibrary({ studentId, name, content }) {
+  if (!studentId) return;
   await fetchWithTimeout('/api/library/pdf', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -261,6 +255,7 @@ async function savePdfToLibrary({ studentId, name, content }) {
 }
 
 async function saveConceptMapToLibrary({ studentId, sourceName, title, map }) {
+  if (!studentId) return;
   await fetchWithTimeout('/api/library/concept-map', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -269,6 +264,7 @@ async function saveConceptMapToLibrary({ studentId, sourceName, title, map }) {
 }
 
 async function saveNotebookOutputToLibrary({ studentId, sourceNames, outputType, output }) {
+  if (!studentId) return;
   await fetchWithTimeout('/api/library/notebook', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -277,6 +273,7 @@ async function saveNotebookOutputToLibrary({ studentId, sourceNames, outputType,
 }
 
 async function loadLibrary(studentId) {
+  if (!studentId) return { pdfs: [], maps: [], notebook: [] };
   const resp = await fetchWithTimeout(`/api/library?studentId=${encodeURIComponent(studentId)}`, {}, 20000);
   if (!resp.ok) throw new Error('Could not load library');
   return await resp.json();
@@ -412,8 +409,16 @@ async function fileToText(file, onProgress) {
   return '';
 }
 
+function displayNameFromUser(user) {
+  if (!user) return 'Student';
+  const meta = user.user_metadata || {};
+  return meta.full_name || meta.name || user.email?.split('@')[0] || 'Student';
+}
+
 export default function App() {
-  const studentId = useMemo(() => getOrCreateStudentId(), []);
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(!!supabaseBrowser);
+  const studentId = session?.user?.id ?? null;
   const [tab, setTab] = useState('Ingest');
   const [chunks, setChunks] = useState([]);
   const [cards, setCards] = useState([]);
@@ -446,6 +451,27 @@ export default function App() {
   const [isAcademicsAiBusy, setIsAcademicsAiBusy] = useState(false);
 
   useEffect(() => {
+    if (!supabaseBrowser) {
+      setAuthLoading(false);
+      return undefined;
+    }
+    let mounted = true;
+    supabaseBrowser.auth.getSession().then(({ data: { session: s } }) => {
+      if (mounted) {
+        setSession(s);
+        setAuthLoading(false);
+      }
+    });
+    const { data: sub } = supabaseBrowser.auth.onAuthStateChange((_event, s) => {
+      if (mounted) setSession(s);
+    });
+    return () => {
+      mounted = false;
+      sub.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
     let mounted = true;
     const ping = async () => {
       try {
@@ -465,10 +491,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!studentId) return undefined;
     let mounted = true;
     const bootstrapDb = async () => {
       try {
-        await upsertStudent(studentId);
+        await upsertStudent(studentId, displayNameFromUser(session?.user));
         const data = await loadLibrary(studentId);
         if (!mounted) return;
         const dbChunks = Array.isArray(data?.pdfs)
@@ -487,7 +514,7 @@ export default function App() {
     return () => {
       mounted = false;
     };
-  }, [studentId]);
+  }, [studentId, session?.user]);
 
   const avg = useMemo(() => {
     const w = grades.reduce((s, g) => s + g.weight, 0);
@@ -814,6 +841,14 @@ export default function App() {
       latestBatchAt={latestBatchAt}
       notice={notice}
       stats={stats}
+      authPanel={(
+        <AuthPanel
+          supabase={supabaseBrowser}
+          session={session}
+          loading={authLoading}
+          onAuthChange={(nextSession) => setSession(nextSession)}
+        />
+      )}
     >
       {tab === 'Ingest' ? (
         <>

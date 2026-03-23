@@ -1,0 +1,2 @@
+-- Apply the canonical schema from repository root.
+-- Keep this file synchronized with supabase-schema.sql.

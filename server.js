@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
+import crypto from 'crypto';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -26,6 +27,53 @@ function requireSupabase(res) {
   return false;
 }
 
+function formatSupabaseError(error, fallbackMessage = 'Database operation failed.') {
+  if (!error) return { error: fallbackMessage };
+  const details = {
+    message: error.message || String(error),
+    details: error.details || null,
+    hint: error.hint || null,
+    code: error.code || null,
+  };
+  return { error: fallbackMessage, details };
+}
+
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ''));
+}
+
+async function tryTableExists(tableName) {
+  if (!supabase) return false;
+  const { error } = await supabase.from(tableName).select('*', { count: 'exact', head: true }).limit(1);
+  return !error;
+}
+
+async function ensureProfile(studentId, name = 'Student') {
+  const { error } = await supabase.from('profiles').upsert(
+    { id: studentId, display_name: name },
+    { onConflict: 'id' },
+  );
+  if (error) throw error;
+}
+
+async function createDefaultNotebookSession(studentId) {
+  const { data: existing, error: existingError } = await supabase
+    .from('notebook_sessions')
+    .select('id')
+    .eq('owner_id', studentId)
+    .order('created_at', { ascending: true })
+    .limit(1);
+  if (existingError) throw existingError;
+  if (existing?.[0]?.id) return existing[0].id;
+  const { data, error } = await supabase
+    .from('notebook_sessions')
+    .insert({ owner_id: studentId, title: 'Default notebook session' })
+    .select('id')
+    .single();
+  if (error) throw error;
+  return data.id;
+}
+
 app.get('/api/health', async (_req, res) => {
   try {
     const resp = await fetch(`${OLLAMA_URL}/api/tags`);
@@ -41,14 +89,20 @@ app.post('/api/student', async (req, res) => {
   const studentId = String(req.body?.studentId || '').trim();
   const name = String(req.body?.name || 'Student').trim();
   if (!studentId) return res.status(400).json({ error: 'Missing studentId.' });
+  if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
   try {
-    const { error } = await supabase
-      .from('students')
-      .upsert({ id: studentId, name }, { onConflict: 'id' });
-    if (error) throw error;
+    await ensureProfile(studentId, name);
+    // Legacy compatibility table remains optional.
+    const hasLegacyStudents = await tryTableExists('students');
+    if (hasLegacyStudents) {
+      const { error } = await supabase
+        .from('students')
+        .upsert({ id: studentId, name }, { onConflict: 'id' });
+      if (error) throw error;
+    }
     return res.json({ ok: true, studentId, name });
   } catch (error) {
-    return res.status(500).json({ error: 'Could not save student.', details: String(error) });
+    return res.status(500).json(formatSupabaseError(error, 'Could not save student.'));
   }
 });
 
@@ -56,49 +110,65 @@ app.get('/api/library', async (req, res) => {
   if (!requireSupabase(res)) return;
   const studentId = String(req.query?.studentId || '').trim();
   if (!studentId) return res.status(400).json({ error: 'Missing studentId.' });
+  if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
   try {
-    const [{ data: pdfs, error: pdfErr }, { data: maps, error: mapsErr }, { data: notebook, error: notebookErr }] = await Promise.all([
+    const [{ data: sources, error: srcErr }, { data: maps, error: mapsErr }, { data: notebook, error: notebookErr }] = await Promise.all([
       supabase
-        .from('student_pdfs')
-        .select('id,name,content,created_at')
-        .eq('student_id', studentId)
-        .order('id', { ascending: false })
+        .from('sources')
+        .select('id,title,created_at,source_contents(cleaned_text)')
+        .eq('owner_id', studentId)
+        .eq('source_type', 'pdf')
+        .is('deleted_at', null)
+        .order('created_at', { ascending: false })
         .limit(30),
       supabase
         .from('concept_maps')
-        .select('id,source_name,title,map_json,created_at')
-        .eq('student_id', studentId)
-        .order('id', { ascending: false })
+        .select('id,title,created_at,concept_map_nodes(id,label,description),concept_map_edges(id,source_node_id,target_node_id,label)')
+        .eq('owner_id', studentId)
+        .order('created_at', { ascending: false })
         .limit(20),
       supabase
         .from('notebook_outputs')
-        .select('id,source_names,output_type,output_json,created_at')
-        .eq('student_id', studentId)
-        .order('id', { ascending: false })
+        .select('id,output_type,payload,created_at')
+        .eq('owner_id', studentId)
+        .order('created_at', { ascending: false })
         .limit(40),
     ]);
-    if (pdfErr || mapsErr || notebookErr) throw (pdfErr || mapsErr || notebookErr);
+    if (srcErr || mapsErr || notebookErr) throw (srcErr || mapsErr || notebookErr);
     return res.json({
-      pdfs: (pdfs || []).map((p) => ({ ...p, createdAt: p.created_at })),
+      pdfs: (sources || []).map((s) => ({
+        id: s.id,
+        name: s.title,
+        content: s.source_contents?.cleaned_text || '',
+        createdAt: s.created_at,
+      })),
       maps: (maps || []).map((m) => ({
-        id: m.id,
-        sourceName: m.source_name,
         title: m.title,
-        mapJson: m.map_json,
+        id: m.id,
         createdAt: m.created_at,
-        map: safeParseStoredJson(m.map_json),
+        map: {
+          title: m.title,
+          nodes: Array.isArray(m.concept_map_nodes) ? m.concept_map_nodes.map((n) => ({
+            id: n.id,
+            label: n.label,
+            description: n.description || '',
+          })) : [],
+          links: Array.isArray(m.concept_map_edges) ? m.concept_map_edges.map((e) => ({
+            source: e.source_node_id,
+            target: e.target_node_id,
+            label: e.label || '',
+          })) : [],
+        },
       })),
       notebook: (notebook || []).map((n) => ({
         id: n.id,
-        sourceNames: n.source_names,
         outputType: n.output_type,
-        outputJson: n.output_json,
         createdAt: n.created_at,
-        output: safeParseStoredJson(n.output_json),
+        output: n.payload || {},
       })),
     });
   } catch (error) {
-    return res.status(500).json({ error: 'Could not load library.', details: String(error) });
+    return res.status(500).json(formatSupabaseError(error, 'Could not load library.'));
   }
 });
 
@@ -108,26 +178,38 @@ app.post('/api/library/pdf', async (req, res) => {
   const name = String(req.body?.name || '').trim();
   const content = String(req.body?.content || '').trim();
   if (!studentId || !name || !content) return res.status(400).json({ error: 'Missing studentId/name/content.' });
+  if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
   try {
+    await ensureProfile(studentId);
     const { data: existing, error: existingError } = await supabase
-      .from('student_pdfs')
+      .from('sources')
       .select('id')
-      .eq('student_id', studentId)
-      .eq('name', name)
-      .eq('content', content)
+      .eq('owner_id', studentId)
+      .eq('title', name)
+      .eq('source_type', 'pdf')
       .limit(1);
     if (existingError) throw existingError;
     if (existing?.[0]?.id) return res.json({ ok: true, id: existing[0].id, deduped: true });
 
-    const { data, error } = await supabase
-      .from('student_pdfs')
-      .insert({ student_id: studentId, name, content })
+    const { data: source, error: sourceError } = await supabase
+      .from('sources')
+      .insert({ owner_id: studentId, title: name, source_type: 'pdf', status: 'ready' })
       .select('id')
       .single();
-    if (error) throw error;
-    return res.json({ ok: true, id: data?.id || null });
+    if (sourceError) throw sourceError;
+
+    const { error: contentError } = await supabase
+      .from('source_contents')
+      .insert({ source_id: source.id, raw_text: content, cleaned_text: content });
+    if (contentError) throw contentError;
+
+    const hasLegacyStudentPdfs = await tryTableExists('student_pdfs');
+    if (hasLegacyStudentPdfs) {
+      await supabase.from('student_pdfs').insert({ student_id: studentId, name, content });
+    }
+    return res.json({ ok: true, id: source?.id || null });
   } catch (error) {
-    return res.status(500).json({ error: 'Could not save PDF.', details: String(error) });
+    return res.status(500).json(formatSupabaseError(error, 'Could not save PDF.'));
   }
 });
 
@@ -138,21 +220,95 @@ app.post('/api/library/concept-map', async (req, res) => {
   const title = String(req.body?.title || 'Concept Map').trim();
   const map = req.body?.map;
   if (!studentId || !sourceName || !map) return res.status(400).json({ error: 'Missing studentId/sourceName/map.' });
+  if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
   try {
+    await ensureProfile(studentId);
+    let sourceId = null;
+    const { data: source } = await supabase
+      .from('sources')
+      .select('id')
+      .eq('owner_id', studentId)
+      .eq('title', sourceName)
+      .eq('source_type', 'pdf')
+      .limit(1);
+    sourceId = source?.[0]?.id || null;
+    if (!sourceId) {
+      const { data: createdSource, error: createdSourceErr } = await supabase
+        .from('sources')
+        .insert({ owner_id: studentId, title: sourceName, source_type: 'pdf', status: 'ready' })
+        .select('id')
+        .single();
+      if (createdSourceErr) throw createdSourceErr;
+      sourceId = createdSource.id;
+    }
+
     const { data, error } = await supabase
       .from('concept_maps')
       .insert({
-        student_id: studentId,
-        source_name: sourceName,
+        owner_id: studentId,
+        source_id: sourceId,
         title,
-        map_json: JSON.stringify(map),
+        version: 1,
       })
       .select('id')
       .single();
     if (error) throw error;
+
+    const nodes = Array.isArray(map?.nodes) ? map.nodes : [];
+    const links = Array.isArray(map?.links) ? map.links : [];
+    const idMap = new Map();
+    const nodeRows = nodes.map((n, idx) => {
+      const oldKey = String(n.id ?? n.label ?? `idx-${idx}`).trim();
+      const newId = crypto.randomUUID();
+      idMap.set(oldKey, newId);
+      return {
+        id: newId,
+        map_id: data.id,
+        label: String(n.label || 'Concept').trim(),
+        description: String(n.description || '').trim(),
+      };
+    });
+    if (nodeRows.length) {
+      const { error: nodesErr } = await supabase.from('concept_map_nodes').insert(nodeRows);
+      if (nodesErr) throw nodesErr;
+    }
+
+    const resolveNodeId = (ref) => {
+      const key = String(ref ?? '').trim();
+      if (idMap.has(key)) return idMap.get(key);
+      if (isUuid(key)) return key;
+      return null;
+    };
+    const edgeRows = links
+      .map((l) => {
+        const sourceId = resolveNodeId(l.source);
+        const targetId = resolveNodeId(l.target);
+        if (!sourceId || !targetId) return null;
+        return {
+          map_id: data.id,
+          source_node_id: sourceId,
+          target_node_id: targetId,
+          label: String(l.label || '').trim(),
+        };
+      })
+      .filter(Boolean);
+    if (edgeRows.length) {
+      const { error: edgesErr } = await supabase.from('concept_map_edges').insert(edgeRows);
+      if (edgesErr) throw edgesErr;
+    }
+
+    const hasLegacyConceptMaps = await tryTableExists('concept_maps_legacy');
+    if (hasLegacyConceptMaps) {
+      await supabase.from('concept_maps_legacy').insert({
+        student_id: studentId,
+        source_name: sourceName,
+        title,
+        map_json: JSON.stringify(map),
+      });
+    }
     return res.json({ ok: true, id: data?.id || null });
   } catch (error) {
-    return res.status(500).json({ error: 'Could not save concept map.', details: String(error) });
+    return res.status(500).json(formatSupabaseError(error, 'Could not save concept map.'));
   }
 });
 
@@ -163,21 +319,36 @@ app.post('/api/library/notebook', async (req, res) => {
   const outputType = String(req.body?.outputType || '').trim();
   const output = req.body?.output;
   if (!studentId || !outputType || !output) return res.status(400).json({ error: 'Missing studentId/outputType/output.' });
+  if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
   try {
+    await ensureProfile(studentId);
+    const sessionId = await createDefaultNotebookSession(studentId);
+    const allowedTypes = new Set(['source-chat', 'summary', 'study-guide', 'source-compare', 'audio-overview']);
+    const safeType = allowedTypes.has(outputType) ? outputType : 'summary';
     const { data, error } = await supabase
       .from('notebook_outputs')
       .insert({
-        student_id: studentId,
-        source_names: JSON.stringify(sourceNames),
-        output_type: outputType,
-        output_json: JSON.stringify(output),
+        session_id: sessionId,
+        owner_id: studentId,
+        output_type: safeType,
+        payload: output,
       })
       .select('id')
       .single();
     if (error) throw error;
+
+    const hasLegacyNotebook = await tryTableExists('notebook_outputs_legacy');
+    if (hasLegacyNotebook) {
+      await supabase.from('notebook_outputs_legacy').insert({
+        student_id: studentId,
+        source_names: JSON.stringify(sourceNames),
+        output_type: safeType,
+        output_json: JSON.stringify(output),
+      });
+    }
     return res.json({ ok: true, id: data?.id || null });
   } catch (error) {
-    return res.status(500).json({ error: 'Could not save notebook output.', details: String(error) });
+    return res.status(500).json(formatSupabaseError(error, 'Could not save notebook output.'));
   }
 });
 

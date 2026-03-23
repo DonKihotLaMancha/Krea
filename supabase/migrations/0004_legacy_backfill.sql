@@ -1,0 +1,2 @@
+-- Apply legacy backfill script from repository root.
+-- Keep this file synchronized with supabase-backfill.sql.

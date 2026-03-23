@@ -11,6 +11,7 @@ export default function AppShell({
   latestBatchAt,
   notice,
   stats,
+  authPanel,
   children,
 }) {
   return (
@@ -19,6 +20,7 @@ export default function AppShell({
       <main className="p-4 md:p-6">
         <div className="mx-auto w-full max-w-[1320px]">
         <TopbarStatus title={tab} modelStatus={modelStatus} latestBatchAt={latestBatchAt} />
+        {authPanel ? <div className="mb-4">{authPanel}</div> : null}
         <NoticeBanner text={notice} />
         {tab !== 'Ingest' ? (
           <StatsCards cardsCount={stats.cardsCount} tasksDone={stats.tasksDone} tasksTotal={stats.tasksTotal} avg={stats.avg} />
