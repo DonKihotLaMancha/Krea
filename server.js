@@ -674,25 +674,30 @@ app.post('/api/teacher/quiz-generate', async (req, res) => {
       .map((m) => `${m.title}\n${String(m.content || '').slice(0, 3000)}`)
       .join('\n\n')
       .slice(0, 16000);
+    const teacherPassages = buildPassagesFromSources([{ name: title, content: `${promptText}\n\n${mergedText}` }]).slice(0, 25);
     const quizPrompt = `
-Generate a quiz with ${count} questions at ${difficulty} difficulty from SOURCE_PASSAGES.
+Generate a quiz with exactly ${count} multiple-choice questions at ${difficulty} difficulty from SOURCE_PASSAGES.
 Return strict JSON:
 {
-  "topic":"${title}",
+  "topic":"${title.replace(/"/g, '\\"')}",
   "total":${count},
   "estimatedCorrect":0,
-  "sec":120
+  "sec":120,
+  "questions":[
+    {"prompt":"...","choices":["A","B","C","D"],"correctIndex":0}
+  ]
 }
+Each question: exactly 4 choices, correctIndex 0-3.
 SOURCE_PASSAGES:
-${JSON.stringify(buildPassagesFromSources([{ name: title, content: `${promptText}\n\n${mergedText}` }]).slice(0, 25))}
+${JSON.stringify(teacherPassages)}
 `;
     let result;
     try {
       const modelData = await callOllama(quizPrompt);
       const parsed = safeParseModelJson(String(modelData.response || '').trim());
-      result = normalizeQuizResult(parsed, { mode: 'quiz', count, difficulty });
+      result = normalizeQuizResult(parsed, { mode: 'quiz', count, difficulty, passages: teacherPassages });
     } catch {
-      result = buildQuizFallback({ mode: 'quiz', count, difficulty });
+      result = buildQuizFallback({ mode: 'quiz', count, difficulty, passages: teacherPassages });
     }
 
     const { data, error } = await supabase
@@ -931,20 +936,21 @@ app.post('/api/concept-map', async (req, res) => {
   const sourceJson = buildSourceJson(text);
   const prompt = `
 You are an academic concept-map generator.
-Create a concept map from university study material.
+Create a HIERARCHICAL concept map from university study material (go deeper than a flat list).
 
 Rules:
-- Return 5 to 14 nodes.
-- Keep labels concise (max 5 words).
-- Include a central node and meaningful links.
+- Return 8 to 20 nodes.
+- Each node has "level": 0 (central theme), 1 (major subtopics), 2 (details/examples), 3 (optional fine points).
+- Keep labels concise (max 6 words). descriptions: one short sentence.
+- Links connect parent concepts to children; cross-links allowed with clear labels.
 - Return strict JSON only:
 {
   "title":"...",
   "nodes":[
-    {"id":"n1","label":"...","description":"..."}
+    {"id":"n0","label":"...","description":"...","level":0}
   ],
   "links":[
-    {"source":"n1","target":"n2","label":"..."}
+    {"source":"n0","target":"n1","label":"includes"}
   ]
 }
 
@@ -954,7 +960,7 @@ ${JSON.stringify(sourceJson)}
 
   try {
     let conceptMap = await generateConceptMapWithOllama(prompt);
-    if (conceptMap.nodes.length < 4 || conceptMap.links.length < 3) {
+    if (conceptMap.nodes.length < 6 || conceptMap.links.length < 4) {
       conceptMap = buildLocalConceptMapFallback(title, sourceJson);
     }
     return res.json(conceptMap);
@@ -1124,23 +1130,32 @@ app.post('/api/quiz-generate', async (req, res) => {
   if (!sources.length) return res.status(400).json({ error: 'Missing sources.' });
   const passages = buildPassagesFromSources(sources).slice(0, 25);
   const prompt = `
-Generate a ${mode} with ${count} questions at ${difficulty} difficulty from SOURCE_PASSAGES.
-Return strict JSON:
+Generate a ${mode} with exactly ${count} multiple-choice questions at ${difficulty} difficulty from SOURCE_PASSAGES.
+Ground every question in the passages; distractors must be plausible but wrong.
+Return strict JSON only:
 {
-  "topic":"...",
+  "topic":"short topic label",
   "total":${count},
   "estimatedCorrect":0,
-  "sec":120
+  "sec":${Math.max(60, count * 45)},
+  "questions":[
+    {
+      "prompt":"question text",
+      "choices":["option A","option B","option C","option D"],
+      "correctIndex":0
+    }
+  ]
 }
+Rules: each question has exactly 4 choices; correctIndex is 0-3.
 SOURCE_PASSAGES:
 ${JSON.stringify(passages)}
 `;
   try {
     const data = await callOllama(prompt);
     const parsed = safeParseModelJson(String(data.response || '').trim());
-    return res.json(normalizeQuizResult(parsed, { mode, count, difficulty }));
+    return res.json(normalizeQuizResult(parsed, { mode, count, difficulty, passages }));
   } catch {
-    return res.json(buildQuizFallback({ mode, count, difficulty }));
+    return res.json(buildQuizFallback({ mode, count, difficulty, passages }));
   }
 });
 
@@ -1380,6 +1395,42 @@ function buildLocalApartadosFallback(sourceJson) {
   }));
 }
 
+function assignConceptLevels(nodes, links) {
+  if (!nodes.length) return;
+  const idSet = new Set(nodes.map((n) => n.id));
+  const adj = new Map();
+  for (const n of nodes) adj.set(n.id, []);
+  for (const l of links) {
+    if (idSet.has(l.source) && idSet.has(l.target)) {
+      adj.get(l.source).push(l.target);
+      adj.get(l.target).push(l.source);
+    }
+  }
+  const root =
+    nodes.find((n) => Number(n.level) === 0)?.id ||
+    nodes.find((n) => /main|central|topic|root/i.test(n.label))?.id ||
+    nodes[0].id;
+  const lev = {};
+  const q = [root];
+  lev[root] = 0;
+  const seen = new Set([root]);
+  while (q.length) {
+    const u = q.shift();
+    for (const v of adj.get(u) || []) {
+      if (!seen.has(v)) {
+        seen.add(v);
+        lev[v] = Math.min(3, lev[u] + 1);
+        q.push(v);
+      }
+    }
+  }
+  for (const n of nodes) {
+    const inferred = lev[n.id] !== undefined ? lev[n.id] : 2;
+    const fromModel = n.level;
+    n.level = Number.isFinite(fromModel) && fromModel >= 0 ? Math.min(3, Math.max(0, fromModel)) : Math.min(3, inferred);
+  }
+}
+
 function normalizeConceptMap(map) {
   const seenNode = new Set();
   const nodes = (map.nodes || [])
@@ -1387,6 +1438,7 @@ function normalizeConceptMap(map) {
       id: String(n?.id || `n${i + 1}`),
       label: String(n?.label || '').trim(),
       description: String(n?.description || '').trim(),
+      level: n?.level !== undefined && n?.level !== null ? Number(n.level) : NaN,
     }))
     .filter((n) => n.label && n.label.length >= 2)
     .filter((n) => {
@@ -1395,7 +1447,7 @@ function normalizeConceptMap(map) {
       seenNode.add(key);
       return true;
     })
-    .slice(0, 14);
+    .slice(0, 22);
 
   const validIds = new Set(nodes.map((n) => n.id));
   const links = (map.links || [])
@@ -1406,25 +1458,39 @@ function normalizeConceptMap(map) {
     }))
     .filter((l) => l.source && l.target && l.source !== l.target)
     .filter((l) => validIds.has(l.source) && validIds.has(l.target))
-    .slice(0, 28);
+    .slice(0, 40);
+
+  assignConceptLevels(nodes, links);
 
   return { title: map.title || 'Concept Map', nodes, links };
 }
 
 function buildLocalConceptMapFallback(title, sourceJson) {
-  const labels = [...(sourceJson.topics || [])].slice(0, 10);
+  const labels = [...(sourceJson.topics || [])].slice(0, 12);
   const core = labels.length ? labels : ['Introduction', 'Core Concepts', 'Methods', 'Applications', 'Summary'];
-  const nodes = [{ id: 'n0', label: title || 'Main Topic', description: 'Main concept from uploaded document.' }];
+  const nodes = [
+    {
+      id: 'n0',
+      label: String(title || 'Main Topic').slice(0, 40),
+      description: 'Main concept from uploaded document.',
+      level: 0,
+    },
+  ];
   core.forEach((label, i) => {
+    const lv = i < 4 ? 1 : 2;
     nodes.push({
       id: `n${i + 1}`,
-      label: String(label).split(/\s+/).slice(0, 4).join(' '),
-      description: sourceJson.facts?.[i] || '',
+      label: String(label).split(/\s+/).slice(0, 5).join(' '),
+      description: String(sourceJson.facts?.[i] || '').slice(0, 200),
+      level: lv,
     });
   });
-  const links = nodes.slice(1).map((n) => ({ source: 'n0', target: n.id, label: 'relates to' }));
-  for (let i = 2; i < nodes.length; i += 1) {
-    links.push({ source: nodes[i - 1].id, target: nodes[i].id, label: 'builds on' });
+  const links = nodes.slice(1, 5).map((n) => ({ source: 'n0', target: n.id, label: 'includes' }));
+  for (let i = 5; i < nodes.length; i += 1) {
+    links.push({ source: nodes[1 + ((i - 5) % 4)].id, target: nodes[i].id, label: 'extends' });
+  }
+  for (let i = 2; i < Math.min(nodes.length, 8); i += 1) {
+    links.push({ source: nodes[i - 1].id, target: nodes[i].id, label: 'related' });
   }
   return { title: title || 'Concept Map', nodes, links };
 }
@@ -1564,25 +1630,75 @@ function buildAudioScriptFallback(passages) {
   return `Welcome to your study audio overview.\n\nToday we cover the key points from your selected documents:\n${bullets}\n\nEnd of overview.`;
 }
 
-function normalizeQuizResult(parsed, { mode, count, difficulty }) {
+function normalizeQuizQuestions(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((x, i) => {
+      const prompt = String(x?.prompt || x?.question || '').trim();
+      const choices = Array.isArray(x?.choices)
+        ? x.choices.map((c) => String(c).trim()).filter(Boolean).slice(0, 6)
+        : [];
+      let correctIndex = Number(x?.correctIndex);
+      if (!Number.isFinite(correctIndex) || correctIndex < 0 || correctIndex >= choices.length) correctIndex = 0;
+      return { id: String(x?.id || `q-${i}`), prompt, choices, correctIndex };
+    })
+    .filter((q) => q.prompt && q.choices.length >= 2);
+}
+
+function buildQuizQuestionsFromPassages(passages, count) {
+  const list = Array.isArray(passages) && passages.length ? passages : [{ source: 'material', excerpt: 'Review your uploaded source carefully.' }];
+  const n = Math.max(3, Math.min(30, count));
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const base = list[i % list.length];
+    const excerpt = String(base?.excerpt || 'Review the passage.').slice(0, 260);
+    const short = excerpt.slice(0, 110);
+    out.push({
+      id: `fb-${i}`,
+      prompt: `According to "${String(base?.source || 'source')}", which option best matches this idea? "${short}${excerpt.length > 110 ? '…' : ''}"`,
+      choices: [
+        short,
+        'The passage does not support this interpretation.',
+        'This confuses two different concepts from the text.',
+        'This introduces an unrelated example.',
+      ],
+      correctIndex: 0,
+    });
+  }
+  return out;
+}
+
+function normalizeQuizResult(parsed, { mode, count, difficulty, passages }) {
+  const normalized = normalizeQuizQuestions(parsed?.questions);
+  const questions =
+    normalized.length >= Math.min(3, count) ? normalized.slice(0, count) : buildQuizQuestionsFromPassages(passages || [], count);
+  const total = questions.length;
+  const est = Number(parsed?.estimatedCorrect);
+  const correctEst = Number.isFinite(est)
+    ? Math.max(0, Math.min(total, est))
+    : Math.min(total, Math.round(total * 0.72));
   return {
     id: Date.now(),
     topic: String(parsed?.topic || mode.toUpperCase()).trim(),
-    total: Math.max(1, Number(parsed?.total || count)),
-    correct: Math.max(0, Math.min(Number(parsed?.total || count), Number(parsed?.estimatedCorrect || Math.round(count * 0.7)))),
-    sec: Math.max(30, Number(parsed?.sec || 120)),
+    total,
+    correct: correctEst,
+    sec: Math.max(30, Number(parsed?.sec || Math.max(120, total * 45))),
     difficulty,
+    questions,
   };
 }
 
-function buildQuizFallback({ mode, count, difficulty }) {
+function buildQuizFallback({ mode, count, difficulty, passages }) {
+  const questions = buildQuizQuestionsFromPassages(passages || [], count);
+  const total = questions.length;
   return {
     id: Date.now(),
-    topic: mode.toUpperCase(),
-    total: count,
-    correct: Math.round(count * 0.7),
+    topic: `${mode.toUpperCase()} (backup)`,
+    total,
+    correct: Math.round(total * 0.7),
     sec: 120,
     difficulty,
+    questions,
   };
 }
 

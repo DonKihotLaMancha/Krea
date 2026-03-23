@@ -12,6 +12,15 @@ export default {
         accent: '#4f46e5',
         accent2: '#7c3aed',
         accent3: '#0ea5e9',
+        canvas: {
+          page: '#f5f5f5',
+          nav: '#394b58',
+          navHover: '#2d3b45',
+          border: '#e0e0e0',
+          primary: '#0374b7',
+          primaryHover: '#03659f',
+          navActive: '#4a5f6e',
+        },
       },
       borderRadius: {
         xl2: '16px',

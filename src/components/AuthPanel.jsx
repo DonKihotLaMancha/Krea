@@ -67,7 +67,7 @@ export default function AuthPanel({ supabase, session, loading, onAuthChange }) 
             </div>
           ) : (
             <>
-              <p className="mb-2 text-sm font-medium text-indigo-950">Sign in to sync your data</p>
+              <p className="mb-2 text-sm font-medium text-slate-900">Sign in to sync your data</p>
               <div className="grid gap-2">
                 <input
                   className="input text-sm"

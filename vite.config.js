@@ -18,15 +18,11 @@ export default defineConfig({
         icons: [],
       },
       workbox: {
+        // Never cache API — long Ollama calls must not hit SW timeout/cache.
         runtimeCaching: [
           {
             urlPattern: ({ url }) => url.pathname.startsWith('/api/'),
-            handler: 'NetworkFirst',
-            options: {
-              cacheName: 'api-cache',
-              networkTimeoutSeconds: 5,
-              expiration: { maxEntries: 60, maxAgeSeconds: 60 * 60 * 24 },
-            },
+            handler: 'NetworkOnly',
           },
         ],
       },

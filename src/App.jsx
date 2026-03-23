@@ -28,7 +28,11 @@ const SesionEstudio = lazy(() => import('./components/SesionEstudio'));
 const ConceptMap = lazy(() => import('./components/ConceptMap'));
 
 ChartJS.register(ArcElement, BarElement, Tooltip, Legend, CategoryScale, LinearScale, PointElement, LineElement);
-GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).toString();
+try {
+  GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).toString();
+} catch (e) {
+  console.warn('[Student Assistant] PDF.js worker URL could not be set:', e);
+}
 
 const tabs = ['Ingest', 'Flashcards', 'Notebook', 'Concept Map', 'Tasks', 'Quizzes', 'Chat', 'Presentations', 'Academics', 'AI Tutor', 'Teacher Window'];
 
@@ -346,16 +350,13 @@ function slideCountLabel(count) {
   return `${n} slide${n === 1 ? '' : 's'}`;
 }
 
-function imagePlaceholderFromSuggestion(text) {
-  const safe = String(text || 'Presentation visual').slice(0, 90);
-  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='1280' height='720'>
-  <defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop stop-color='#dbeafe'/><stop offset='1' stop-color='#bfdbfe'/></linearGradient></defs>
-  <rect width='100%' height='100%' fill='url(#g)'/>
-  <rect x='40' y='40' width='1200' height='640' rx='18' fill='white' fill-opacity='0.65'/>
-  <text x='80' y='120' font-family='Inter, Arial, sans-serif' font-size='38' fill='#1e3a8a'>Image concept</text>
-  <text x='80' y='180' font-family='Inter, Arial, sans-serif' font-size='28' fill='#1f2937'>${safe.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</text>
-  </svg>`;
-  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+/** Deterministic stock-style placeholder (same deck + slide = same image). Not topic-specific without a paid API. */
+function slideHeroImageUrl(deckTitle, slideIndex, slideTitle) {
+  const raw = `${deckTitle || 'deck'}|${slideIndex}|${slideTitle || ''}`;
+  let h = 0;
+  for (let i = 0; i < raw.length; i += 1) h = (Math.imul(31, h) + raw.charCodeAt(i)) | 0;
+  const seed = `sa${Math.abs(h).toString(36)}`;
+  return `https://picsum.photos/seed/${seed}/960/540`;
 }
 
 function buildSlideGraphData(slide) {
@@ -382,18 +383,24 @@ function buildSlideGraphData(slide) {
 }
 
 function normalizeStudyCards(cardsInput) {
-  return (cardsInput || []).map((c, i) => ({
-    ...c,
-    id: c.id || `${Date.now()}-${i}`,
-    question: c.question || c.frente || 'Question',
-    answer: c.answer || c.atras || '',
-    tema: c.tema || 'General',
-    dificultad: c.dificultad || 'media',
-    proxima_revision: c.proxima_revision || new Date().toISOString().split('T')[0],
-    intervalo_dias: Number(c.intervalo_dias || 1),
-    veces_bien: Number(c.veces_bien || 0),
-    veces_mal: Number(c.veces_mal || 0),
-  }));
+  const base = new Date();
+  base.setHours(0, 0, 0, 0);
+  return (cardsInput || []).map((c, i) => {
+    const d = new Date(base);
+    d.setDate(d.getDate() + i);
+    return {
+      ...c,
+      id: c.id || `${Date.now()}-${i}`,
+      question: c.question || c.frente || 'Question',
+      answer: c.answer || c.atras || '',
+      tema: c.tema || 'General',
+      dificultad: c.dificultad || 'media',
+      proxima_revision: c.proxima_revision || d.toISOString().split('T')[0],
+      intervalo_dias: Number(c.intervalo_dias || 1),
+      veces_bien: Number(c.veces_bien || 0),
+      veces_mal: Number(c.veces_mal || 0),
+    };
+  });
 }
 
 async function extractPdfText(file, onProgress) {
@@ -444,7 +451,6 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(!!supabaseBrowser);
   const studentId = session?.user?.id ?? null;
-  const [theme, setTheme] = useState('light');
   const [isFocusMode, setIsFocusMode] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [isCommandOpen, setIsCommandOpen] = useState(false);
@@ -511,10 +517,6 @@ export default function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
-
-  useEffect(() => {
-    document.body.dataset.theme = theme;
-  }, [theme]);
 
   useEffect(() => {
     let mounted = true;
@@ -972,8 +974,6 @@ export default function App() {
       latestBatchAt={latestBatchAt}
       notice={notice}
       authPanel={<AuthPanel supabase={supabaseBrowser} session={session} loading={authLoading} onAuthChange={(nextSession) => setSession(nextSession)} />}
-      theme={theme}
-      setTheme={setTheme}
       isFocusMode={isFocusMode}
       setIsFocusMode={setIsFocusMode}
       onOpenSearch={() => setIsCommandOpen(true)}
@@ -1048,6 +1048,7 @@ export default function App() {
         <NotebookWorkspace
           chunks={chunks}
           isBusy={isNotebookBusy}
+          onError={(msg) => setNotice(msg)}
           conceptMapData={conceptMapData}
           onCitationSelect={(citation) => {
             if (citation?.source) setNotice(`Citation selected: ${citation.source}`);
@@ -1199,11 +1200,12 @@ export default function App() {
           setTutorMessages={setTutorMessages}
           chunks={chunks}
           isBusy={isTutorBusy}
+          onNotify={setNotice}
           onAsk={async (prompt) => {
             setIsTutorBusy(true);
             setNotice('Powered by Ollama: AI Tutor is thinking...');
             try {
-              const sources = (chunks.length ? [chunks[0]] : []).map((c) => ({ name: c.name, content: c.content }));
+              const sources = chunks.slice(0, 5).map((c) => ({ name: c.name, content: c.content }));
               const data = await tutorChatWithOllama({ prompt, sources });
               setNotice('Powered by Ollama: tutor response ready.');
               return String(data?.reply || '').trim();
@@ -1231,10 +1233,28 @@ export default function App() {
 }
 
 function Quizzes({ config, setConfig, onGenerate, results, isGenerating }) {
+  const [answers, setAnswers] = useState({});
+  const [submitted, setSubmitted] = useState({});
+
+  const answerKey = (quizId, qi) => `${quizId}-${qi}`;
+  const setAnswer = (quizId, qi, choiceIdx) => {
+    setAnswers((a) => ({ ...a, [answerKey(quizId, qi)]: choiceIdx }));
+  };
+
+  const submitQuiz = (quiz) => {
+    const qs = quiz.questions || [];
+    let correct = 0;
+    qs.forEach((q, i) => {
+      const pick = answers[answerKey(quiz.id, i)];
+      if (pick === q.correctIndex) correct += 1;
+    });
+    setSubmitted((s) => ({ ...s, [quiz.id]: { correct, total: qs.length } }));
+  };
+
   return (
     <section className="panel">
       <h3 className="mb-3 text-lg font-semibold">Quiz / Exam Generator</h3>
-      <p className="mb-2 text-xs text-muted">Powered by Ollama</p>
+      <p className="mb-2 text-xs text-muted">Powered by Ollama — multiple-choice questions from your PDF text.</p>
       <div className="mb-3 grid grid-cols-1 gap-2 md:grid-cols-4">
         <select className="input" value={config.mode} onChange={(e) => setConfig((c) => ({ ...c, mode: e.target.value }))}>
           <option value="quiz">Quiz</option>
@@ -1244,19 +1264,82 @@ function Quizzes({ config, setConfig, onGenerate, results, isGenerating }) {
         <select className="input" value={config.difficulty} onChange={(e) => setConfig((c) => ({ ...c, difficulty: e.target.value }))}>
           <option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option>
         </select>
-        <input className="input" type="number" value={config.count} onChange={(e) => setConfig((c) => ({ ...c, count: e.target.value }))} />
-        <button className="btn-primary" disabled={isGenerating} onClick={onGenerate}>
+        <input className="input" type="number" min={3} max={30} value={config.count} onChange={(e) => setConfig((c) => ({ ...c, count: e.target.value }))} />
+        <button type="button" className="btn-primary" disabled={isGenerating} onClick={onGenerate}>
           {isGenerating ? 'Generating...' : 'Generate'}
         </button>
       </div>
-      <div className="mb-3 inline-flex items-center rounded-full border border-border bg-slate-50 px-3 py-1 text-xs">Timer chip: 02:00</div>
-      <ul className="space-y-2">
-        {results.map((r) => (
-          <li key={r.id} className="rounded-lg border border-border bg-white px-3 py-2 text-sm">
-            <strong>{r.topic}</strong> ({r.difficulty}) - {r.correct}/{r.total}
-          </li>
-        ))}
+      <ul className="space-y-4">
+        {results.map((r) => {
+          const qs = Array.isArray(r.questions) ? r.questions : [];
+          const done = submitted[r.id];
+          return (
+            <li key={r.id} className="rounded-xl border border-border bg-white p-4 text-sm shadow-sm">
+              <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+                <strong className="text-base text-slate-900">{r.topic}</strong>
+                <span className="text-xs text-muted">
+                  {r.difficulty} · suggested time ~{Math.ceil((r.sec || 120) / 60)} min
+                  {done ? (
+                    <span className="ml-2 font-semibold text-indigo-700">
+                      Your score: {done.correct}/{done.total}
+                    </span>
+                  ) : (
+                    <span className="ml-2">AI estimate: {r.correct}/{r.total}</span>
+                  )}
+                </span>
+              </div>
+              {qs.length ? (
+                <div className="space-y-4">
+                  {qs.map((q, qi) => (
+                    <div key={q.id || qi} className="rounded-lg border border-slate-100 bg-slate-50/80 p-3">
+                      <p className="mb-2 font-medium text-slate-800">
+                        {qi + 1}. {q.prompt}
+                      </p>
+                      <ul className="space-y-1.5">
+                        {(q.choices || []).map((c, ci) => {
+                          const picked = answers[answerKey(r.id, qi)];
+                          const show = done;
+                          const isCorrect = ci === q.correctIndex;
+                          const isPicked = picked === ci;
+                          let rowClass = 'rounded-lg border px-2 py-1.5 text-xs ';
+                          if (show) {
+                            rowClass += isCorrect ? 'border-emerald-300 bg-emerald-50' : isPicked ? 'border-rose-200 bg-rose-50' : 'border-border bg-white';
+                          } else {
+                            rowClass += isPicked ? 'border-indigo-300 bg-indigo-50' : 'border-border bg-white';
+                          }
+                          return (
+                            <li key={ci} className={rowClass}>
+                              <label className="flex cursor-pointer items-start gap-2">
+                                <input
+                                  type="radio"
+                                  className="mt-0.5"
+                                  name={`quiz-${r.id}-q-${qi}`}
+                                  checked={picked === ci}
+                                  disabled={!!done}
+                                  onChange={() => setAnswer(r.id, qi, ci)}
+                                />
+                                <span>{c}</span>
+                              </label>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  ))}
+                  {!done ? (
+                    <button type="button" className="btn-primary" onClick={() => submitQuiz(r)}>
+                      Submit answers
+                    </button>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="text-xs text-muted">No questions in this result (regenerate).</p>
+              )}
+            </li>
+          );
+        })}
       </ul>
+      {!results.length ? <p className="text-sm text-muted">Generate a quiz from your latest uploaded PDF content.</p> : null}
     </section>
   );
 }
@@ -1482,27 +1565,34 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
                 </ul>
                 <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
                   <div className="rounded-lg border border-border bg-slate-50 p-2">
-                    <p className="mb-1 text-xs font-medium text-muted">Visual</p>
+                    <p className="mb-1 text-xs font-medium text-muted">Visual (illustrative)</p>
                     <img
-                      src={imagePlaceholderFromSuggestion(s.imageSuggestion || s.title)}
-                      alt={s.imageSuggestion || s.title}
-                      className="h-40 w-full rounded-md border border-border object-cover"
+                      src={slideHeroImageUrl(previewPresentation.title, idx, s.title)}
+                      alt=""
+                      loading="lazy"
+                      className="h-44 w-full rounded-md border border-border object-cover"
                     />
-                    {s.imageSuggestion ? <p className="mt-1 text-xs text-muted">{s.imageSuggestion}</p> : null}
+                    <p className="mt-1 text-[11px] leading-snug text-muted">
+                      Placeholder photo from Picsum (seeded by slide). AI suggestion: {s.imageSuggestion || '—'}
+                    </p>
                   </div>
                   <div className="rounded-lg border border-border bg-slate-50 p-2">
                     <p className="mb-1 text-xs font-medium text-muted">Graph</p>
-                    <div className="h-44">
-                      <Bar
-                        data={buildSlideGraphData(s)}
-                        options={{
-                          responsive: true,
-                          maintainAspectRatio: false,
-                          plugins: { legend: { display: false } },
-                          scales: { y: { beginAtZero: true, ticks: { stepSize: 2 } } },
-                        }}
-                      />
-                    </div>
+                    {(s.bullets || []).length >= 2 ? (
+                      <div className="h-44">
+                        <Bar
+                          data={buildSlideGraphData(s)}
+                          options={{
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: { legend: { display: false } },
+                            scales: { y: { beginAtZero: true, ticks: { stepSize: 2 } } },
+                          }}
+                        />
+                      </div>
+                    ) : (
+                      <p className="py-6 text-center text-xs text-muted">Add at least two bullet points to show a simple emphasis chart.</p>
+                    )}
                     {s.graphSuggestion ? <p className="mt-1 text-xs text-muted">{s.graphSuggestion}</p> : null}
                   </div>
                 </div>
@@ -1703,13 +1793,21 @@ function Academics({
   );
 }
 
-function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy }) {
+function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, chunks = [], onNotify }) {
   const [prompt, setPrompt] = useState('');
   const [isListening, setIsListening] = useState(false);
+  const [voiceHint, setVoiceHint] = useState('');
 
   const startVoiceInput = () => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
+    if (!SpeechRecognition) {
+      const msg =
+        'Voice input is not available in this browser. Use Chrome or Edge on desktop, or ensure the page is served over HTTPS (localhost is OK).';
+      setVoiceHint(msg);
+      onNotify?.(msg);
+      return;
+    }
+    setVoiceHint('');
     const rec = new SpeechRecognition();
     rec.lang = 'en-US';
     rec.interimResults = false;
@@ -1720,8 +1818,24 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy }) {
       setPrompt((prev) => `${prev} ${transcript}`.trim());
     };
     rec.onend = () => setIsListening(false);
-    rec.onerror = () => setIsListening(false);
-    rec.start();
+    rec.onerror = (event) => {
+      setIsListening(false);
+      const code = event?.error || 'unknown';
+      const msg =
+        code === 'not-allowed'
+          ? 'Microphone permission denied — allow mic for this site in browser settings.'
+          : `Speech recognition error: ${code}`;
+      setVoiceHint(msg);
+      onNotify?.(msg);
+    };
+    try {
+      rec.start();
+    } catch (e) {
+      setIsListening(false);
+      const msg = e?.message || 'Could not start speech recognition.';
+      setVoiceHint(msg);
+      onNotify?.(msg);
+    }
   };
 
   const speakText = (text) => {
@@ -1736,10 +1850,15 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy }) {
   return (
     <section className="panel">
       <h3 className="mb-3 text-lg font-semibold">AI Tutor</h3>
-      <p className="mb-2 text-xs text-muted">Powered by Ollama</p>
+      <p className="mb-2 text-xs text-muted">
+        Powered by Ollama. Uses up to {Math.min(5, chunks.length || 0)} uploaded PDF{chunks.length === 1 ? '' : 's'} for context
+        {chunks.length ? ` (${chunks.slice(0, 5).map((c) => c.name).join(', ')})` : ' — upload PDFs in Ingest for source-grounded answers.'}.
+      </p>
+      {voiceHint ? <p className="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-950">{voiceHint}</p> : null}
       <textarea className="input min-h-24" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Ask study guidance..." />
       <div className="mt-2 flex flex-wrap gap-2">
         <button
+          type="button"
           className="btn-primary"
           disabled={isBusy}
           onClick={async () => {
@@ -1753,11 +1872,19 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy }) {
         >
           {isBusy ? 'Thinking...' : 'Ask Tutor'}
         </button>
-        <button className="btn-ghost" onClick={startVoiceInput} disabled={isListening}>
+        <button type="button" className="btn-ghost" onClick={startVoiceInput} disabled={isListening || isBusy}>
           {isListening ? 'Listening...' : 'Push-to-talk'}
         </button>
       </div>
-      <ul className="mt-3 space-y-2">{tutorMessages.map((m) => <li key={m.id} className="rounded-lg border border-border bg-white px-3 py-2 text-sm"><b>You:</b> {m.you}<br /><b>Tutor:</b> {m.tutor}</li>)}</ul>
+      <ul className="mt-3 space-y-2">
+        {tutorMessages.map((m) => (
+          <li key={m.id} className="rounded-lg border border-border bg-white px-3 py-2 text-sm">
+            <b>You:</b> {m.you}
+            <br />
+            <b>Tutor:</b> {m.tutor}
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }

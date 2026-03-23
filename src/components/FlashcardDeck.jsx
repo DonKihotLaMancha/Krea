@@ -11,15 +11,23 @@ export default function FlashcardDeck({
   onClear,
 }) {
   const currentCard = cards[0];
-  const urgent = cards
-    .map((c) => {
-      const due = c.proxima_revision ? new Date(c.proxima_revision) : null;
-      const daysLate = due ? Math.floor((Date.now() - due.getTime()) / (1000 * 60 * 60 * 24)) : 0;
-      const wrongWeight = Number(c.veces_mal || c.wrong || 0) * 2;
-      const urgency = Math.max(0, daysLate) + wrongWeight;
-      return { ...c, urgency };
-    })
+  const scored = cards.map((c) => {
+    const due = c.proxima_revision ? new Date(c.proxima_revision) : null;
+    const daysLate = due ? Math.floor((Date.now() - due.getTime()) / (1000 * 60 * 60 * 24)) : 0;
+    const wrongWeight = Number(c.veces_mal || c.wrong || 0) * 2;
+    const urgency = Math.max(0, daysLate) + wrongWeight;
+    return { ...c, urgency };
+  });
+  const maxU = scored.reduce((m, c) => Math.max(m, c.urgency), 0);
+  const seenQ = new Set();
+  const urgent = scored
     .sort((a, b) => b.urgency - a.urgency)
+    .filter((c) => {
+      const key = String(c.question || '').slice(0, 48);
+      if (seenQ.has(key)) return false;
+      seenQ.add(key);
+      return true;
+    })
     .slice(0, 3);
   return (
     <section className="panel">
@@ -34,13 +42,19 @@ export default function FlashcardDeck({
           {urgent.length ? (
             <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 p-3">
               <p className="text-xs font-semibold text-amber-900">Daily Review (SRS urgency)</p>
-              <ul className="mt-1 space-y-1 text-xs text-amber-800">
-                {urgent.map((u) => (
-                  <li key={`u-${u.id}`}>
-                    {String(u.question).slice(0, 80)}... <span className="font-semibold">Urgency {u.urgency}</span>
-                  </li>
-                ))}
-              </ul>
+              {maxU <= 0 ? (
+                <p className="mt-1 text-xs text-amber-800">Nothing overdue — you&apos;re caught up. Keep reviewing to stay ahead.</p>
+              ) : (
+                <ul className="mt-1 space-y-1 text-xs text-amber-800">
+                  {urgent.map((u) => (
+                    <li key={`u-${u.id}`}>
+                      {String(u.question).slice(0, 80)}
+                      {String(u.question).length > 80 ? '…' : ''}{' '}
+                      <span className="font-semibold">Urgency {u.urgency}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           ) : null}
           <p className="mb-2 text-xs text-muted">Card 1 of {cards.length}</p>

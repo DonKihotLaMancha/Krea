@@ -1,13 +1,31 @@
+import './styles.css';
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import { registerSW } from 'virtual:pwa-register';
 import App from './App';
-import './styles.css';
+import ErrorBoundary from './ErrorBoundary';
 
-registerSW({ immediate: true });
+const rootEl = document.getElementById('root');
+if (!rootEl) {
+  document.body.textContent = 'Missing #root — check index.html.';
+} else {
+  createRoot(rootEl).render(
+    <React.StrictMode>
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
+    </React.StrictMode>,
+  );
+}
 
-createRoot(document.getElementById('root')).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
+// Register PWA after first paint so a SW failure can never block React.
+queueMicrotask(() => {
+  import('virtual:pwa-register')
+    .then(({ registerSW }) => {
+      try {
+        registerSW({ immediate: true });
+      } catch (e) {
+        console.warn('[Student Assistant] Service worker registration:', e);
+      }
+    })
+    .catch((e) => console.warn('[Student Assistant] PWA module skipped:', e));
+});
