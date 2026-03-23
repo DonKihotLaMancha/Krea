@@ -149,6 +149,59 @@ Create exactly ${requestedSlides} slides.
   }
 });
 
+app.post('/api/sections', async (req, res) => {
+  const text = String(req.body?.text || '').trim();
+  const title = String(req.body?.title || 'Document').trim();
+  if (!text) {
+    return res.status(400).json({ error: 'Missing text.' });
+  }
+
+  const sourceJson = buildSourceJson(text);
+  const prompt = `
+You are an academic document analyst.
+Extract only the main sections/topics from the provided source.
+
+Rules:
+- Return 4 to 12 main sections.
+- Keep names concise (3-8 words).
+- Do not include subsections.
+- Use source facts only.
+- Return valid JSON only:
+{
+  "apartados":[
+    {"id":"a1","nombre":"...","descripcion":"..."}
+  ]
+}
+
+DOCUMENT_TITLE:
+${title}
+
+SOURCE_JSON:
+${JSON.stringify(sourceJson)}
+`;
+
+  try {
+    let apartados = await generateSectionsWithOllama(prompt);
+    if (!apartados.length) {
+      const fallbackPrompt = `
+Return strict JSON only:
+{
+  "apartados":[
+    {"id":"a1","nombre":"Main concept","descripcion":"Brief description from source."}
+  ]
+}
+Generate between 4 and 8 items.
+SOURCE_JSON:
+${JSON.stringify(sourceJson)}
+`;
+      apartados = await generateSectionsWithOllama(fallbackPrompt);
+    }
+    return res.json({ apartados });
+  } catch (error) {
+    return res.status(500).json({ error: 'Could not extract sections.', details: String(error) });
+  }
+});
+
 async function generateCardsWithOllama(prompt) {
   const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
     method: 'POST',
@@ -225,6 +278,34 @@ async function generatePresentationWithOllama(prompt) {
 
   const finalReferences = references.length ? references : buildScholarReferencesFromSlides(title, slides);
   return { title, slides, references: finalReferences };
+}
+
+async function generateSectionsWithOllama(prompt) {
+  const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: OLLAMA_MODEL,
+      prompt,
+      stream: false,
+      format: 'json',
+      options: { temperature: 0.2 },
+    }),
+  });
+  if (!resp.ok) throw new Error('Failed to query Ollama.');
+  const data = await resp.json();
+  const raw = String(data.response || '').trim();
+  const parsed = safeParseModelJson(raw);
+  return Array.isArray(parsed?.apartados)
+    ? parsed.apartados
+        .filter((a) => a?.nombre)
+        .slice(0, 12)
+        .map((a, i) => ({
+          id: String(a.id || `a${i + 1}`),
+          nombre: String(a.nombre || '').trim(),
+          descripcion: String(a.descripcion || '').trim(),
+        }))
+    : [];
 }
 
 function buildScholarReferencesFromSlides(title, slides) {

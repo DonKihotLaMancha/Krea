@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist';
-import { Doughnut, Line } from 'react-chartjs-2';
+import { Bar, Doughnut, Line } from 'react-chartjs-2';
 import {
   ArcElement,
+  BarElement,
   CategoryScale,
   Chart as ChartJS,
   Legend,
@@ -15,7 +16,7 @@ import AppShell from './components/AppShell';
 import UploadCard from './components/UploadCard';
 import FlashcardDeck from './components/FlashcardDeck';
 
-ChartJS.register(ArcElement, Tooltip, Legend, CategoryScale, LinearScale, PointElement, LineElement);
+ChartJS.register(ArcElement, BarElement, Tooltip, Legend, CategoryScale, LinearScale, PointElement, LineElement);
 GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).toString();
 
 const tabs = ['Ingest', 'Flashcards', 'Tasks', 'Quizzes', 'Chat', 'Presentations', 'Academics', 'AI Tutor'];
@@ -61,6 +62,17 @@ async function generateCardsWithOllama(text) {
   if (!resp.ok) throw new Error('Ollama API error');
   const data = await resp.json();
   return Array.isArray(data.cards) ? data.cards : [];
+}
+
+async function generateSectionsWithOllama({ text, title }) {
+  const resp = await fetch('/api/sections', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, title }),
+  });
+  if (!resp.ok) throw new Error('Sections API error');
+  const data = await resp.json();
+  return Array.isArray(data.apartados) ? data.apartados : [];
 }
 
 async function generatePresentationWithOllama({ topic, promptText, sources = [], slides = 8 }) {
@@ -120,6 +132,56 @@ function slideCountLabel(count) {
   return `${n} slide${n === 1 ? '' : 's'}`;
 }
 
+function imagePlaceholderFromSuggestion(text) {
+  const safe = String(text || 'Presentation visual').slice(0, 90);
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='1280' height='720'>
+  <defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop stop-color='#dbeafe'/><stop offset='1' stop-color='#bfdbfe'/></linearGradient></defs>
+  <rect width='100%' height='100%' fill='url(#g)'/>
+  <rect x='40' y='40' width='1200' height='640' rx='18' fill='white' fill-opacity='0.65'/>
+  <text x='80' y='120' font-family='Inter, Arial, sans-serif' font-size='38' fill='#1e3a8a'>Image concept</text>
+  <text x='80' y='180' font-family='Inter, Arial, sans-serif' font-size='28' fill='#1f2937'>${safe.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</text>
+  </svg>`;
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+}
+
+function buildSlideGraphData(slide) {
+  const labels = (slide?.bullets || []).slice(0, 5).map((b, i) => {
+    const short = String(b).split(' ').slice(0, 3).join(' ');
+    return short || `Point ${i + 1}`;
+  });
+  const values = (slide?.bullets || []).slice(0, 5).map((b, i) => {
+    const words = String(b).split(/\s+/).filter(Boolean).length;
+    return Math.max(2, Math.min(12, words + i));
+  });
+  return {
+    labels: labels.length ? labels : ['Point 1', 'Point 2', 'Point 3'],
+    datasets: [
+      {
+        label: 'Relative emphasis',
+        data: values.length ? values : [4, 6, 5],
+        backgroundColor: 'rgba(37,99,235,0.45)',
+        borderColor: '#2563eb',
+        borderWidth: 1,
+      },
+    ],
+  };
+}
+
+function normalizeStudyCards(cardsInput) {
+  return (cardsInput || []).map((c, i) => ({
+    ...c,
+    id: c.id || `${Date.now()}-${i}`,
+    question: c.question || c.frente || 'Question',
+    answer: c.answer || c.atras || '',
+    tema: c.tema || 'General',
+    dificultad: c.dificultad || 'media',
+    proxima_revision: c.proxima_revision || new Date().toISOString().split('T')[0],
+    intervalo_dias: Number(c.intervalo_dias || 1),
+    veces_bien: Number(c.veces_bien || 0),
+    veces_mal: Number(c.veces_mal || 0),
+  }));
+}
+
 async function extractPdfText(file, onProgress) {
   const buffer = await file.arrayBuffer();
   const pdf = await getDocument({ data: buffer }).promise;
@@ -168,6 +230,7 @@ export default function App() {
   const [messages, setMessages] = useState([]);
   const [room, setRoom] = useState('global');
   const [presentations, setPresentations] = useState([]);
+  const [apartados, setApartados] = useState([]);
   const [grades, setGrades] = useState([]);
   const [simulations, setSimulations] = useState([]);
   const [tutorMessages, setTutorMessages] = useState([]);
@@ -178,6 +241,8 @@ export default function App() {
   const [generationProgress, setGenerationProgress] = useState(0);
   const [generationStage, setGenerationStage] = useState('');
   const [generationIndeterminate, setGenerationIndeterminate] = useState(false);
+  const [isAnalyzingSections, setIsAnalyzingSections] = useState(false);
+  const [studyMode, setStudyMode] = useState(null);
   const [modelStatus, setModelStatus] = useState({ ok: false, model: 'qwen2.5:7b' });
   const [quizConfig, setQuizConfig] = useState({ mode: 'quiz', difficulty: 'medium', count: 10 });
 
@@ -222,7 +287,8 @@ export default function App() {
     try {
       const aiCards = await generateCardsWithOllama(chunk.content);
       if (aiCards.length) {
-        setCards((prev) => (append ? [...prev, ...aiCards] : aiCards));
+        const normalized = normalizeStudyCards(aiCards);
+        setCards((prev) => (append ? [...prev, ...normalized] : normalized));
         setLatestBatchAt(new Date().toLocaleTimeString());
         setShowAnswer(false);
         setGenerationIndeterminate(false);
@@ -236,7 +302,8 @@ export default function App() {
         return;
       }
       const fallback = fallbackCardsFromText(chunk.content);
-      setCards((prev) => (append ? [...prev, ...fallback] : fallback));
+      const normalizedFallback = normalizeStudyCards(fallback);
+      setCards((prev) => (append ? [...prev, ...normalizedFallback] : normalizedFallback));
       setLatestBatchAt(new Date().toLocaleTimeString());
       setGenerationIndeterminate(false);
       setGenerationProgress(100);
@@ -250,7 +317,8 @@ export default function App() {
       setGenerationIndeterminate(true);
       setGenerationStage('AI unavailable, switching to backup mode...');
       const fallback = fallbackCardsFromText(chunk.content);
-      setCards((prev) => (append ? [...prev, ...fallback] : fallback));
+      const normalizedFallback = normalizeStudyCards(fallback);
+      setCards((prev) => (append ? [...prev, ...normalizedFallback] : normalizedFallback));
       setLatestBatchAt(new Date().toLocaleTimeString());
       setGenerationIndeterminate(false);
       setGenerationProgress(100);
@@ -304,6 +372,50 @@ export default function App() {
       return ok ? [...rest, updated] : [updated, ...rest];
     });
     setShowAnswer(false);
+  };
+
+  const analyzeChunkSections = async (chunkId) => {
+    const chunk = chunkId ? chunks.find((c) => c.id === chunkId) : chunks[0];
+    if (!chunk) {
+      setNotice('Upload a document first, then analyze sections.');
+      return;
+    }
+    setIsAnalyzingSections(true);
+    setNotice('Analyzing document structure...');
+    try {
+      const aiSections = await generateSectionsWithOllama({
+        text: chunk.content,
+        title: chunk.name.replace(/\.[^.]+$/, ''),
+      });
+      const normalized = aiSections.map((s, i) => ({
+        id: s.id || `a${i + 1}`,
+        nombre: s.nombre,
+        descripcion: s.descripcion || '',
+        porcentaje: 0,
+        estado: 'pendiente',
+        fechas_trabajo: [],
+      }));
+      setApartados(normalized);
+      setNotice(`Extracted ${normalized.length} main sections.`);
+    } catch {
+      const fallback = chunk.content
+        .split(/\n+/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 20)
+        .slice(0, 8)
+        .map((line, i) => ({
+          id: `a${i + 1}`,
+          nombre: line.split(' ').slice(0, 6).join(' '),
+          descripcion: line,
+          porcentaje: 0,
+          estado: 'pendiente',
+          fechas_trabajo: [],
+        }));
+      setApartados(fallback);
+      setNotice(`AI unavailable. Built ${fallback.length} backup sections.`);
+    } finally {
+      setIsAnalyzingSections(false);
+    }
   };
 
   const generatePresentation = async ({ topic, promptText, chunkIds }) => {
@@ -388,31 +500,66 @@ export default function App() {
       stats={stats}
     >
       {tab === 'Ingest' ? (
-        <UploadCard
-          onFile={onFileUpload}
-          onGenerateLatest={() => chunks[0] && generateForChunk(chunks[0])}
-          chunks={chunks}
-          isGenerating={isGenerating}
-          progress={generationProgress}
-          progressLabel={generationStage}
-          isIndeterminate={generationIndeterminate}
-        />
+        <>
+          <UploadCard
+            onFile={onFileUpload}
+            onGenerateLatest={() => chunks[0] && generateForChunk(chunks[0])}
+            chunks={chunks}
+            isGenerating={isGenerating}
+            progress={generationProgress}
+            progressLabel={generationStage}
+            isIndeterminate={generationIndeterminate}
+          />
+          <SubirArchivoPanel
+            chunks={chunks}
+            apartados={apartados}
+            setApartados={setApartados}
+            isAnalyzing={isAnalyzingSections}
+            onAnalizar={analyzeChunkSections}
+          />
+          <TablaApartados apartados={apartados} onUpdate={setApartados} />
+        </>
       ) : null}
 
       {tab === 'Flashcards' ? (
-        <FlashcardDeck
-          cards={cards}
-          showAnswer={showAnswer}
-          setShowAnswer={setShowAnswer}
-          onRight={() => markCard(true)}
-          onWrong={() => markCard(false)}
-          latestBatchAt={latestBatchAt}
-          onGenerateMore={() => chunks[0] && generateForChunk(chunks[0], { append: true })}
-          onClear={() => {
-            setCards([]);
-            setLatestBatchAt(null);
-          }}
-        />
+        <>
+          <FlashcardDeck
+            cards={cards}
+            showAnswer={showAnswer}
+            setShowAnswer={setShowAnswer}
+            onRight={() => markCard(true)}
+            onWrong={() => markCard(false)}
+            latestBatchAt={latestBatchAt}
+            onGenerateMore={() => chunks[0] && generateForChunk(chunks[0], { append: true })}
+            onClear={() => {
+              setCards([]);
+              setLatestBatchAt(null);
+              setStudyMode(null);
+            }}
+          />
+          {cards.length ? (
+            <section className="panel mt-4">
+              <h3 className="mb-3 text-lg font-semibold">Study Session (Spaced Repetition)</h3>
+              {!studyMode ? (
+                <div className="flex flex-wrap gap-2">
+                  <button className="btn-primary" onClick={() => setStudyMode('all')}>Start full session</button>
+                  <button className="btn-ghost" onClick={() => setStudyMode('review')}>Review difficult only</button>
+                </div>
+              ) : (
+                <SesionEstudio
+                  tarjetas={cards}
+                  soloRepaso={studyMode === 'review'}
+                  onGuardar={(updates) =>
+                    setCards((prev) =>
+                      prev.map((c) => (updates[c.id] ? { ...c, ...updates[c.id] } : c)),
+                    )
+                  }
+                  onVolver={() => setStudyMode(null)}
+                />
+              )}
+            </section>
+          ) : null}
+        </>
       ) : null}
 
       {tab === 'Tasks' ? <Tasks tasks={tasks} setTasks={setTasks} /> : null}
@@ -428,15 +575,18 @@ export default function App() {
         />
       ) : null}
       {tab === 'Academics' ? (
-        <Academics
-          grades={grades}
-          setGrades={setGrades}
-          simulations={simulations}
-          setSimulations={setSimulations}
-          avg={avg}
-          gradesChartData={gradesChartData}
-          kpiData={kpiData}
-        />
+        <>
+          <Academics
+            grades={grades}
+            setGrades={setGrades}
+            simulations={simulations}
+            setSimulations={setSimulations}
+            avg={avg}
+            gradesChartData={gradesChartData}
+            kpiData={kpiData}
+          />
+          <GraficasProgreso apartados={apartados} />
+        </>
       ) : null}
       {tab === 'AI Tutor' ? <AiTutor tutorMessages={tutorMessages} setTutorMessages={setTutorMessages} /> : null}
     </AppShell>
@@ -641,17 +791,53 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
       </ul>
 
       {previewPresentation ? (
-        <div className="mt-4 rounded-xl border border-border bg-slate-50 p-3">
-          <p className="text-sm font-semibold">Preview: {previewPresentation.title}</p>
-          <div className="mt-2 space-y-2">
+        <div className="mt-4 rounded-2xl border border-border bg-slate-50 p-4 shadow-sm">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <p className="text-base font-semibold">Preview: {previewPresentation.title}</p>
+            <button
+              className="btn-ghost"
+              onClick={() => {
+                const p = presentations.find((x) => x.id === previewPresentation.id);
+                if (p) beginEdit(p);
+              }}
+            >
+              Edit this presentation
+            </button>
+          </div>
+          <div className="max-h-[76vh] space-y-3 overflow-y-auto pr-1">
             {previewPresentation.slides.map((s, idx) => (
-              <div key={`${previewPresentation.id}-preview-${idx}`} className="rounded-lg border border-border bg-white p-2">
-                <p className="text-sm font-medium">{idx + 1}. {s.title}</p>
-                <ul className="mt-1 list-disc pl-5 text-xs text-muted">
+              <div key={`${previewPresentation.id}-preview-${idx}`} className="rounded-xl border border-border bg-white p-3 shadow-sm">
+                <p className="text-base font-semibold">{idx + 1}. {s.title}</p>
+                <ul className="mt-2 list-disc pl-5 text-sm text-muted">
                   {(s.bullets || []).map((b, i) => <li key={`${previewPresentation.id}-${idx}-b-${i}`}>{b}</li>)}
                 </ul>
-                {s.imageSuggestion ? <p className="mt-1 text-xs text-muted">Image: {s.imageSuggestion}</p> : null}
-                {s.graphSuggestion ? <p className="text-xs text-muted">Graph: {s.graphSuggestion}</p> : null}
+                <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  <div className="rounded-lg border border-border bg-slate-50 p-2">
+                    <p className="mb-1 text-xs font-medium text-muted">Visual</p>
+                    <img
+                      src={imagePlaceholderFromSuggestion(s.imageSuggestion || s.title)}
+                      alt={s.imageSuggestion || s.title}
+                      className="h-40 w-full rounded-md border border-border object-cover"
+                    />
+                    {s.imageSuggestion ? <p className="mt-1 text-xs text-muted">{s.imageSuggestion}</p> : null}
+                  </div>
+                  <div className="rounded-lg border border-border bg-slate-50 p-2">
+                    <p className="mb-1 text-xs font-medium text-muted">Graph</p>
+                    <div className="h-44">
+                      <Bar
+                        data={buildSlideGraphData(s)}
+                        options={{
+                          responsive: true,
+                          maintainAspectRatio: false,
+                          plugins: { legend: { display: false } },
+                          scales: { y: { beginAtZero: true, ticks: { stepSize: 2 } } },
+                        }}
+                      />
+                    </div>
+                    {s.graphSuggestion ? <p className="mt-1 text-xs text-muted">{s.graphSuggestion}</p> : null}
+                  </div>
+                </div>
+                {s.notes ? <p className="mt-2 text-xs text-muted">Notes: {s.notes}</p> : null}
               </div>
             ))}
           </div>
@@ -753,6 +939,336 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
         </div>
       ) : null}
     </section>
+  );
+}
+
+function SubirArchivoPanel({ chunks, apartados, setApartados, isAnalyzing, onAnalizar }) {
+  const [selectedChunkId, setSelectedChunkId] = useState('');
+  const selectedChunk = selectedChunkId ? chunks.find((c) => c.id === selectedChunkId) : chunks[0];
+
+  return (
+    <section className="panel mt-4">
+      <h3 className="mb-3 text-lg font-semibold">Document Structure Analyzer</h3>
+      <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_auto]">
+        <select className="input" value={selectedChunkId} onChange={(e) => setSelectedChunkId(e.target.value)} disabled={!chunks.length}>
+          {!chunks.length ? <option value="">Upload a PDF first</option> : null}
+          {chunks.length ? <option value="">Latest upload ({chunks[0].name})</option> : null}
+          {chunks.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+        <button
+          className="btn-primary"
+          disabled={!selectedChunk || isAnalyzing}
+          onClick={() => selectedChunk && onAnalizar(selectedChunk.id)}
+        >
+          {isAnalyzing ? 'Analyzing...' : 'Analyze sections'}
+        </button>
+      </div>
+      {apartados.length ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            className="btn-ghost"
+            onClick={() =>
+              setApartados((prev) =>
+                prev.map((a) => ({
+                  ...a,
+                  porcentaje: 0,
+                  estado: 'pendiente',
+                  fechas_trabajo: [],
+                })),
+              )
+            }
+          >
+            Reset progress
+          </button>
+          <button
+            className="btn-ghost"
+            onClick={() =>
+              setApartados((prev) =>
+                prev.map((a) => ({
+                  ...a,
+                  porcentaje: 100,
+                  estado: 'completado',
+                })),
+              )
+            }
+          >
+            Mark all completed
+          </button>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function TablaApartados({ apartados, onUpdate }) {
+  const [expandido, setExpandido] = useState(null);
+  const estadoColor = (v) => {
+    if (v === 'completado') return 'bg-emerald-100 text-emerald-700';
+    if (v === 'en_progreso') return 'bg-amber-100 text-amber-700';
+    return 'bg-slate-100 text-slate-700';
+  };
+
+  const syncEstado = (porcentaje) => {
+    const p = Number(porcentaje) || 0;
+    if (p >= 100) return 'completado';
+    if (p > 0) return 'en_progreso';
+    return 'pendiente';
+  };
+
+  const updateApartado = (id, patch) => {
+    onUpdate((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)));
+  };
+
+  const toggleFechaTrabajo = (apartado, isoDate) => {
+    const fechas = new Set((apartado.fechas_trabajo || []).map(String));
+    if (fechas.has(isoDate)) fechas.delete(isoDate);
+    else fechas.add(isoDate);
+    updateApartado(apartado.id, { fechas_trabajo: [...fechas].sort() });
+  };
+
+  const today = new Date();
+  const y = today.getFullYear();
+  const m = today.getMonth();
+  const monthStart = new Date(y, m, 1);
+  const monthEnd = new Date(y, m + 1, 0);
+  const firstWeekday = (monthStart.getDay() + 6) % 7;
+  const totalDays = monthEnd.getDate();
+  const monthName = monthStart.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+
+  return (
+    <section className="panel mt-4">
+      <h3 className="mb-3 text-lg font-semibold">Section Tracker (Table + Calendar)</h3>
+      {!apartados.length ? (
+        <p className="text-sm text-muted">Analyze a document first to manage section progress and study dates.</p>
+      ) : (
+        <div className="space-y-3">
+          <div className="overflow-x-auto rounded-xl border border-border bg-white">
+            <table className="min-w-full text-sm">
+              <thead className="bg-slate-50 text-xs uppercase text-muted">
+                <tr>
+                  <th className="px-3 py-2 text-left">Section</th>
+                  <th className="px-3 py-2 text-left">Progress</th>
+                  <th className="px-3 py-2 text-left">State</th>
+                  <th className="px-3 py-2 text-left">Study Days</th>
+                  <th className="px-3 py-2 text-left">Calendar</th>
+                </tr>
+              </thead>
+              <tbody>
+                {apartados.map((a) => (
+                  <tr key={a.id} className="border-t border-border">
+                    <td className="px-3 py-2 align-top">
+                      <p className="font-medium">{a.nombre}</p>
+                      {a.descripcion ? <p className="text-xs text-muted">{a.descripcion}</p> : null}
+                    </td>
+                    <td className="px-3 py-2 align-top">
+                      <input
+                        className="input w-24"
+                        type="number"
+                        min="0"
+                        max="100"
+                        value={Number(a.porcentaje || 0)}
+                        onChange={(e) => {
+                          const value = Math.max(0, Math.min(100, Number(e.target.value || 0)));
+                          updateApartado(a.id, { porcentaje: value, estado: syncEstado(value) });
+                        }}
+                      />
+                    </td>
+                    <td className="px-3 py-2 align-top">
+                      <span className={`rounded-full px-2 py-1 text-xs ${estadoColor(a.estado)}`}>
+                        {a.estado || 'pendiente'}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 align-top text-xs">{(a.fechas_trabajo || []).length}</td>
+                    <td className="px-3 py-2 align-top">
+                      <button
+                        className="btn-ghost"
+                        onClick={() => setExpandido((prev) => (prev === a.id ? null : a.id))}
+                      >
+                        {expandido === a.id ? 'Hide' : 'Open'}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {apartados.map((a) => (
+            expandido === a.id ? (
+              <div key={`${a.id}-calendar`} className="rounded-xl border border-border bg-slate-50 p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <p className="text-sm font-semibold">{a.nombre}</p>
+                  <p className="text-xs text-muted">{monthName}</p>
+                </div>
+                <div className="mb-2 grid grid-cols-7 gap-1 text-center text-[11px] text-muted">
+                  <span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span>
+                </div>
+                <div className="grid grid-cols-7 gap-1">
+                  {Array.from({ length: firstWeekday }).map((_, i) => (
+                    <div key={`empty-${a.id}-${i}`} className="h-8 rounded-md bg-transparent" />
+                  ))}
+                  {Array.from({ length: totalDays }).map((_, i) => {
+                    const d = i + 1;
+                    const dt = new Date(y, m, d);
+                    const iso = dt.toISOString().split('T')[0];
+                    const selected = (a.fechas_trabajo || []).includes(iso);
+                    return (
+                      <button
+                        key={`${a.id}-${iso}`}
+                        className={`h-8 rounded-md border text-xs ${
+                          selected
+                            ? 'border-blue-400 bg-blue-100 text-blue-800'
+                            : 'border-border bg-white text-slate-700'
+                        }`}
+                        onClick={() => toggleFechaTrabajo(a, iso)}
+                        title={iso}
+                      >
+                        {d}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="mt-2 text-xs text-muted">
+                  Click dates to toggle study days for this section.
+                </p>
+              </div>
+            ) : null
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function GraficasProgreso({ apartados }) {
+  const totalProgreso = apartados.length
+    ? Math.round(apartados.reduce((sum, a) => sum + Number(a.porcentaje || 0), 0) / apartados.length)
+    : 0;
+  const data = {
+    labels: apartados.map((a) => (a.nombre.length > 18 ? `${a.nombre.slice(0, 18)}...` : a.nombre)),
+    datasets: [
+      {
+        label: 'Progress',
+        data: apartados.map((a) => Number(a.porcentaje || 0)),
+        backgroundColor: 'rgba(124,58,237,0.45)',
+        borderColor: '#7c3aed',
+        borderWidth: 1,
+      },
+      {
+        label: 'Study Days',
+        data: apartados.map((a) => (a.fechas_trabajo || []).length),
+        backgroundColor: 'rgba(8,145,178,0.45)',
+        borderColor: '#0891b2',
+        borderWidth: 1,
+      },
+    ],
+  };
+
+  return (
+    <section className="panel mt-4">
+      <h3 className="mb-3 text-lg font-semibold">Progress by Sections</h3>
+      {!apartados.length ? (
+        <p className="text-sm text-muted">Analyze a document in Ingest to see section progress charts.</p>
+      ) : (
+        <>
+          <div className="mb-3 rounded-xl border border-border bg-slate-50 p-3">
+            <p className="text-xs text-muted">Total Progress</p>
+            <p className="text-2xl font-semibold">{totalProgreso}%</p>
+          </div>
+          <div className="rounded-xl border border-border bg-white p-3">
+            <Bar
+              data={data}
+              options={{
+                responsive: true,
+                plugins: { legend: { position: 'bottom' } },
+                scales: { y: { beginAtZero: true } },
+              }}
+            />
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function calcularProximaRevision(tarjeta, bien) {
+  const hoy = new Date();
+  let intervalo = Number(tarjeta.intervalo_dias || 1);
+  if (bien) intervalo = Math.min(60, Math.max(1, Math.round(intervalo * 2.5)));
+  else intervalo = 1;
+  const proxima = new Date(hoy);
+  proxima.setDate(proxima.getDate() + intervalo);
+  return {
+    intervalo_dias: intervalo,
+    proxima_revision: proxima.toISOString().split('T')[0],
+    dificultad: bien ? (intervalo > 10 ? 'facil' : 'media') : 'dificil',
+    veces_bien: Number(tarjeta.veces_bien || 0) + (bien ? 1 : 0),
+    veces_mal: Number(tarjeta.veces_mal || 0) + (bien ? 0 : 1),
+  };
+}
+
+function SesionEstudio({ tarjetas, soloRepaso = false, onGuardar, onVolver }) {
+  const today = new Date().toISOString().split('T')[0];
+  const cola = soloRepaso
+    ? tarjetas.filter((t) => t.dificultad === 'dificil' || Number(t.veces_mal || 0) > 0)
+    : [...tarjetas].sort((a, b) => ((b.proxima_revision || today) <= today) - ((a.proxima_revision || today) <= today));
+  const [indice, setIndice] = useState(0);
+  const [showBack, setShowBack] = useState(false);
+  const [done, setDone] = useState(false);
+  const [cambios, setCambios] = useState({});
+
+  if (!cola.length) {
+    return (
+      <div className="rounded-lg border border-border bg-slate-50 p-3 text-sm text-muted">
+        No cards available for this session.
+      </div>
+    );
+  }
+  const tarjeta = cola[indice];
+  const progress = Math.round((indice / cola.length) * 100);
+
+  const responder = (bien) => {
+    const update = calcularProximaRevision(tarjeta, bien);
+    const next = { ...cambios, [tarjeta.id]: update };
+    setCambios(next);
+    if (indice + 1 >= cola.length) {
+      onGuardar(next);
+      setDone(true);
+    } else {
+      setShowBack(false);
+      setIndice((v) => v + 1);
+    }
+  };
+
+  if (done) {
+    return (
+      <div className="rounded-lg border border-border bg-slate-50 p-3">
+        <p className="font-semibold">Session completed</p>
+        <p className="text-sm text-muted">{cola.length} cards reviewed.</p>
+        <button className="btn-ghost mt-2" onClick={onVolver}>Back to deck</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between text-xs text-muted">
+        <button className="btn-ghost" onClick={onVolver}>Exit</button>
+        <span>{indice + 1} / {cola.length}</span>
+      </div>
+      <div className="h-2 rounded-full bg-slate-100">
+        <div className="h-2 rounded-full bg-accent" style={{ width: `${Math.max(6, progress)}%` }} />
+      </div>
+      <div className="rounded-xl border border-border bg-white p-4">
+        <p className="font-medium">{tarjeta.question}</p>
+        {showBack ? <p className="mt-2 text-sm text-muted">{tarjeta.answer}</p> : null}
+        <div className="mt-3 flex flex-wrap gap-2">
+          {!showBack ? <button className="btn-ghost" onClick={() => setShowBack(true)}>Reveal answer</button> : null}
+          <button className="btn-ghost" onClick={() => responder(false)}>Wrong</button>
+          <button className="btn-primary" onClick={() => responder(true)}>Right</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
