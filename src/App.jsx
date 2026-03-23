@@ -95,6 +95,21 @@ async function generatePresentationWithOllama({ topic, promptText, sources = [],
   };
 }
 
+async function generateConceptMapWithOllama({ text, title }) {
+  const resp = await fetchWithTimeout('/api/concept-map', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, title }),
+  }, 45000);
+  if (!resp.ok) throw new Error('Concept map API error');
+  const data = await resp.json();
+  return {
+    title: String(data.title || title || 'Concept Map').trim(),
+    nodes: Array.isArray(data.nodes) ? data.nodes : [],
+    links: Array.isArray(data.links) ? data.links : [],
+  };
+}
+
 async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -261,6 +276,8 @@ export default function App() {
   const [generationIndeterminate, setGenerationIndeterminate] = useState(false);
   const [isAnalyzingSections, setIsAnalyzingSections] = useState(false);
   const [studyMode, setStudyMode] = useState(null);
+  const [conceptMapData, setConceptMapData] = useState(null);
+  const [isGeneratingConceptMap, setIsGeneratingConceptMap] = useState(false);
   const [modelStatus, setModelStatus] = useState({ ok: false, model: 'qwen2.5:7b' });
   const [quizConfig, setQuizConfig] = useState({ mode: 'quiz', difficulty: 'medium', count: 10 });
 
@@ -487,6 +504,34 @@ export default function App() {
     }
   };
 
+  const generateConceptMap = async (chunkId) => {
+    const chunk = chunkId ? chunks.find((c) => c.id === chunkId) : chunks[0];
+    if (!chunk?.content?.trim()) {
+      setNotice('Upload a PDF first, then generate a concept map.');
+      return;
+    }
+    setIsGeneratingConceptMap(true);
+    setNotice('Generating concept map from document...');
+    try {
+      const generated = await generateConceptMapWithOllama({
+        text: chunk.content,
+        title: chunk.name.replace(/\.[^.]+$/, ''),
+      });
+      if (generated.nodes.length) {
+        setConceptMapData(generated);
+        setNotice(`Concept map generated with ${generated.nodes.length} concepts.`);
+        return;
+      }
+      setConceptMapData(null);
+      setNotice('Concept map generation returned empty output.');
+    } catch (error) {
+      setConceptMapData(null);
+      setNotice(`${error?.message || 'AI unavailable'} while generating concept map.`);
+    } finally {
+      setIsGeneratingConceptMap(false);
+    }
+  };
+
   const generateQuiz = () => {
     setQuizResults((prev) => [
       {
@@ -610,7 +655,13 @@ export default function App() {
       ) : null}
       {tab === 'Concept Map' ? (
         <Suspense fallback={<section className="panel text-sm text-muted">Loading concept map...</section>}>
-          <ConceptMap apartados={apartados} />
+          <ConceptMap
+            apartados={apartados}
+            chunks={chunks}
+            conceptMapData={conceptMapData}
+            isGenerating={isGeneratingConceptMap}
+            onGenerate={generateConceptMap}
+          />
         </Suspense>
       ) : null}
       {tab === 'Academics' ? (

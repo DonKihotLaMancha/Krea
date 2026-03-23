@@ -20,7 +20,9 @@ export default function AppShell({
         <div className="mx-auto w-full max-w-[1320px]">
         <TopbarStatus title={tab} modelStatus={modelStatus} latestBatchAt={latestBatchAt} />
         <NoticeBanner text={notice} />
-        <StatsCards cardsCount={stats.cardsCount} tasksDone={stats.tasksDone} tasksTotal={stats.tasksTotal} avg={stats.avg} />
+        {tab !== 'Ingest' ? (
+          <StatsCards cardsCount={stats.cardsCount} tasksDone={stats.tasksDone} tasksTotal={stats.tasksTotal} avg={stats.avg} />
+        ) : null}
         <div className="space-y-4">{children}</div>
         </div>
       </main>

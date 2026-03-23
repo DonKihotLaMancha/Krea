@@ -27,7 +27,7 @@ export default function UploadCard({
         />
       </label>
       <button className="btn-primary w-full md:w-auto" disabled={!chunks[0] || isGenerating} onClick={onGenerateLatest}>
-        {isGenerating ? 'Generating your study set…' : 'Generate Flashcards (Latest Upload)'}
+        {isGenerating ? 'Generating your study set…' : 'Digest PDF (Latest Upload)'}
       </button>
       {(isGenerating || progress > 0) ? (
         <div className="mt-3">

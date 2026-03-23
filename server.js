@@ -208,6 +208,201 @@ ${JSON.stringify(sourceJson)}
   }
 });
 
+app.post('/api/concept-map', async (req, res) => {
+  const text = String(req.body?.text || '').trim();
+  const title = String(req.body?.title || 'Concept Map').trim();
+  if (!text) {
+    return res.status(400).json({ error: 'Missing text.' });
+  }
+
+  const sourceJson = buildSourceJson(text);
+  const prompt = `
+You are an academic concept-map generator.
+Create a concept map from university study material.
+
+Rules:
+- Return 5 to 14 nodes.
+- Keep labels concise (max 5 words).
+- Include a central node and meaningful links.
+- Return strict JSON only:
+{
+  "title":"...",
+  "nodes":[
+    {"id":"n1","label":"...","description":"..."}
+  ],
+  "links":[
+    {"source":"n1","target":"n2","label":"..."}
+  ]
+}
+
+SOURCE_JSON:
+${JSON.stringify(sourceJson)}
+`;
+
+  try {
+    let conceptMap = await generateConceptMapWithOllama(prompt);
+    if (conceptMap.nodes.length < 4 || conceptMap.links.length < 3) {
+      conceptMap = buildLocalConceptMapFallback(title, sourceJson);
+    }
+    return res.json(conceptMap);
+  } catch {
+    return res.json(buildLocalConceptMapFallback(title, sourceJson));
+  }
+});
+
+app.post('/api/source-chat', async (req, res) => {
+  const question = String(req.body?.question || '').trim();
+  const sources = Array.isArray(req.body?.sources) ? req.body.sources : [];
+  if (!question) return res.status(400).json({ error: 'Missing question.' });
+  if (!sources.length) return res.status(400).json({ error: 'Missing sources.' });
+
+  const passages = buildPassagesFromSources(sources);
+  const ranked = rankPassages(question, passages).slice(0, 6);
+  const prompt = `
+You are a source-grounded academic assistant.
+Answer only using the provided PASSAGES.
+If information is missing, say so clearly.
+
+Return strict JSON:
+{
+  "answer":"...",
+  "citations":[
+    {"source":"...","excerpt":"...","page":null}
+  ]
+}
+
+QUESTION:
+${question}
+
+PASSAGES:
+${JSON.stringify(ranked)}
+`;
+  try {
+    const data = await callOllama(prompt);
+    const parsed = safeParseModelJson(String(data.response || '').trim());
+    const answer = String(parsed?.answer || '').trim() || 'I could not answer confidently from the selected sources.';
+    const citations = normalizeCitations(parsed?.citations, ranked);
+    return res.json({ answer, citations });
+  } catch {
+    const fallback = ranked.slice(0, 3).map((p) => ({
+      source: p.source,
+      excerpt: p.excerpt,
+      page: p.page ?? null,
+    }));
+    return res.json({
+      answer: 'AI is unavailable right now. Here are the most relevant excerpts from your selected PDFs.',
+      citations: fallback,
+    });
+  }
+});
+
+app.post('/api/summary', async (req, res) => {
+  const sources = Array.isArray(req.body?.sources) ? req.body.sources : [];
+  if (!sources.length) return res.status(400).json({ error: 'Missing sources.' });
+  const passages = buildPassagesFromSources(sources).slice(0, 30);
+  const prompt = `
+Create a concise academic summary from SOURCE_PASSAGES.
+Return strict JSON:
+{
+  "title":"...",
+  "keyPoints":["..."],
+  "glossary":[{"term":"...","definition":"..."}],
+  "openQuestions":["..."]
+}
+SOURCE_PASSAGES:
+${JSON.stringify(passages)}
+`;
+  try {
+    const data = await callOllama(prompt);
+    const parsed = safeParseModelJson(String(data.response || '').trim());
+    return res.json(normalizeSummary(parsed, passages));
+  } catch {
+    return res.json(buildSummaryFallback(passages));
+  }
+});
+
+app.post('/api/study-guide', async (req, res) => {
+  const sources = Array.isArray(req.body?.sources) ? req.body.sources : [];
+  if (!sources.length) return res.status(400).json({ error: 'Missing sources.' });
+  const passages = buildPassagesFromSources(sources).slice(0, 30);
+  const prompt = `
+Create a study guide from SOURCE_PASSAGES.
+Return strict JSON:
+{
+  "sections":[
+    {"title":"...","summary":"...","questions":[{"q":"...","a":"..."}]}
+  ]
+}
+SOURCE_PASSAGES:
+${JSON.stringify(passages)}
+`;
+  try {
+    const data = await callOllama(prompt);
+    const parsed = safeParseModelJson(String(data.response || '').trim());
+    return res.json(normalizeStudyGuide(parsed, passages));
+  } catch {
+    return res.json(buildStudyGuideFallback(passages));
+  }
+});
+
+app.post('/api/source-compare', async (req, res) => {
+  const sources = Array.isArray(req.body?.sources) ? req.body.sources : [];
+  if (sources.length < 2) return res.status(400).json({ error: 'Select at least two sources.' });
+  const compact = sources.map((s) => ({
+    name: String(s?.name || 'source').trim(),
+    excerpts: buildPassagesFromSources([s]).slice(0, 8).map((p) => p.excerpt),
+  }));
+  const prompt = `
+Compare the following sources and return strict JSON:
+{
+  "agreements":["..."],
+  "conflicts":["..."],
+  "uniqueBySource":[{"source":"...","claims":["..."]}],
+  "confidenceNotes":"..."
+}
+SOURCES:
+${JSON.stringify(compact)}
+`;
+  try {
+    const data = await callOllama(prompt);
+    const parsed = safeParseModelJson(String(data.response || '').trim());
+    return res.json(normalizeComparison(parsed, compact));
+  } catch {
+    return res.json(buildComparisonFallback(compact));
+  }
+});
+
+app.post('/api/audio-overview', async (req, res) => {
+  const sources = Array.isArray(req.body?.sources) ? req.body.sources : [];
+  if (!sources.length) return res.status(400).json({ error: 'Missing sources.' });
+  const passages = buildPassagesFromSources(sources).slice(0, 12);
+  const prompt = `
+Create a podcast-style academic briefing script from these notes.
+Return strict JSON:
+{
+  "title":"...",
+  "script":"..."
+}
+SOURCE_PASSAGES:
+${JSON.stringify(passages)}
+`;
+  try {
+    const data = await callOllama(prompt);
+    const parsed = safeParseModelJson(String(data.response || '').trim());
+    return res.json({
+      title: String(parsed?.title || 'Audio Overview').trim(),
+      script: String(parsed?.script || '').trim() || buildAudioScriptFallback(passages),
+      audioUrl: '',
+    });
+  } catch {
+    return res.json({
+      title: 'Audio Overview',
+      script: buildAudioScriptFallback(passages),
+      audioUrl: '',
+    });
+  }
+});
+
 async function generateCardsWithOllama(prompt) {
   const data = await callOllama(prompt);
   const raw = String(data.response || '').trim();
@@ -275,6 +470,17 @@ async function generateSectionsWithOllama(prompt) {
         }))
     : [];
   return normalizeApartados(apartados);
+}
+
+async function generateConceptMapWithOllama(prompt) {
+  const data = await callOllama(prompt);
+  const raw = String(data.response || '').trim();
+  const parsed = safeParseModelJson(raw);
+  return normalizeConceptMap({
+    title: String(parsed?.title || 'Concept Map').trim(),
+    nodes: Array.isArray(parsed?.nodes) ? parsed.nodes : [],
+    links: Array.isArray(parsed?.links) ? parsed.links : [],
+  });
 }
 
 async function callOllama(prompt) {
@@ -351,6 +557,190 @@ function buildLocalApartadosFallback(sourceJson) {
     nombre: name.split(/\s+/).slice(0, 6).join(' '),
     descripcion: sourceJson?.facts?.[i] || '',
   }));
+}
+
+function normalizeConceptMap(map) {
+  const seenNode = new Set();
+  const nodes = (map.nodes || [])
+    .map((n, i) => ({
+      id: String(n?.id || `n${i + 1}`),
+      label: String(n?.label || '').trim(),
+      description: String(n?.description || '').trim(),
+    }))
+    .filter((n) => n.label && n.label.length >= 2)
+    .filter((n) => {
+      const key = n.label.toLowerCase();
+      if (seenNode.has(key)) return false;
+      seenNode.add(key);
+      return true;
+    })
+    .slice(0, 14);
+
+  const validIds = new Set(nodes.map((n) => n.id));
+  const links = (map.links || [])
+    .map((l) => ({
+      source: String(l?.source || '').trim(),
+      target: String(l?.target || '').trim(),
+      label: String(l?.label || '').trim(),
+    }))
+    .filter((l) => l.source && l.target && l.source !== l.target)
+    .filter((l) => validIds.has(l.source) && validIds.has(l.target))
+    .slice(0, 28);
+
+  return { title: map.title || 'Concept Map', nodes, links };
+}
+
+function buildLocalConceptMapFallback(title, sourceJson) {
+  const labels = [...(sourceJson.topics || [])].slice(0, 10);
+  const core = labels.length ? labels : ['Introduction', 'Core Concepts', 'Methods', 'Applications', 'Summary'];
+  const nodes = [{ id: 'n0', label: title || 'Main Topic', description: 'Main concept from uploaded document.' }];
+  core.forEach((label, i) => {
+    nodes.push({
+      id: `n${i + 1}`,
+      label: String(label).split(/\s+/).slice(0, 4).join(' '),
+      description: sourceJson.facts?.[i] || '',
+    });
+  });
+  const links = nodes.slice(1).map((n) => ({ source: 'n0', target: n.id, label: 'relates to' }));
+  for (let i = 2; i < nodes.length; i += 1) {
+    links.push({ source: nodes[i - 1].id, target: nodes[i].id, label: 'builds on' });
+  }
+  return { title: title || 'Concept Map', nodes, links };
+}
+
+function buildPassagesFromSources(sources) {
+  const passages = [];
+  for (const source of sources) {
+    const name = String(source?.name || 'source').trim();
+    const content = String(source?.content || '').trim().slice(0, 20000);
+    const sourceJson = buildSourceJson(content);
+    for (const s of sourceJson.sentences.slice(0, 20)) {
+      passages.push({ source: name, excerpt: s, page: null });
+    }
+  }
+  return passages;
+}
+
+function rankPassages(query, passages) {
+  const queryWords = new Set(
+    String(query || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length >= 4),
+  );
+  return passages
+    .map((p) => {
+      const words = new Set(
+        p.excerpt.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w.length >= 4),
+      );
+      let overlap = 0;
+      for (const w of queryWords) if (words.has(w)) overlap += 1;
+      return { ...p, score: overlap };
+    })
+    .sort((a, b) => b.score - a.score);
+}
+
+function normalizeCitations(rawCitations, rankedPassages) {
+  const fallback = rankedPassages.slice(0, 3).map((p) => ({ source: p.source, excerpt: p.excerpt, page: p.page ?? null }));
+  if (!Array.isArray(rawCitations)) return fallback;
+  const rows = rawCitations
+    .map((c) => ({
+      source: String(c?.source || '').trim(),
+      excerpt: String(c?.excerpt || '').trim(),
+      page: c?.page ?? null,
+    }))
+    .filter((c) => c.source && c.excerpt)
+    .slice(0, 8);
+  return rows.length ? rows : fallback;
+}
+
+function normalizeSummary(parsed, passages) {
+  const keyPoints = Array.isArray(parsed?.keyPoints) ? parsed.keyPoints.map((x) => String(x).trim()).filter(Boolean).slice(0, 8) : [];
+  const glossary = Array.isArray(parsed?.glossary)
+    ? parsed.glossary
+        .map((g) => ({ term: String(g?.term || '').trim(), definition: String(g?.definition || '').trim() }))
+        .filter((g) => g.term && g.definition)
+        .slice(0, 8)
+    : [];
+  const openQuestions = Array.isArray(parsed?.openQuestions) ? parsed.openQuestions.map((x) => String(x).trim()).filter(Boolean).slice(0, 6) : [];
+  if (!keyPoints.length) return buildSummaryFallback(passages);
+  return { title: String(parsed?.title || 'Document Summary').trim(), keyPoints, glossary, openQuestions };
+}
+
+function buildSummaryFallback(passages) {
+  const base = passages.slice(0, 6).map((p) => p.excerpt);
+  return {
+    title: 'Document Summary',
+    keyPoints: base.length ? base : ['No key points extracted.'],
+    glossary: [],
+    openQuestions: ['Which concepts need deeper clarification?'],
+  };
+}
+
+function normalizeStudyGuide(parsed, passages) {
+  const sections = Array.isArray(parsed?.sections)
+    ? parsed.sections
+        .map((s) => ({
+          title: String(s?.title || '').trim(),
+          summary: String(s?.summary || '').trim(),
+          questions: Array.isArray(s?.questions)
+            ? s.questions
+                .map((q) => ({ q: String(q?.q || '').trim(), a: String(q?.a || '').trim() }))
+                .filter((q) => q.q && q.a)
+                .slice(0, 6)
+            : [],
+        }))
+        .filter((s) => s.title && s.summary)
+        .slice(0, 8)
+    : [];
+  if (!sections.length) return buildStudyGuideFallback(passages);
+  return { sections };
+}
+
+function buildStudyGuideFallback(passages) {
+  const top = passages.slice(0, 4);
+  return {
+    sections: top.map((p, i) => ({
+      title: `Section ${i + 1}`,
+      summary: p.excerpt,
+      questions: [{ q: `What is the key idea in section ${i + 1}?`, a: p.excerpt }],
+    })),
+  };
+}
+
+function normalizeComparison(parsed, compactSources) {
+  const agreements = Array.isArray(parsed?.agreements) ? parsed.agreements.map((x) => String(x).trim()).filter(Boolean).slice(0, 8) : [];
+  const conflicts = Array.isArray(parsed?.conflicts) ? parsed.conflicts.map((x) => String(x).trim()).filter(Boolean).slice(0, 8) : [];
+  const uniqueBySource = Array.isArray(parsed?.uniqueBySource)
+    ? parsed.uniqueBySource
+        .map((u) => ({
+          source: String(u?.source || '').trim(),
+          claims: Array.isArray(u?.claims) ? u.claims.map((x) => String(x).trim()).filter(Boolean).slice(0, 6) : [],
+        }))
+        .filter((u) => u.source)
+        .slice(0, compactSources.length)
+    : [];
+  const confidenceNotes = String(parsed?.confidenceNotes || '').trim() || 'Local comparison generated from available excerpts.';
+  if (!agreements.length && !conflicts.length && !uniqueBySource.length) return buildComparisonFallback(compactSources);
+  return { agreements, conflicts, uniqueBySource, confidenceNotes };
+}
+
+function buildComparisonFallback(compactSources) {
+  return {
+    agreements: ['Sources share overlapping concepts in the uploaded material.'],
+    conflicts: [],
+    uniqueBySource: compactSources.map((s) => ({
+      source: s.name,
+      claims: s.excerpts.slice(0, 2),
+    })),
+    confidenceNotes: 'Fallback comparison used due to AI unavailability.',
+  };
+}
+
+function buildAudioScriptFallback(passages) {
+  const bullets = passages.slice(0, 6).map((p) => `- ${p.excerpt}`).join('\n');
+  return `Welcome to your study audio overview.\n\nToday we cover the key points from your selected documents:\n${bullets}\n\nEnd of overview.`;
 }
 
 function buildScholarReferencesFromSlides(title, slides) {

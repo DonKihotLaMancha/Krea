@@ -21,9 +21,33 @@ function buildNodes(apartados) {
   });
 }
 
-export default function ConceptMap({ apartados }) {
+function buildNodesFromMap(mapData) {
+  const items = (mapData?.nodes || []).slice(0, 16);
+  const centerX = 500;
+  const centerY = 280;
+  const radius = 220;
+  if (!items.length) return [];
+  if (items.length === 1) return [{ ...items[0], nombre: items[0].label, descripcion: items[0].description, x: centerX, y: centerY }];
+  return items.map((item, i) => {
+    const angle = (Math.PI * 2 * i) / items.length - Math.PI / 2;
+    return {
+      id: item.id,
+      nombre: item.label,
+      descripcion: item.description,
+      x: centerX + Math.cos(angle) * radius,
+      y: centerY + Math.sin(angle) * radius,
+    };
+  });
+}
+
+export default function ConceptMap({ apartados, chunks = [], conceptMapData = null, isGenerating = false, onGenerate }) {
+  const [selectedChunkId, setSelectedChunkId] = useState('');
   const [selectedId, setSelectedId] = useState(null);
-  const nodes = useMemo(() => buildNodes(apartados), [apartados]);
+  const selectedChunk = selectedChunkId ? chunks.find((c) => c.id === selectedChunkId) : chunks[0];
+  const nodes = useMemo(
+    () => (conceptMapData?.nodes?.length ? buildNodesFromMap(conceptMapData) : buildNodes(apartados)),
+    [apartados, conceptMapData],
+  );
   const selected = nodes.find((n) => n.id === selectedId) || nodes[0];
 
   if (!nodes.length) {
@@ -40,8 +64,27 @@ export default function ConceptMap({ apartados }) {
   return (
     <section className="panel">
       <div className="mb-3 flex items-center justify-between gap-2">
-        <h3 className="text-lg font-semibold">Concept Map</h3>
+        <h3 className="text-lg font-semibold">{conceptMapData?.title || 'Concept Map'}</h3>
         <span className="rounded-full border border-border bg-white px-3 py-1 text-xs text-muted">{nodes.length} nodes</span>
+      </div>
+      <div className="mb-3 grid grid-cols-1 gap-2 md:grid-cols-[1fr_auto]">
+        <select
+          className="input"
+          value={selectedChunkId}
+          onChange={(e) => setSelectedChunkId(e.target.value)}
+          disabled={!chunks.length || isGenerating}
+        >
+          {!chunks.length ? <option value="">Upload a PDF first</option> : null}
+          {chunks.length ? <option value="">Latest upload ({chunks[0].name})</option> : null}
+          {chunks.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+        <button
+          className="btn-primary"
+          disabled={!selectedChunk || isGenerating}
+          onClick={() => selectedChunk && onGenerate(selectedChunk.id)}
+        >
+          {isGenerating ? 'Generating map...' : 'Generate from PDF'}
+        </button>
       </div>
       <p className="mb-3 text-xs text-muted">Tap/click a node to inspect the concept details.</p>
 
@@ -65,18 +108,23 @@ export default function ConceptMap({ apartados }) {
               strokeWidth="2"
             />
           ))}
-          {nodes.slice(1).map((n, idx) => (
+          {(conceptMapData?.links?.length ? conceptMapData.links : nodes.slice(1).map((n, idx) => ({ source: nodes[idx].id, target: n.id }))).map((l, i) => {
+            const source = nodes.find((n) => n.id === l.source);
+            const target = nodes.find((n) => n.id === l.target);
+            if (!source || !target) return null;
+            return (
             <line
-              key={`edge-chain-${n.id}`}
-              x1={nodes[idx].x}
-              y1={nodes[idx].y}
-              x2={n.x}
-              y2={n.y}
+              key={`edge-chain-${i}`}
+              x1={source.x}
+              y1={source.y}
+              x2={target.x}
+              y2={target.y}
               stroke="#c7d2fe"
               strokeWidth="1.5"
               strokeDasharray="5 5"
             />
-          ))}
+            );
+          })}
 
           <g>
             <circle cx={centerNode.x} cy={centerNode.y} r="56" fill="#4f46e5" opacity="0.95" />
