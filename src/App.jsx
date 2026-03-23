@@ -26,13 +26,35 @@ ChartJS.register(ArcElement, BarElement, Tooltip, Legend, CategoryScale, LinearS
 GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).toString();
 
 const tabs = ['Ingest', 'Flashcards', 'Notebook', 'Concept Map', 'Tasks', 'Quizzes', 'Chat', 'Presentations', 'Academics', 'AI Tutor'];
+const STUDENT_ID_KEY = 'student-assistant-student-id';
 
 function cleanAcademicText(raw) {
-  return (raw || '')
+  let text = (raw || '')
     .replace(/[^\S\r\n]+/g, ' ')
     .replace(/\r/g, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+    .replace(/\n{3,}/g, '\n\n');
+
+  // Remove legal/footer tails that often pollute study extraction.
+  const cutoffPatterns = [
+    /\ball rights reserved\b/i,
+    /\bcopyright\b/i,
+    /\bterms of use\b/i,
+    /\bterms & conditions\b/i,
+    /\bterms and conditions\b/i,
+    /\bprinted in\b/i,
+    /\bunauthorized reproduction\b/i,
+    /\blicensed to\b/i,
+  ];
+  let firstCutoff = -1;
+  for (const pattern of cutoffPatterns) {
+    const match = text.match(pattern);
+    if (match?.index !== undefined) {
+      if (firstCutoff === -1 || match.index < firstCutoff) firstCutoff = match.index;
+    }
+  }
+  if (firstCutoff >= 0) text = text.slice(0, firstCutoff);
+
+  return text.trim();
 }
 
 function looksLikeGibberish(text) {
@@ -214,6 +236,52 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
   }
 }
 
+function getOrCreateStudentId() {
+  const existing = localStorage.getItem(STUDENT_ID_KEY);
+  if (existing) return existing;
+  const created = `student-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  localStorage.setItem(STUDENT_ID_KEY, created);
+  return created;
+}
+
+async function upsertStudent(studentId, name = 'Student') {
+  await fetchWithTimeout('/api/student', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ studentId, name }),
+  }, 12000);
+}
+
+async function savePdfToLibrary({ studentId, name, content }) {
+  await fetchWithTimeout('/api/library/pdf', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ studentId, name, content }),
+  }, 20000);
+}
+
+async function saveConceptMapToLibrary({ studentId, sourceName, title, map }) {
+  await fetchWithTimeout('/api/library/concept-map', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ studentId, sourceName, title, map }),
+  }, 20000);
+}
+
+async function saveNotebookOutputToLibrary({ studentId, sourceNames, outputType, output }) {
+  await fetchWithTimeout('/api/library/notebook', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ studentId, sourceNames, outputType, output }),
+  }, 20000);
+}
+
+async function loadLibrary(studentId) {
+  const resp = await fetchWithTimeout(`/api/library?studentId=${encodeURIComponent(studentId)}`, {}, 20000);
+  if (!resp.ok) throw new Error('Could not load library');
+  return await resp.json();
+}
+
 function buildFallbackPresentation(topic, promptText, sourceNames = []) {
   const cleanedPrompt = cleanAcademicText(promptText || '');
   const promptLines = cleanedPrompt
@@ -345,6 +413,7 @@ async function fileToText(file, onProgress) {
 }
 
 export default function App() {
+  const studentId = useMemo(() => getOrCreateStudentId(), []);
   const [tab, setTab] = useState('Ingest');
   const [chunks, setChunks] = useState([]);
   const [cards, setCards] = useState([]);
@@ -394,6 +463,31 @@ export default function App() {
       clearInterval(id);
     };
   }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    const bootstrapDb = async () => {
+      try {
+        await upsertStudent(studentId);
+        const data = await loadLibrary(studentId);
+        if (!mounted) return;
+        const dbChunks = Array.isArray(data?.pdfs)
+          ? data.pdfs.map((p) => ({
+            id: `db-pdf-${p.id}`,
+            name: p.name,
+            content: p.content,
+          }))
+          : [];
+        if (dbChunks.length) setChunks(dbChunks);
+      } catch {
+        // Keep app usable even if DB bootstrap fails.
+      }
+    };
+    bootstrapDb();
+    return () => {
+      mounted = false;
+    };
+  }, [studentId]);
 
   const avg = useMemo(() => {
     const w = grades.reduce((s, g) => s + g.weight, 0);
@@ -499,6 +593,11 @@ export default function App() {
       }
       const chunk = { id: `${Date.now()}`, name: file.name, content: cleaned };
       setChunks((prev) => [chunk, ...prev]);
+      try {
+        await savePdfToLibrary({ studentId, name: chunk.name, content: chunk.content });
+      } catch {
+        // Non-blocking persistence.
+      }
       await generateForChunk(chunk);
     } catch (error) {
       setNotice(`Upload failed: ${error?.message || 'Unknown error.'}`);
@@ -614,6 +713,16 @@ export default function App() {
       });
       if (generated.nodes.length) {
         setConceptMapData(generated);
+        try {
+          await saveConceptMapToLibrary({
+            studentId,
+            sourceName: chunk.name,
+            title: generated.title || chunk.name.replace(/\.[^.]+$/, ''),
+            map: generated,
+          });
+        } catch {
+          // Non-blocking persistence.
+        }
         setNotice(`Concept map generated with ${generated.nodes.length} concepts.`);
         return;
       }
@@ -627,11 +736,21 @@ export default function App() {
     }
   };
 
-  const runNotebookAction = async (action, label) => {
+  const runNotebookAction = async (action, label, outputType, sources = []) => {
     setIsNotebookBusy(true);
     setNotice(`${label}...`);
     try {
       const result = await action();
+      try {
+        await saveNotebookOutputToLibrary({
+          studentId,
+          sourceNames: sources.map((s) => s.name).filter(Boolean),
+          outputType,
+          output: result,
+        });
+      } catch {
+        // Non-blocking persistence.
+      }
       setNotice(`${label} completed.`);
       return result;
     } catch (error) {
@@ -768,30 +887,40 @@ export default function App() {
             runNotebookAction(
               () => sourceChatWithOllama({ question, sources }),
               'Source-grounded chat',
+              'source-chat',
+              sources,
             )
           }
           onSummary={({ sources }) =>
             runNotebookAction(
               () => generateSummaryWithOllama({ sources }),
               'Summary generation',
+              'summary',
+              sources,
             )
           }
           onStudyGuide={({ sources }) =>
             runNotebookAction(
               () => generateStudyGuideWithOllama({ sources }),
               'Study guide generation',
+              'study-guide',
+              sources,
             )
           }
           onCompare={({ sources }) =>
             runNotebookAction(
               () => compareSourcesWithOllama({ sources }),
               'Source comparison',
+              'source-compare',
+              sources,
             )
           }
           onAudioOverview={({ sources }) =>
             runNotebookAction(
               () => generateAudioOverviewWithOllama({ sources }),
               'Audio overview generation',
+              'audio-overview',
+              sources,
             )
           }
         />
@@ -858,9 +987,6 @@ export default function App() {
               setNotice('Powered by Ollama: estimating required final...');
               try {
                 const data = await academicsEstimateWithOllama({ target, finalWeight, avg });
-                if (typeof data?.requiredFinal === 'number') {
-                  setSimulations((prev) => [{ id: Date.now(), req: data.requiredFinal, target }, ...prev]);
-                }
                 setNotice('Powered by Ollama: estimate ready.');
                 return data;
               } catch (error) {

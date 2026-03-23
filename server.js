@@ -1,14 +1,30 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import { createClient } from '@supabase/supabase-js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://127.0.0.1:11434';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen2.5:7b';
 const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 45000);
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const supabase = (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
+  : null;
 
 app.use(cors());
 app.use(express.json({ limit: '4mb' }));
+
+function requireSupabase(res) {
+  if (supabase) return true;
+  res.status(500).json({
+    error: 'Supabase is not configured.',
+    details: 'Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in your server environment.',
+  });
+  return false;
+}
 
 app.get('/api/health', async (_req, res) => {
   try {
@@ -17,6 +33,151 @@ app.get('/api/health', async (_req, res) => {
     return res.json({ ok: true, model: OLLAMA_MODEL });
   } catch {
     return res.status(503).json({ ok: false, error: 'Ollama is not running.' });
+  }
+});
+
+app.post('/api/student', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const studentId = String(req.body?.studentId || '').trim();
+  const name = String(req.body?.name || 'Student').trim();
+  if (!studentId) return res.status(400).json({ error: 'Missing studentId.' });
+  try {
+    const { error } = await supabase
+      .from('students')
+      .upsert({ id: studentId, name }, { onConflict: 'id' });
+    if (error) throw error;
+    return res.json({ ok: true, studentId, name });
+  } catch (error) {
+    return res.status(500).json({ error: 'Could not save student.', details: String(error) });
+  }
+});
+
+app.get('/api/library', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const studentId = String(req.query?.studentId || '').trim();
+  if (!studentId) return res.status(400).json({ error: 'Missing studentId.' });
+  try {
+    const [{ data: pdfs, error: pdfErr }, { data: maps, error: mapsErr }, { data: notebook, error: notebookErr }] = await Promise.all([
+      supabase
+        .from('student_pdfs')
+        .select('id,name,content,created_at')
+        .eq('student_id', studentId)
+        .order('id', { ascending: false })
+        .limit(30),
+      supabase
+        .from('concept_maps')
+        .select('id,source_name,title,map_json,created_at')
+        .eq('student_id', studentId)
+        .order('id', { ascending: false })
+        .limit(20),
+      supabase
+        .from('notebook_outputs')
+        .select('id,source_names,output_type,output_json,created_at')
+        .eq('student_id', studentId)
+        .order('id', { ascending: false })
+        .limit(40),
+    ]);
+    if (pdfErr || mapsErr || notebookErr) throw (pdfErr || mapsErr || notebookErr);
+    return res.json({
+      pdfs: (pdfs || []).map((p) => ({ ...p, createdAt: p.created_at })),
+      maps: (maps || []).map((m) => ({
+        id: m.id,
+        sourceName: m.source_name,
+        title: m.title,
+        mapJson: m.map_json,
+        createdAt: m.created_at,
+        map: safeParseStoredJson(m.map_json),
+      })),
+      notebook: (notebook || []).map((n) => ({
+        id: n.id,
+        sourceNames: n.source_names,
+        outputType: n.output_type,
+        outputJson: n.output_json,
+        createdAt: n.created_at,
+        output: safeParseStoredJson(n.output_json),
+      })),
+    });
+  } catch (error) {
+    return res.status(500).json({ error: 'Could not load library.', details: String(error) });
+  }
+});
+
+app.post('/api/library/pdf', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const studentId = String(req.body?.studentId || '').trim();
+  const name = String(req.body?.name || '').trim();
+  const content = String(req.body?.content || '').trim();
+  if (!studentId || !name || !content) return res.status(400).json({ error: 'Missing studentId/name/content.' });
+  try {
+    const { data: existing, error: existingError } = await supabase
+      .from('student_pdfs')
+      .select('id')
+      .eq('student_id', studentId)
+      .eq('name', name)
+      .eq('content', content)
+      .limit(1);
+    if (existingError) throw existingError;
+    if (existing?.[0]?.id) return res.json({ ok: true, id: existing[0].id, deduped: true });
+
+    const { data, error } = await supabase
+      .from('student_pdfs')
+      .insert({ student_id: studentId, name, content })
+      .select('id')
+      .single();
+    if (error) throw error;
+    return res.json({ ok: true, id: data?.id || null });
+  } catch (error) {
+    return res.status(500).json({ error: 'Could not save PDF.', details: String(error) });
+  }
+});
+
+app.post('/api/library/concept-map', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const studentId = String(req.body?.studentId || '').trim();
+  const sourceName = String(req.body?.sourceName || '').trim();
+  const title = String(req.body?.title || 'Concept Map').trim();
+  const map = req.body?.map;
+  if (!studentId || !sourceName || !map) return res.status(400).json({ error: 'Missing studentId/sourceName/map.' });
+  try {
+    const { data, error } = await supabase
+      .from('concept_maps')
+      .insert({
+        student_id: studentId,
+        source_name: sourceName,
+        title,
+        map_json: JSON.stringify(map),
+      })
+      .select('id')
+      .single();
+    if (error) throw error;
+    return res.json({ ok: true, id: data?.id || null });
+  } catch (error) {
+    return res.status(500).json({ error: 'Could not save concept map.', details: String(error) });
+  }
+});
+
+app.post('/api/library/notebook', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const studentId = String(req.body?.studentId || '').trim();
+  const sourceNames = Array.isArray(req.body?.sourceNames) ? req.body.sourceNames : [];
+  const outputType = String(req.body?.outputType || '').trim();
+  const output = req.body?.output;
+  if (!studentId || !outputType || !output) return res.status(400).json({ error: 'Missing studentId/outputType/output.' });
+  try {
+    const { data, error } = await supabase
+      .from('notebook_outputs')
+      .insert({
+        student_id: studentId,
+        source_names: JSON.stringify(sourceNames),
+        output_type: outputType,
+        output_json: JSON.stringify(output),
+      })
+      .select('id')
+      .single();
+    if (error) throw error;
+    return res.json({ ok: true, id: data?.id || null });
+  } catch (error) {
+    return res.status(500).json({ error: 'Could not save notebook output.', details: String(error) });
   }
 });
 
@@ -929,6 +1090,14 @@ function safeParseModelJson(raw) {
       return JSON.parse(sliced);
     }
     throw new Error('Model output was not valid JSON.');
+  }
+}
+
+function safeParseStoredJson(raw) {
+  try {
+    return JSON.parse(String(raw || '{}'));
+  } catch {
+    return {};
   }
 }
 

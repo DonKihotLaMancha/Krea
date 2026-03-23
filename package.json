@@ -15,8 +15,10 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@supabase/supabase-js": "^2.100.0",
     "chart.js": "^4.5.1",
     "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "framer-motion": "^12.38.0",
     "lucide-react": "^1.0.1",
@@ -25,7 +27,8 @@
     "pdfjs-dist": "^5.5.207",
     "react": "^19.2.4",
     "react-chartjs-2": "^5.3.1",
-    "react-dom": "^19.2.4"
+    "react-dom": "^19.2.4",
+    "sqlite3": "^6.0.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.2",

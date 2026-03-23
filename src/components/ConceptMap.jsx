@@ -50,15 +50,6 @@ export default function ConceptMap({ apartados, chunks = [], conceptMapData = nu
   );
   const selected = nodes.find((n) => n.id === selectedId) || nodes[0];
 
-  if (!nodes.length) {
-    return (
-      <section className="panel">
-        <h3 className="mb-2 text-lg font-semibold">Concept Map</h3>
-        <p className="text-sm text-muted">Analyze sections in `Ingest` first, then the concept graph will appear here.</p>
-      </section>
-    );
-  }
-
   const centerNode = { id: 'root', nombre: 'Main Topic', x: 500, y: 280 };
 
   return (
@@ -86,8 +77,15 @@ export default function ConceptMap({ apartados, chunks = [], conceptMapData = nu
           {isGenerating ? 'Generating map...' : 'Generate from PDF'}
         </button>
       </div>
-      <p className="mb-3 text-xs text-muted">Tap/click a node to inspect the concept details.</p>
+      {!nodes.length ? (
+        <div className="mb-3 rounded-lg border border-border bg-slate-50 p-3 text-sm text-muted">
+          No concept map yet. Select an uploaded PDF and click <b>Generate from PDF</b>.
+        </div>
+      ) : (
+        <p className="mb-3 text-xs text-muted">Tap/click a node to inspect the concept details.</p>
+      )}
 
+      {nodes.length ? (
       <div className="overflow-x-auto rounded-xl border border-border bg-white p-2">
         <svg viewBox="0 0 1000 560" className="h-[420px] w-full min-w-[760px]">
           <defs>
@@ -147,8 +145,9 @@ export default function ConceptMap({ apartados, chunks = [], conceptMapData = nu
           })}
         </svg>
       </div>
+      ) : null}
 
-      {selected ? (
+      {selected && nodes.length ? (
         <div className="mt-3 rounded-xl border border-border bg-slate-50 p-3">
           <p className="text-sm font-semibold text-text">{selected.nombre}</p>
           <p className="mt-1 text-sm text-muted">{selected.descripcion || 'No description available.'}</p>
