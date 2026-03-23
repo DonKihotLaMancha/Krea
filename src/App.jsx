@@ -1,32 +1,176 @@
 import { useMemo, useState } from 'react';
+import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist';
+
+GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).toString();
 
 const tabs = ['Ingest', 'Flashcards', 'Tasks', 'Quizzes', 'Chat', 'Presentations', 'Academics', 'AI Tutor'];
 const roomIds = ['global', 'private', 'class-group'];
 
+const stopwords = new Set([
+  'about', 'above', 'after', 'again', 'against', 'among', 'because', 'before', 'being', 'below', 'between',
+  'could', 'every', 'first', 'from', 'have', 'into', 'itself', 'might', 'other', 'should', 'since', 'their',
+  'there', 'these', 'those', 'through', 'under', 'until', 'using', 'where', 'which', 'while', 'would',
+  'class', 'method', 'function', 'array', 'index', 'errors', 'using',
+]);
+
+function cleanAcademicText(raw) {
+  return (raw || '')
+    .replace(/[^\S\r\n]+/g, ' ')
+    .replace(/\r/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function looksLikeGibberish(text) {
+  if (!text) return true;
+  const sample = text.slice(0, 2000);
+  const weird = (sample.match(/[<>{}[\]\\/|~`]/g) || []).length;
+  const alpha = (sample.match(/[A-Za-z]/g) || []).length;
+  return alpha < 80 || weird / Math.max(sample.length, 1) > 0.1;
+}
+
+function isLikelyCompleteSentence(sentence) {
+  const s = sentence.trim();
+  if (s.length < 45 || s.length > 260) return false;
+  if (!/[.!?]$/.test(s)) return false;
+  const letters = (s.match(/[A-Za-z]/g) || []).length;
+  const digits = (s.match(/\d/g) || []).length;
+  const symbols = (s.match(/[{}[\]<>/\\=_]/g) || []).length;
+  if (letters < 30) return false;
+  if (symbols > letters * 0.08) return false;
+  if (digits > letters * 0.5) return false;
+  return true;
+}
+
+function bestKeyword(sentence) {
+  const words = sentence
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length >= 5 && !stopwords.has(w));
+  return words[0] || null;
+}
+
+function firstNonStopword(sentence) {
+  return sentence
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .find((w) => w.length >= 4 && !stopwords.has(w)) || null;
+}
+
+function extractTopics(sentences) {
+  const freq = new Map();
+  for (const s of sentences) {
+    const seen = new Set();
+    s.toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length >= 5 && !stopwords.has(w))
+      .forEach((w) => {
+        if (seen.has(w)) return;
+        seen.add(w);
+        freq.set(w, (freq.get(w) || 0) + 1);
+      });
+  }
+  return [...freq.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12)
+    .map(([w]) => w);
+}
+
+function buildQuestion(sentence, index, topics) {
+  const t = topics[index % Math.max(topics.length, 1)] || bestKeyword(sentence) || 'topic';
+  const term = firstNonStopword(sentence) || t;
+  const templates = [
+    `Define "${term}" in the context of this material.`,
+    `Why is "${t}" important according to the text?`,
+    `How does the text explain "${t}"?`,
+    `What problem does "${t}" help solve in this topic?`,
+    `Give one practical example related to "${term}" from this content.`,
+    `What is the key takeaway of this statement about "${t}"?`,
+    `Which concept in this sentence is most related to "${term}"?`,
+    `Fill in the idea: "${sentence.slice(0, 80)}..." refers mainly to what concept?`,
+  ];
+  return templates[index % templates.length];
+}
+
 function cardsFromText(raw) {
-  const cleaned = (raw || '').replace(/\s+/g, ' ').trim();
-  const parts = cleaned
-    .split(/[.!?\n]+/)
-    .map((x) => x.trim())
-    .filter((x) => x.length > 12)
-    .slice(0, 12);
-  const source = parts.length ? parts : [cleaned || 'No extractable text found in this file.'];
-  return source.map((text, i) => ({
-    id: `${Date.now()}-${i}`,
-    question: `What does this mean: "${text.slice(0, 30)}"?`,
-    answer: text,
-    right: 0,
-    wrong: 0,
-  }));
+  const cleaned = cleanAcademicText(raw);
+  const completeSentences = cleaned.match(/[^.!?]+[.!?]/g) || [];
+  const parts = completeSentences
+    .map((x) => x.replace(/\s+/g, ' ').trim())
+    .filter((x) => isLikelyCompleteSentence(x) && !looksLikeGibberish(x))
+    .slice(0, 40);
+
+  const unique = [];
+  const seen = new Set();
+  for (const p of parts) {
+    const key = p.toLowerCase().replace(/\s+/g, ' ').slice(0, 120);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(p);
+    if (unique.length >= 16) break;
+  }
+
+  const topics = extractTopics(unique);
+  return unique.map((text, i) => {
+    const question = buildQuestion(text, i, topics);
+    return {
+      id: `${Date.now()}-${i}`,
+      question,
+      answer: text,
+      right: 0,
+      wrong: 0,
+    };
+  });
+}
+
+async function generateCardsWithOllama(text) {
+  const resp = await fetch('/api/flashcards', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  if (!resp.ok) throw new Error('Ollama API error');
+  const data = await resp.json();
+  return Array.isArray(data.cards) ? data.cards : [];
+}
+
+async function extractPdfText(file) {
+  const buffer = await file.arrayBuffer();
+  const pdf = await getDocument({ data: buffer }).promise;
+  let allText = '';
+  for (let page = 1; page <= pdf.numPages; page += 1) {
+    const p = await pdf.getPage(page);
+    const content = await p.getTextContent();
+    let pageText = '';
+    let lastY = null;
+    for (const item of content.items) {
+      const str = item.str || '';
+      const y = item.transform?.[5] ?? null;
+      if (lastY !== null && y !== null && Math.abs(y - lastY) > 3) {
+        pageText += '\n';
+      } else if (pageText && !pageText.endsWith('\n')) {
+        pageText += ' ';
+      }
+      pageText += str;
+      lastY = y;
+    }
+    allText += `${pageText}\n`;
+  }
+  return allText;
 }
 
 async function fileToText(file) {
+  const ext = file.name.toLowerCase().split('.').pop() || '';
+  if (ext === 'pdf') return extractPdfText(file);
+
   const buffer = await file.arrayBuffer();
-  try {
+  if (ext === 'txt' || ext === 'md' || ext === 'csv') {
     return new TextDecoder().decode(buffer);
-  } catch {
-    return '';
   }
+  return '';
 }
 
 export default function App() {
@@ -43,6 +187,7 @@ export default function App() {
   const [simulations, setSimulations] = useState([]);
   const [tutorMessages, setTutorMessages] = useState([]);
   const [notice, setNotice] = useState('');
+  const [isGenerating, setIsGenerating] = useState(false);
 
   const currentCard = cards[0];
   const roomMessages = useMemo(() => messages.filter((m) => m.room === room), [messages, room]);
@@ -52,19 +197,47 @@ export default function App() {
     return grades.reduce((s, g) => s + g.score * g.weight, 0) / w;
   }, [grades]);
 
-  const generateForChunk = (chunk) => {
-    const next = cardsFromText(chunk.content);
-    setCards((prev) => [...next, ...prev]);
-    setNotice(`Generated ${next.length} flashcards.`);
+  const generateForChunk = async (chunk) => {
+    setIsGenerating(true);
+    try {
+      const aiCards = await generateCardsWithOllama(chunk.content);
+      if (aiCards.length) {
+        setCards((prev) => [...aiCards, ...prev]);
+        setNotice(`Generated ${aiCards.length} AI flashcards with local model.`);
+        return;
+      }
+      const fallback = cardsFromText(chunk.content);
+      if (!fallback.length) {
+        setNotice('Could not build good study questions from this file. Try a cleaner text PDF.');
+        return;
+      }
+      setCards((prev) => [...fallback, ...prev]);
+      setNotice(`Generated ${fallback.length} fallback flashcards (Ollama returned none).`);
+    } catch {
+      const fallback = cardsFromText(chunk.content);
+      if (!fallback.length) {
+        setNotice('Ollama is offline and fallback could not build cards. Start `npm run server` and Ollama.');
+        return;
+      }
+      setCards((prev) => [...fallback, ...prev]);
+      setNotice(`Ollama unavailable. Generated ${fallback.length} fallback flashcards.`);
+    } finally {
+      setIsGenerating(false);
+    }
   };
 
   const onUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const text = await fileToText(file);
-    const chunk = { id: `${Date.now()}`, name: file.name, content: text };
+    const cleaned = cleanAcademicText(text);
+    if (!cleaned || looksLikeGibberish(cleaned)) {
+      setNotice('Could not extract readable text. Use a text-based PDF or TXT file.');
+      return;
+    }
+    const chunk = { id: `${Date.now()}`, name: file.name, content: cleaned };
     setChunks((prev) => [chunk, ...prev]);
-    generateForChunk(chunk);
+    await generateForChunk(chunk);
   };
 
   const markCard = (ok) => {
@@ -94,13 +267,13 @@ export default function App() {
           <section>
             <h3>Upload PDF/Document</h3>
             <input type="file" onChange={onUpload} />
-            <button disabled={!chunks[0]} onClick={() => generateForChunk(chunks[0])}>
-              Generate Flashcards (Latest Upload)
+            <button disabled={!chunks[0] || isGenerating} onClick={() => void generateForChunk(chunks[0])}>
+              {isGenerating ? 'Generating...' : 'Generate Flashcards (Latest Upload)'}
             </button>
             <ul>
               {chunks.map((c) => (
                 <li key={c.id}>
-                  {c.name} <button onClick={() => generateForChunk(c)}>Generate</button>
+                  {c.name} <button disabled={isGenerating} onClick={() => void generateForChunk(c)}>{isGenerating ? 'Generating...' : 'Generate'}</button>
                 </li>
               ))}
             </ul>
