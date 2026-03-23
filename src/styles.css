@@ -10,23 +10,28 @@
   }
   body {
     @apply m-0 bg-bg text-text font-sans;
+    background-image:
+      radial-gradient(1100px 520px at 10% -10%, rgba(99, 102, 241, 0.2), transparent 60%),
+      radial-gradient(900px 500px at 100% 0%, rgba(14, 165, 233, 0.18), transparent 58%),
+      linear-gradient(180deg, #f8faff 0%, #f4f7ff 100%);
   }
 }
 
 @layer components {
   .input {
-    @apply rounded-xl border border-border bg-white px-3 py-2 text-sm text-text shadow-sm outline-none focus:border-accent;
+    @apply rounded-xl border border-border bg-white/95 px-3 py-2 text-sm text-text shadow-sm outline-none focus:border-accent focus:ring-2 focus:ring-accent/20;
   }
   .btn {
-    @apply rounded-xl px-4 py-2 text-sm font-medium transition;
+    @apply rounded-xl px-4 py-2 text-sm font-medium transition duration-200;
   }
   .btn-primary {
-    @apply btn bg-accent text-white hover:opacity-90 disabled:opacity-50;
+    @apply btn text-white shadow-soft disabled:opacity-50;
+    background-image: linear-gradient(135deg, #4f46e5 0%, #7c3aed 55%, #0ea5e9 100%);
   }
   .btn-ghost {
-    @apply btn border border-border bg-white text-text hover:bg-slate-50 disabled:opacity-50;
+    @apply btn border border-border bg-white/95 text-text hover:bg-indigo-50 disabled:opacity-50;
   }
   .panel {
-    @apply rounded-xl2 border border-border bg-card p-4 shadow-soft;
+    @apply rounded-xl2 border border-border bg-card/95 p-4 shadow-soft backdrop-blur-sm;
   }
 }

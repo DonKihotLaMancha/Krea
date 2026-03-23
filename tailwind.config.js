@@ -4,12 +4,14 @@ export default {
   theme: {
     extend: {
       colors: {
-        bg: '#f8fafc',
+        bg: '#f4f7ff',
         card: '#ffffff',
-        border: '#e2e8f0',
+        border: '#dbe4ff',
         text: '#0f172a',
-        muted: '#475569',
-        accent: '#2563eb',
+        muted: '#5b6b8a',
+        accent: '#4f46e5',
+        accent2: '#7c3aed',
+        accent3: '#0ea5e9',
       },
       borderRadius: {
         xl2: '16px',
@@ -18,7 +20,7 @@ export default {
         sans: ['Inter', 'system-ui', 'Segoe UI', 'Roboto', 'Arial', 'sans-serif'],
       },
       boxShadow: {
-        soft: '0 6px 20px rgba(15, 23, 42, 0.08)',
+        soft: '0 10px 30px rgba(79, 70, 229, 0.12)',
       },
     },
   },
