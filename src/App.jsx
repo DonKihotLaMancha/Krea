@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist';
 import { Bar, Doughnut, Line } from 'react-chartjs-2';
 import {
@@ -17,13 +17,14 @@ import UploadCard from './components/UploadCard';
 import FlashcardDeck from './components/FlashcardDeck';
 import SubirArchivoPanel from './components/SubirArchivoPanel';
 import TablaApartados from './components/TablaApartados';
-import GraficasProgreso from './components/GraficasProgreso';
-import SesionEstudio from './components/SesionEstudio';
+const GraficasProgreso = lazy(() => import('./components/GraficasProgreso'));
+const SesionEstudio = lazy(() => import('./components/SesionEstudio'));
+const ConceptMap = lazy(() => import('./components/ConceptMap'));
 
 ChartJS.register(ArcElement, BarElement, Tooltip, Legend, CategoryScale, LinearScale, PointElement, LineElement);
 GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).toString();
 
-const tabs = ['Ingest', 'Flashcards', 'Tasks', 'Quizzes', 'Chat', 'Presentations', 'Academics', 'AI Tutor'];
+const tabs = ['Ingest', 'Flashcards', 'Concept Map', 'Tasks', 'Quizzes', 'Chat', 'Presentations', 'Academics', 'AI Tutor'];
 
 function cleanAcademicText(raw) {
   return (raw || '')
@@ -58,33 +59,33 @@ function fallbackCardsFromText(raw) {
 }
 
 async function generateCardsWithOllama(text) {
-  const resp = await fetch('/api/flashcards', {
+  const resp = await fetchWithTimeout('/api/flashcards', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text }),
-  });
+  }, 35000);
   if (!resp.ok) throw new Error('Ollama API error');
   const data = await resp.json();
   return Array.isArray(data.cards) ? data.cards : [];
 }
 
 async function generateSectionsWithOllama({ text, title }) {
-  const resp = await fetch('/api/sections', {
+  const resp = await fetchWithTimeout('/api/sections', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, title }),
-  });
+  }, 35000);
   if (!resp.ok) throw new Error('Sections API error');
   const data = await resp.json();
   return Array.isArray(data.apartados) ? data.apartados : [];
 }
 
 async function generatePresentationWithOllama({ topic, promptText, sources = [], slides = 8 }) {
-  const resp = await fetch('/api/presentation', {
+  const resp = await fetchWithTimeout('/api/presentation', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ topic, promptText, sources, slides }),
-  });
+  }, 45000);
   if (!resp.ok) throw new Error('Presentation API error');
   const data = await resp.json();
   return {
@@ -92,6 +93,19 @@ async function generatePresentationWithOllama({ topic, promptText, sources = [],
     slides: Array.isArray(data.slides) ? data.slides : [],
     references: Array.isArray(data.references) ? data.references : [],
   };
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error('Request timed out.');
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 function buildFallbackPresentation(topic, promptText, sourceNames = []) {
@@ -275,14 +289,18 @@ export default function App() {
     return grades.reduce((s, g) => s + g.score * g.weight, 0) / w;
   }, [grades]);
 
-  const stats = {
+  const stats = useMemo(() => ({
     cardsCount: cards.length,
     tasksDone: tasks.filter((t) => t.done).length,
     tasksTotal: tasks.length,
     avg,
-  };
+  }), [cards.length, tasks, avg]);
 
   const generateForChunk = async (chunk, { append = false } = {}) => {
+    if (!chunk?.content?.trim()) {
+      setNotice('No readable content found for flashcard generation.');
+      return;
+    }
     setIsGenerating(true);
     setGenerationProgress(100);
     setGenerationIndeterminate(true);
@@ -317,7 +335,7 @@ export default function App() {
           ? `AI returned no cards. Added ${fallback.length} backup flashcards.`
           : `AI returned no cards. Generated ${fallback.length} backup cards.`,
       );
-    } catch {
+    } catch (error) {
       setGenerationIndeterminate(true);
       setGenerationStage('AI unavailable, switching to backup mode...');
       const fallback = fallbackCardsFromText(chunk.content);
@@ -330,7 +348,7 @@ export default function App() {
       setNotice(
         append
           ? `AI model offline — added ${fallback.length} backup cards.`
-          : `AI model offline — using backup mode (${fallback.length} cards).`,
+          : `${error?.message || 'AI model offline'} — using backup mode (${fallback.length} cards).`,
       );
     } finally {
       setIsGenerating(false);
@@ -343,28 +361,38 @@ export default function App() {
   };
 
   const onFileUpload = async (file) => {
+    if (!file) {
+      setNotice('Please select a file first.');
+      return;
+    }
     setGenerationIndeterminate(false);
     setGenerationProgress(5);
     setGenerationStage('Uploading file...');
-    const text = await fileToText(file, ({ progress, label }) => {
-      setGenerationIndeterminate(false);
-      setGenerationProgress(progress);
-      setGenerationStage(label);
-    });
-    if (!file.name.toLowerCase().endsWith('.pdf')) {
-      setGenerationProgress(100);
-      setGenerationStage('Preparing extracted text...');
-    }
-    const cleaned = cleanAcademicText(text);
-    if (!cleaned || looksLikeGibberish(cleaned)) {
-      setNotice('Could not extract readable text. Use a text-based PDF/TXT.');
+    try {
+      const text = await fileToText(file, ({ progress, label }) => {
+        setGenerationIndeterminate(false);
+        setGenerationProgress(progress);
+        setGenerationStage(label);
+      });
+      if (!file.name.toLowerCase().endsWith('.pdf')) {
+        setGenerationProgress(100);
+        setGenerationStage('Preparing extracted text...');
+      }
+      const cleaned = cleanAcademicText(text);
+      if (!cleaned || looksLikeGibberish(cleaned)) {
+        setNotice('Could not extract readable text. Use a text-based PDF/TXT.');
+        setGenerationProgress(0);
+        setGenerationStage('');
+        return;
+      }
+      const chunk = { id: `${Date.now()}`, name: file.name, content: cleaned };
+      setChunks((prev) => [chunk, ...prev]);
+      await generateForChunk(chunk);
+    } catch (error) {
+      setNotice(`Upload failed: ${error?.message || 'Unknown error.'}`);
       setGenerationProgress(0);
       setGenerationStage('');
-      return;
     }
-    const chunk = { id: `${Date.now()}`, name: file.name, content: cleaned };
-    setChunks((prev) => [chunk, ...prev]);
-    await generateForChunk(chunk);
   };
 
   const markCard = (ok) => {
@@ -401,7 +429,7 @@ export default function App() {
       }));
       setApartados(normalized);
       setNotice(`Extracted ${normalized.length} main sections.`);
-    } catch {
+    } catch (error) {
       const fallback = chunk.content
         .split(/\n+/)
         .map((line) => line.trim())
@@ -416,7 +444,7 @@ export default function App() {
           fechas_trabajo: [],
         }));
       setApartados(fallback);
-      setNotice(`AI unavailable. Built ${fallback.length} backup sections.`);
+      setNotice(`${error?.message || 'AI unavailable'}. Built ${fallback.length} backup sections.`);
     } finally {
       setIsAnalyzingSections(false);
     }
@@ -450,10 +478,10 @@ export default function App() {
       const fallback = buildFallbackPresentation(resolvedTopic, promptText, sourceChunks.map((c) => c.name));
       setPresentations((prev) => [{ id: Date.now(), ...fallback }, ...prev]);
       setNotice(`AI returned no slides. Created backup outline (${slideCountLabel(fallback.slides.length)}).`);
-    } catch {
+    } catch (error) {
       const fallback = buildFallbackPresentation(resolvedTopic, promptText, sourceChunks.map((c) => c.name));
       setPresentations((prev) => [{ id: Date.now(), ...fallback }, ...prev]);
-      setNotice(`AI model offline — generated backup outline (${slideCountLabel(fallback.slides.length)}).`);
+      setNotice(`${error?.message || 'AI model offline'} — generated backup outline (${slideCountLabel(fallback.slides.length)}).`);
     } finally {
       setIsGeneratingPresentation(false);
     }
@@ -473,7 +501,7 @@ export default function App() {
     ]);
   };
 
-  const gradesChartData = {
+  const gradesChartData = useMemo(() => ({
     labels: grades.map((g) => g.subject).reverse(),
     datasets: [
       {
@@ -483,15 +511,15 @@ export default function App() {
         backgroundColor: 'rgba(37,99,235,0.2)',
       },
     ],
-  };
+  }), [grades]);
 
   const requiredFinal = simulations[0]?.req ?? 0;
-  const kpiData = {
+  const kpiData = useMemo(() => ({
     labels: ['Current Avg', 'Required Final'],
     datasets: [
       { data: [avg || 0, requiredFinal || 0], backgroundColor: ['#2563eb', '#10b981'] },
     ],
-  };
+  }), [avg, requiredFinal]);
 
   return (
     <AppShell
@@ -550,16 +578,18 @@ export default function App() {
                   <button className="btn-ghost" onClick={() => setStudyMode('review')}>Review difficult only</button>
                 </div>
               ) : (
-                <SesionEstudio
-                  tarjetas={cards}
-                  soloRepaso={studyMode === 'review'}
-                  onGuardar={(updates) =>
-                    setCards((prev) =>
-                      prev.map((c) => (updates[c.id] ? { ...c, ...updates[c.id] } : c)),
-                    )
-                  }
-                  onVolver={() => setStudyMode(null)}
-                />
+                <Suspense fallback={<section className="panel mt-2 text-sm text-muted">Loading study session...</section>}>
+                  <SesionEstudio
+                    tarjetas={cards}
+                    soloRepaso={studyMode === 'review'}
+                    onGuardar={(updates) =>
+                      setCards((prev) =>
+                        prev.map((c) => (updates[c.id] ? { ...c, ...updates[c.id] } : c)),
+                      )
+                    }
+                    onVolver={() => setStudyMode(null)}
+                  />
+                </Suspense>
               )}
             </section>
           ) : null}
@@ -578,6 +608,11 @@ export default function App() {
           chunks={chunks}
         />
       ) : null}
+      {tab === 'Concept Map' ? (
+        <Suspense fallback={<section className="panel text-sm text-muted">Loading concept map...</section>}>
+          <ConceptMap apartados={apartados} />
+        </Suspense>
+      ) : null}
       {tab === 'Academics' ? (
         <>
           <Academics
@@ -589,7 +624,9 @@ export default function App() {
             gradesChartData={gradesChartData}
             kpiData={kpiData}
           />
-          <GraficasProgreso apartados={apartados} />
+          <Suspense fallback={<section className="panel mt-4 text-sm text-muted">Loading charts...</section>}>
+            <GraficasProgreso apartados={apartados} />
+          </Suspense>
         </>
       ) : null}
       {tab === 'AI Tutor' ? <AiTutor tutorMessages={tutorMessages} setTutorMessages={setTutorMessages} /> : null}

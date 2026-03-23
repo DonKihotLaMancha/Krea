@@ -23,10 +23,10 @@ export default function FlashcardDeck({
         <>
           <p className="mb-2 text-xs text-muted">Card 1 of {cards.length}</p>
           <div className="mb-3 h-2 w-full rounded-full bg-slate-100">
-            <div className="h-2 rounded-full bg-accent" style={{ width: `${Math.max(8, (1 / cards.length) * 100)}%` }} />
+            <div className="h-2 rounded-full bg-gradient-to-r from-indigo-600 via-violet-600 to-cyan-500" style={{ width: `${Math.max(8, (1 / cards.length) * 100)}%` }} />
           </div>
-          <div className="rounded-xl border border-border bg-slate-50 p-4">
-            <p className="font-medium">{currentCard.question}</p>
+          <div className="rounded-xl border border-indigo-100 bg-gradient-to-br from-white to-indigo-50/60 p-4">
+            <p className="font-medium leading-relaxed">{currentCard.question}</p>
             <AnimatePresence mode="wait">
               {showAnswer ? (
                 <motion.p

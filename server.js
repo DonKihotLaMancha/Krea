@@ -5,6 +5,7 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://127.0.0.1:11434';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen2.5:7b';
+const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 45000);
 
 app.use(cors());
 app.use(express.json({ limit: '4mb' }));
@@ -36,6 +37,7 @@ Rules:
 - Questions must be diverse: definition, why, how, comparison, application.
 - Answers concise (1-3 sentences).
 - evidence must copy exact short phrase from SOURCE_JSON.sentences or SOURCE_JSON.facts.
+- Avoid duplicate questions and generic wording.
 - Return valid JSON only:
 {"cards":[{"question":"...","answer":"...","evidence":"..."}]}
 
@@ -45,7 +47,7 @@ ${JSON.stringify(sourceJson)}
 
   try {
     let cards = await generateCardsWithOllama(prompt);
-    if (!cards.length) {
+    if (cards.length < 5) {
       // Recovery prompt: guarantee cards from explicit facts list.
       const fallbackPrompt = `
 Return 8 flashcards from SOURCE_JSON.facts only.
@@ -94,6 +96,7 @@ Rules:
 - Keep bullets short and concrete.
 - Add short speaker notes (1-2 sentences).
 - Add references and Google Scholar links when available.
+- Ensure slide titles are unique and avoid repeated bullets.
 - Return JSON only with this exact shape:
 {
   "title":"...",
@@ -127,7 +130,7 @@ ${JSON.stringify(sourceJson)}
 
   try {
     let presentation = await generatePresentationWithOllama(prompt);
-    if (!presentation.slides.length) {
+    if (presentation.slides.length < Math.max(3, requestedSlides - 2)) {
       const fallbackPrompt = `
 Return strict JSON only:
 {
@@ -182,7 +185,7 @@ ${JSON.stringify(sourceJson)}
 
   try {
     let apartados = await generateSectionsWithOllama(prompt);
-    if (!apartados.length) {
+    if (apartados.length < 3) {
       const fallbackPrompt = `
 Return strict JSON only:
 {
@@ -196,6 +199,9 @@ ${JSON.stringify(sourceJson)}
 `;
       apartados = await generateSectionsWithOllama(fallbackPrompt);
     }
+    if (apartados.length < 3) {
+      apartados = buildLocalApartadosFallback(sourceJson);
+    }
     return res.json({ apartados });
   } catch (error) {
     return res.status(500).json({ error: 'Could not extract sections.', details: String(error) });
@@ -203,20 +209,7 @@ ${JSON.stringify(sourceJson)}
 });
 
 async function generateCardsWithOllama(prompt) {
-  const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: OLLAMA_MODEL,
-      prompt,
-      stream: false,
-      format: 'json',
-      options: { temperature: 0.2 },
-    }),
-  });
-
-  if (!resp.ok) throw new Error('Failed to query Ollama.');
-  const data = await resp.json();
+  const data = await callOllama(prompt);
   const raw = String(data.response || '').trim();
   const parsed = safeParseModelJson(raw);
   const cards = Array.isArray(parsed.cards)
@@ -232,24 +225,11 @@ async function generateCardsWithOllama(prompt) {
           wrong: 0,
         }))
     : [];
-  return cards;
+  return normalizeCards(cards);
 }
 
 async function generatePresentationWithOllama(prompt) {
-  const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: OLLAMA_MODEL,
-      prompt,
-      stream: false,
-      format: 'json',
-      options: { temperature: 0.2 },
-    }),
-  });
-
-  if (!resp.ok) throw new Error('Failed to query Ollama.');
-  const data = await resp.json();
+  const data = await callOllama(prompt);
   const raw = String(data.response || '').trim();
   const parsed = safeParseModelJson(raw);
 
@@ -275,28 +255,16 @@ async function generatePresentationWithOllama(prompt) {
           graphSuggestion: String(s.graphSuggestion || '').trim(),
         }))
     : [];
-
-  const finalReferences = references.length ? references : buildScholarReferencesFromSlides(title, slides);
-  return { title, slides, references: finalReferences };
+  const normalizedSlides = normalizeSlides(slides);
+  const finalReferences = references.length ? references : buildScholarReferencesFromSlides(title, normalizedSlides);
+  return { title, slides: normalizedSlides, references: finalReferences };
 }
 
 async function generateSectionsWithOllama(prompt) {
-  const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: OLLAMA_MODEL,
-      prompt,
-      stream: false,
-      format: 'json',
-      options: { temperature: 0.2 },
-    }),
-  });
-  if (!resp.ok) throw new Error('Failed to query Ollama.');
-  const data = await resp.json();
+  const data = await callOllama(prompt);
   const raw = String(data.response || '').trim();
   const parsed = safeParseModelJson(raw);
-  return Array.isArray(parsed?.apartados)
+  const apartados = Array.isArray(parsed?.apartados)
     ? parsed.apartados
         .filter((a) => a?.nombre)
         .slice(0, 12)
@@ -306,6 +274,83 @@ async function generateSectionsWithOllama(prompt) {
           descripcion: String(a.descripcion || '').trim(),
         }))
     : [];
+  return normalizeApartados(apartados);
+}
+
+async function callOllama(prompt) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
+  try {
+    const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: OLLAMA_MODEL,
+        prompt,
+        stream: false,
+        format: 'json',
+        options: { temperature: 0.2 },
+      }),
+      signal: controller.signal,
+    });
+    if (!resp.ok) throw new Error(`Failed to query Ollama (${resp.status}).`);
+    return await resp.json();
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error('Ollama timed out.');
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function normalizeCards(cards) {
+  const seen = new Set();
+  return cards
+    .map((c) => ({
+      ...c,
+      question: c.question.replace(/\s+/g, ' ').trim(),
+      answer: c.answer.replace(/\s+/g, ' ').trim(),
+    }))
+    .filter((c) => c.question.length >= 10 && c.answer.length >= 15)
+    .filter((c) => {
+      const k = c.question.toLowerCase();
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+}
+
+function normalizeSlides(slides) {
+  const seenTitle = new Set();
+  return slides.filter((s) => {
+    const k = s.title.toLowerCase();
+    if (seenTitle.has(k)) return false;
+    seenTitle.add(k);
+    return s.bullets.length >= 2;
+  });
+}
+
+function normalizeApartados(apartados) {
+  const seenName = new Set();
+  return apartados.filter((a) => {
+    const k = a.nombre.toLowerCase();
+    if (seenName.has(k)) return false;
+    seenName.add(k);
+    return a.nombre.length >= 3;
+  });
+}
+
+function buildLocalApartadosFallback(sourceJson) {
+  const base = [...(sourceJson?.topics || []), ...(sourceJson?.facts || [])]
+    .map((v) => String(v || '').trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  const items = base.length ? base : ['Introduction', 'Core Concepts', 'Applications', 'Summary'];
+  return items.slice(0, 8).map((name, i) => ({
+    id: `a${i + 1}`,
+    nombre: name.split(/\s+/).slice(0, 6).join(' '),
+    descripcion: sourceJson?.facts?.[i] || '',
+  }));
 }
 
 function buildScholarReferencesFromSlides(title, slides) {
