@@ -63,6 +63,63 @@ async function generateCardsWithOllama(text) {
   return Array.isArray(data.cards) ? data.cards : [];
 }
 
+async function generatePresentationWithOllama({ topic, promptText, sources = [], slides = 8 }) {
+  const resp = await fetch('/api/presentation', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ topic, promptText, sources, slides }),
+  });
+  if (!resp.ok) throw new Error('Presentation API error');
+  const data = await resp.json();
+  return {
+    title: String(data.title || topic).trim(),
+    slides: Array.isArray(data.slides) ? data.slides : [],
+    references: Array.isArray(data.references) ? data.references : [],
+  };
+}
+
+function buildFallbackPresentation(topic, promptText, sourceNames = []) {
+  const cleanedPrompt = cleanAcademicText(promptText || '');
+  const promptLines = cleanedPrompt
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 24);
+  const chunks = [];
+  for (let i = 0; i < promptLines.length; i += 3) {
+    chunks.push(promptLines.slice(i, i + 3));
+  }
+  const defaultSlides = [
+    ['Define the topic scope', 'Explain relevance in university context', 'State presentation objectives'],
+    ['Main concept and key terms', 'How the concept works', 'Typical real-world use'],
+    ['Core methods or process', 'Step-by-step flow', 'Important constraints'],
+    ['Benefits and limitations', 'Common mistakes', 'How to avoid them'],
+    ['Conclusion and recap', 'Actionable next steps', 'Short Q&A prompts'],
+  ];
+
+  const slides = (chunks.length ? chunks : defaultSlides).map((bullets, idx) => ({
+    title: idx === 0 ? 'Introduction' : `Section ${idx + 1}`,
+    bullets: bullets.slice(0, 5),
+    notes: `Keep this section focused on ${topic}.`,
+    imageSuggestion: `Simple visual for ${topic} - ${idx === 0 ? 'overview' : `section ${idx + 1}`}.`,
+    graphSuggestion: idx % 2 === 0 ? `Comparison chart for key metrics in section ${idx + 1}.` : '',
+  }));
+
+  return {
+    title: topic || 'Generated Presentation',
+    slides,
+    references: sourceNames.slice(0, 5).map((name) => ({
+      text: `Uploaded source: ${name}`,
+      url: '',
+    })),
+  };
+}
+
+function slideCountLabel(count) {
+  const n = Number(count) || 0;
+  return `${n} slide${n === 1 ? '' : 's'}`;
+}
+
 async function extractPdfText(file, onProgress) {
   const buffer = await file.arrayBuffer();
   const pdf = await getDocument({ data: buffer }).promise;
@@ -116,6 +173,7 @@ export default function App() {
   const [tutorMessages, setTutorMessages] = useState([]);
   const [notice, setNotice] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isGeneratingPresentation, setIsGeneratingPresentation] = useState(false);
   const [latestBatchAt, setLatestBatchAt] = useState(null);
   const [generationProgress, setGenerationProgress] = useState(0);
   const [generationStage, setGenerationStage] = useState('');
@@ -248,6 +306,43 @@ export default function App() {
     setShowAnswer(false);
   };
 
+  const generatePresentation = async ({ topic, promptText, chunkIds }) => {
+    setIsGeneratingPresentation(true);
+    setNotice('Generating your presentation...');
+    const sourceChunks = (Array.isArray(chunkIds) && chunkIds.length)
+      ? chunks.filter((c) => chunkIds.includes(c.id))
+      : (chunks[0] ? [chunks[0]] : []);
+    if (!sourceChunks.length) {
+      setNotice('Upload a PDF first, then generate a presentation from it.');
+      setIsGeneratingPresentation(false);
+      return;
+    }
+    const resolvedTopic = topic || sourceChunks[0].name.replace(/\.[^.]+$/, '');
+    const sources = sourceChunks.map((c) => ({ name: c.name, content: c.content }));
+    try {
+      const generated = await generatePresentationWithOllama({
+        topic: resolvedTopic,
+        promptText,
+        sources,
+        slides: 8,
+      });
+      if (generated.slides.length) {
+        setPresentations((prev) => [{ id: Date.now(), ...generated }, ...prev]);
+        setNotice(`Presentation generated: ${slideCountLabel(generated.slides.length)}.`);
+        return;
+      }
+      const fallback = buildFallbackPresentation(resolvedTopic, promptText, sourceChunks.map((c) => c.name));
+      setPresentations((prev) => [{ id: Date.now(), ...fallback }, ...prev]);
+      setNotice(`AI returned no slides. Created backup outline (${slideCountLabel(fallback.slides.length)}).`);
+    } catch {
+      const fallback = buildFallbackPresentation(resolvedTopic, promptText, sourceChunks.map((c) => c.name));
+      setPresentations((prev) => [{ id: Date.now(), ...fallback }, ...prev]);
+      setNotice(`AI model offline — generated backup outline (${slideCountLabel(fallback.slides.length)}).`);
+    } finally {
+      setIsGeneratingPresentation(false);
+    }
+  };
+
   const generateQuiz = () => {
     setQuizResults((prev) => [
       {
@@ -323,7 +418,15 @@ export default function App() {
       {tab === 'Tasks' ? <Tasks tasks={tasks} setTasks={setTasks} /> : null}
       {tab === 'Quizzes' ? <Quizzes config={quizConfig} setConfig={setQuizConfig} onGenerate={generateQuiz} results={quizResults} /> : null}
       {tab === 'Chat' ? <Chat room={room} setRoom={setRoom} messages={messages} setMessages={setMessages} /> : null}
-      {tab === 'Presentations' ? <Presentations presentations={presentations} setPresentations={setPresentations} /> : null}
+      {tab === 'Presentations' ? (
+        <Presentations
+          presentations={presentations}
+          setPresentations={setPresentations}
+          onGenerate={generatePresentation}
+          isGenerating={isGeneratingPresentation}
+          chunks={chunks}
+        />
+      ) : null}
       {tab === 'Academics' ? (
         <Academics
           grades={grades}
@@ -413,18 +516,242 @@ function Chat({ room, setRoom, messages, setMessages }) {
   );
 }
 
-function Presentations({ presentations, setPresentations }) {
+function Presentations({ presentations, setPresentations, onGenerate, isGenerating, chunks }) {
   const [topic, setTopic] = useState('My Project');
-  const [guide, setGuide] = useState('10 slides, include references');
+  const [promptText, setPromptText] = useState('Create a classroom-ready deck with examples and references.');
+  const [selectedChunkIds, setSelectedChunkIds] = useState([]);
+  const [previewId, setPreviewId] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [draft, setDraft] = useState(null);
+  const hasChunks = chunks.length > 0;
+  const selectedChunks = selectedChunkIds.length
+    ? chunks.filter((c) => selectedChunkIds.includes(c.id))
+    : (chunks[0] ? [chunks[0]] : []);
+  const previewPresentation = presentations.find((p) => p.id === previewId) || null;
+
+  const beginEdit = (p) => {
+    setEditingId(p.id);
+    setDraft({
+      title: p.title || '',
+      referencesText: (p.references || [])
+        .map((r) => (r.url ? `${r.text} | ${r.url}` : r.text))
+        .join('\n'),
+      slides: (p.slides || []).map((s) => ({
+        title: s.title || '',
+        bulletsText: Array.isArray(s.bullets) ? s.bullets.join('\n') : '',
+        notes: s.notes || '',
+        imageSuggestion: s.imageSuggestion || '',
+        graphSuggestion: s.graphSuggestion || '',
+      })),
+    });
+  };
+
+  const saveEdit = () => {
+    if (!editingId || !draft) return;
+    setPresentations((prev) =>
+      prev.map((p) => {
+        if (p.id !== editingId) return p;
+        return {
+          ...p,
+          title: draft.title.trim() || p.title,
+          references: draft.referencesText
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .map((line) => {
+              const [text, url] = line.split('|').map((x) => x?.trim() || '');
+              return { text, url };
+            }),
+          slides: draft.slides.map((s, idx) => ({
+            title: s.title.trim() || `Slide ${idx + 1}`,
+            bullets: s.bulletsText
+              .split('\n')
+              .map((line) => line.trim())
+              .filter(Boolean)
+              .slice(0, 6),
+            notes: s.notes.trim(),
+            imageSuggestion: s.imageSuggestion.trim(),
+            graphSuggestion: s.graphSuggestion.trim(),
+          })),
+        };
+      }),
+    );
+    setEditingId(null);
+    setDraft(null);
+  };
+
   return (
     <section className="panel">
       <h3 className="mb-3 text-lg font-semibold">Presentation Builder</h3>
       <div className="mb-3 flex flex-col gap-2">
+        <select
+          className="input"
+          multiple
+          value={selectedChunkIds}
+          onChange={(e) => setSelectedChunkIds(Array.from(e.target.selectedOptions).map((o) => o.value))}
+          disabled={!hasChunks}
+          size={Math.min(6, Math.max(3, chunks.length))}
+        >
+          {!hasChunks ? <option value="">Upload a PDF in Ingest first</option> : null}
+          {chunks.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+            </option>
+          ))}
+        </select>
+        {hasChunks ? <p className="text-xs text-muted">Select one or more uploaded PDFs as references.</p> : null}
         <input className="input" value={topic} onChange={(e) => setTopic(e.target.value)} />
-        <textarea className="input min-h-24" value={guide} onChange={(e) => setGuide(e.target.value)} />
-        <button className="btn-primary w-fit" onClick={() => setPresentations([{ id: Date.now(), title: topic, slides: ['Intro', 'Method', 'Results', 'Conclusion'], notes: guide }, ...presentations])}>Generate outline</button>
+        <textarea
+          className="input min-h-24"
+          value={promptText}
+          onChange={(e) => setPromptText(e.target.value)}
+          placeholder="Prompt example: Build 8 slides for second-year students, include a comparison graph and practical examples."
+        />
+        <button
+          className="btn-primary w-fit"
+          disabled={isGenerating || !hasChunks}
+          onClick={() => onGenerate({
+            topic: topic.trim() || (selectedChunks[0] ? selectedChunks[0].name.replace(/\.[^.]+$/, '') : ''),
+            promptText,
+            chunkIds: selectedChunkIds.length ? selectedChunkIds : [chunks[0].id],
+          })}
+        >
+          {isGenerating ? 'Generating presentation...' : 'Generate outline'}
+        </button>
       </div>
-      <ul className="space-y-2">{presentations.map((p) => <li key={p.id} className="rounded-lg border border-border bg-white px-3 py-2 text-sm">{p.title} ({p.slides.length} slides)</li>)}</ul>
+      <ul className="space-y-2">
+        {presentations.map((p) => (
+          <li key={p.id} className="rounded-lg border border-border bg-white px-3 py-2 text-sm">
+            <p className="font-medium">{p.title} ({slideCountLabel(p.slides.length)})</p>
+            {p.slides[0] ? (
+              <p className="mt-1 text-xs text-muted">
+                First slide: {p.slides[0].title}
+              </p>
+            ) : null}
+            <div className="mt-2 flex gap-2">
+              <button className="btn-ghost" onClick={() => setPreviewId((id) => (id === p.id ? null : p.id))}>
+                {previewId === p.id ? 'Hide preview' : 'Preview'}
+              </button>
+              <button className="btn-ghost" onClick={() => beginEdit(p)}>
+                Edit
+              </button>
+            </div>
+          </li>
+        ))}
+      </ul>
+
+      {previewPresentation ? (
+        <div className="mt-4 rounded-xl border border-border bg-slate-50 p-3">
+          <p className="text-sm font-semibold">Preview: {previewPresentation.title}</p>
+          <div className="mt-2 space-y-2">
+            {previewPresentation.slides.map((s, idx) => (
+              <div key={`${previewPresentation.id}-preview-${idx}`} className="rounded-lg border border-border bg-white p-2">
+                <p className="text-sm font-medium">{idx + 1}. {s.title}</p>
+                <ul className="mt-1 list-disc pl-5 text-xs text-muted">
+                  {(s.bullets || []).map((b, i) => <li key={`${previewPresentation.id}-${idx}-b-${i}`}>{b}</li>)}
+                </ul>
+                {s.imageSuggestion ? <p className="mt-1 text-xs text-muted">Image: {s.imageSuggestion}</p> : null}
+                {s.graphSuggestion ? <p className="text-xs text-muted">Graph: {s.graphSuggestion}</p> : null}
+              </div>
+            ))}
+          </div>
+          {(previewPresentation.references || []).length ? (
+            <div className="mt-3 rounded-lg border border-border bg-white p-2">
+              <p className="text-xs font-semibold">References</p>
+              <ul className="mt-1 list-disc pl-5 text-xs text-muted">
+                {previewPresentation.references.map((r, i) => (
+                  <li key={`${previewPresentation.id}-ref-${i}`}>
+                    {r.url ? <a className="underline" href={r.url} target="_blank" rel="noreferrer">{r.text}</a> : r.text}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {editingId && draft ? (
+        <div className="mt-4 rounded-xl border border-border bg-slate-50 p-3">
+          <p className="text-sm font-semibold">Edit presentation</p>
+          <input
+            className="input mt-2"
+            value={draft.title}
+            onChange={(e) => setDraft((d) => ({ ...d, title: e.target.value }))}
+            placeholder="Presentation title"
+          />
+          <textarea
+            className="input mt-2 min-h-16"
+            value={draft.referencesText}
+            onChange={(e) => setDraft((d) => ({ ...d, referencesText: e.target.value }))}
+            placeholder="References (one per line). Optional format: Title | URL"
+          />
+          <div className="mt-2 space-y-3">
+            {draft.slides.map((s, idx) => (
+              <div key={`edit-slide-${idx}`} className="rounded-lg border border-border bg-white p-2">
+                <input
+                  className="input mb-2"
+                  value={s.title}
+                  onChange={(e) =>
+                    setDraft((d) => ({
+                      ...d,
+                      slides: d.slides.map((x, i) => (i === idx ? { ...x, title: e.target.value } : x)),
+                    }))
+                  }
+                  placeholder={`Slide ${idx + 1} title`}
+                />
+                <textarea
+                  className="input mb-2 min-h-20"
+                  value={s.bulletsText}
+                  onChange={(e) =>
+                    setDraft((d) => ({
+                      ...d,
+                      slides: d.slides.map((x, i) => (i === idx ? { ...x, bulletsText: e.target.value } : x)),
+                    }))
+                  }
+                  placeholder="One bullet per line"
+                />
+                <textarea
+                  className="input min-h-16"
+                  value={s.notes}
+                  onChange={(e) =>
+                    setDraft((d) => ({
+                      ...d,
+                      slides: d.slides.map((x, i) => (i === idx ? { ...x, notes: e.target.value } : x)),
+                    }))
+                  }
+                  placeholder="Speaker notes"
+                />
+                <input
+                  className="input mt-2"
+                  value={s.imageSuggestion}
+                  onChange={(e) =>
+                    setDraft((d) => ({
+                      ...d,
+                      slides: d.slides.map((x, i) => (i === idx ? { ...x, imageSuggestion: e.target.value } : x)),
+                    }))
+                  }
+                  placeholder="Image suggestion"
+                />
+                <input
+                  className="input mt-2"
+                  value={s.graphSuggestion}
+                  onChange={(e) =>
+                    setDraft((d) => ({
+                      ...d,
+                      slides: d.slides.map((x, i) => (i === idx ? { ...x, graphSuggestion: e.target.value } : x)),
+                    }))
+                  }
+                  placeholder="Graph suggestion"
+                />
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 flex gap-2">
+            <button className="btn-primary" onClick={saveEdit}>Save changes</button>
+            <button className="btn-ghost" onClick={() => { setEditingId(null); setDraft(null); }}>Cancel</button>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
