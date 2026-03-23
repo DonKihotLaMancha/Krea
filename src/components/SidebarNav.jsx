@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom';
 import { BookOpen, ClipboardList, FileQuestion, GitBranch, GraduationCap, MessageSquare, Presentation, Upload, UserRoundCog } from 'lucide-react';
 
 const icons = {
@@ -11,7 +12,6 @@ const icons = {
   Presentations: Presentation,
   Academics: GraduationCap,
   'AI Tutor': BookOpen,
-  'Teacher Window': UserRoundCog,
 };
 
 /** Canvas-style dark rail: light/white text on dark background. */
@@ -20,7 +20,7 @@ export default function SidebarNav({ tabs, tab, onChange, collapsed, onToggleCol
 
   return (
     <aside
-      className={`w-full border-r border-black/20 bg-canvas-nav p-3 text-white md:sticky md:top-0 md:h-screen ${collapsed ? 'md:w-20 md:p-2' : 'md:w-64 md:p-4'}`}
+      className={`flex w-full flex-col border-r border-black/20 bg-canvas-nav p-3 text-white md:sticky md:top-0 md:h-screen ${collapsed ? 'md:w-20 md:p-2' : 'md:w-64 md:p-4'}`}
       style={{ backgroundColor: '#394b58', color: '#ffffff' }}
     >
       <div className={`mb-4 border-b border-white/15 pb-3 ${collapsed ? 'text-center' : ''}`}>
@@ -40,7 +40,7 @@ export default function SidebarNav({ tabs, tab, onChange, collapsed, onToggleCol
       >
         {collapsed ? 'Expand' : 'Collapse'}
       </button>
-      <nav className="flex gap-2 overflow-x-auto pb-1 md:h-[calc(100vh-160px)] md:flex-col md:overflow-auto">
+      <nav className="flex flex-1 gap-2 overflow-x-auto pb-1 md:flex-col md:overflow-auto md:pb-0">
         {tabs.map((item) => {
           const Icon = icons[item] || BookOpen;
           const active = tab === item;
@@ -65,6 +65,16 @@ export default function SidebarNav({ tabs, tab, onChange, collapsed, onToggleCol
           );
         })}
       </nav>
+      <div className={`mt-3 border-t border-white/15 pt-3 ${collapsed ? 'text-center' : ''}`}>
+        <Link
+          to="/teacher"
+          className="flex w-full items-center justify-center gap-2 rounded-lg border border-white/20 bg-white/10 px-3 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-white/15"
+          title="Teacher portal"
+        >
+          <UserRoundCog size={16} className="shrink-0 text-white/90" />
+          {!collapsed ? <span>Teacher portal</span> : null}
+        </Link>
+      </div>
     </aside>
   );
 }

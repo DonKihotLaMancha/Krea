@@ -20,7 +20,6 @@ import SubirArchivoPanel from './components/SubirArchivoPanel';
 import TablaApartados from './components/TablaApartados';
 import NotebookWorkspace from './components/NotebookWorkspace';
 import { supabase as supabaseBrowser } from './lib/supabaseClient';
-import TeacherWindow from './components/teacher/TeacherWindow';
 import CommandPalette from './components/CommandPalette';
 import TasksCalendar from './components/TasksCalendar';
 const GraficasProgreso = lazy(() => import('./components/GraficasProgreso'));
@@ -34,7 +33,7 @@ try {
   console.warn('[Student Assistant] PDF.js worker URL could not be set:', e);
 }
 
-const tabs = ['Ingest', 'Flashcards', 'Notebook', 'Concept Map', 'Tasks', 'Quizzes', 'Chat', 'Presentations', 'Academics', 'AI Tutor', 'Teacher Window'];
+const tabs = ['Ingest', 'Flashcards', 'Notebook', 'Concept Map', 'Tasks', 'Quizzes', 'Chat', 'Presentations', 'Academics', 'AI Tutor'];
 
 /** Local-only PDF backup (before sign-in). Cleared after successful sync to Supabase. */
 const LOCAL_PDFS_KEY = 'sa_account_pdfs_v1';
@@ -447,7 +446,7 @@ function displayNameFromUser(user) {
   return meta.full_name || meta.name || user.email?.split('@')[0] || 'Student';
 }
 
-export default function App() {
+export function StudentApp() {
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(!!supabaseBrowser);
   const studentId = session?.user?.id ?? null;
@@ -1217,9 +1216,6 @@ export default function App() {
             }
           }}
         />
-      ) : null}
-      {tab === 'Teacher Window' ? (
-        <TeacherWindow teacherId={studentId} setNotice={setNotice} />
       ) : null}
     </AppShell>
     <CommandPalette
