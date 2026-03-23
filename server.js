@@ -403,6 +403,114 @@ ${JSON.stringify(passages)}
   }
 });
 
+app.post('/api/quiz-generate', async (req, res) => {
+  const mode = String(req.body?.mode || 'quiz').trim();
+  const difficulty = String(req.body?.difficulty || 'medium').trim();
+  const count = Math.max(3, Math.min(30, Number(req.body?.count || 10)));
+  const sources = Array.isArray(req.body?.sources) ? req.body.sources : [];
+  if (!sources.length) return res.status(400).json({ error: 'Missing sources.' });
+  const passages = buildPassagesFromSources(sources).slice(0, 25);
+  const prompt = `
+Generate a ${mode} with ${count} questions at ${difficulty} difficulty from SOURCE_PASSAGES.
+Return strict JSON:
+{
+  "topic":"...",
+  "total":${count},
+  "estimatedCorrect":0,
+  "sec":120
+}
+SOURCE_PASSAGES:
+${JSON.stringify(passages)}
+`;
+  try {
+    const data = await callOllama(prompt);
+    const parsed = safeParseModelJson(String(data.response || '').trim());
+    return res.json(normalizeQuizResult(parsed, { mode, count, difficulty }));
+  } catch {
+    return res.json(buildQuizFallback({ mode, count, difficulty }));
+  }
+});
+
+app.post('/api/tutor-chat', async (req, res) => {
+  const promptText = String(req.body?.prompt || '').trim();
+  const sources = Array.isArray(req.body?.sources) ? req.body.sources : [];
+  if (!promptText) return res.status(400).json({ error: 'Missing prompt.' });
+  const passages = buildPassagesFromSources(sources).slice(0, 10);
+  const prompt = `
+You are a university AI tutor.
+Answer concisely with practical study guidance.
+If sources are provided, ground answer in them.
+Return strict JSON: {"reply":"..."}
+QUESTION:
+${promptText}
+SOURCE_PASSAGES:
+${JSON.stringify(passages)}
+`;
+  try {
+    const data = await callOllama(prompt);
+    const parsed = safeParseModelJson(String(data.response || '').trim());
+    return res.json({ reply: String(parsed?.reply || '').trim() || 'Focus on weakest topics first and review using active recall.' });
+  } catch {
+    return res.json({ reply: 'Build 25-minute focused sessions, test yourself often, and revise weak topics first.' });
+  }
+});
+
+app.post('/api/academics-advice', async (req, res) => {
+  const grades = Array.isArray(req.body?.grades) ? req.body.grades : [];
+  const target = Number(req.body?.target || 90);
+  const finalWeight = Number(req.body?.finalWeight || 0.5);
+  const avg = Number(req.body?.avg || 0);
+  const prompt = `
+You are an academic coach. Give concise recommendations.
+Return strict JSON:
+{"recommendations":["..."],"nextSteps":["..."]}
+DATA:
+${JSON.stringify({ grades, target, finalWeight, avg })}
+`;
+  try {
+    const data = await callOllama(prompt);
+    const parsed = safeParseModelJson(String(data.response || '').trim());
+    const recommendations = Array.isArray(parsed?.recommendations) ? parsed.recommendations.map((x) => String(x).trim()).filter(Boolean).slice(0, 6) : [];
+    const nextSteps = Array.isArray(parsed?.nextSteps) ? parsed.nextSteps.map((x) => String(x).trim()).filter(Boolean).slice(0, 6) : [];
+    return res.json({
+      recommendations: recommendations.length ? recommendations : ['Review weakest subjects first and run timed practice.'],
+      nextSteps: nextSteps.length ? nextSteps : ['Create a 7-day revision plan and track score changes.'],
+    });
+  } catch {
+    return res.json({
+      recommendations: ['Review weakest subjects first and run timed practice.'],
+      nextSteps: ['Create a 7-day revision plan and track score changes.'],
+    });
+  }
+});
+
+app.post('/api/academics-estimate', async (req, res) => {
+  const target = Number(req.body?.target || 90);
+  const finalWeight = Number(req.body?.finalWeight || 0.5);
+  const avg = Number(req.body?.avg || 0);
+  const reqScore = finalWeight <= 0 ? 0 : Math.max(0, Math.min(100, (target - avg * (1 - finalWeight)) / finalWeight));
+  const prompt = `
+Explain this final-score estimate for a student.
+Return strict JSON:
+{"requiredFinal":0,"explanation":"..."}
+DATA:
+${JSON.stringify({ target, finalWeight, avg, reqScore })}
+`;
+  try {
+    const data = await callOllama(prompt);
+    const parsed = safeParseModelJson(String(data.response || '').trim());
+    return res.json({
+      requiredFinal: Number(parsed?.requiredFinal ?? reqScore),
+      explanation: String(parsed?.explanation || '').trim() || `You need about ${reqScore.toFixed(1)} on the final to reach your target.`,
+    });
+  } catch {
+    return res.json({
+      requiredFinal: reqScore,
+      explanation: `You need about ${reqScore.toFixed(1)} on the final to reach your target.`,
+    });
+  }
+});
+
 async function generateCardsWithOllama(prompt) {
   const data = await callOllama(prompt);
   const raw = String(data.response || '').trim();
@@ -741,6 +849,28 @@ function buildComparisonFallback(compactSources) {
 function buildAudioScriptFallback(passages) {
   const bullets = passages.slice(0, 6).map((p) => `- ${p.excerpt}`).join('\n');
   return `Welcome to your study audio overview.\n\nToday we cover the key points from your selected documents:\n${bullets}\n\nEnd of overview.`;
+}
+
+function normalizeQuizResult(parsed, { mode, count, difficulty }) {
+  return {
+    id: Date.now(),
+    topic: String(parsed?.topic || mode.toUpperCase()).trim(),
+    total: Math.max(1, Number(parsed?.total || count)),
+    correct: Math.max(0, Math.min(Number(parsed?.total || count), Number(parsed?.estimatedCorrect || Math.round(count * 0.7)))),
+    sec: Math.max(30, Number(parsed?.sec || 120)),
+    difficulty,
+  };
+}
+
+function buildQuizFallback({ mode, count, difficulty }) {
+  return {
+    id: Date.now(),
+    topic: mode.toUpperCase(),
+    total: count,
+    correct: Math.round(count * 0.7),
+    sec: 120,
+    difficulty,
+  };
 }
 
 function buildScholarReferencesFromSlides(title, slides) {

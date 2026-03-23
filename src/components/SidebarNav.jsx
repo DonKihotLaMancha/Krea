@@ -3,6 +3,7 @@ import { BookOpen, ClipboardList, FileQuestion, GitBranch, GraduationCap, Messag
 const icons = {
   Ingest: Upload,
   Flashcards: BookOpen,
+  Notebook: BookOpen,
   'Concept Map': GitBranch,
   Tasks: ClipboardList,
   Quizzes: FileQuestion,

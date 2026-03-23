@@ -17,6 +17,7 @@ import UploadCard from './components/UploadCard';
 import FlashcardDeck from './components/FlashcardDeck';
 import SubirArchivoPanel from './components/SubirArchivoPanel';
 import TablaApartados from './components/TablaApartados';
+import NotebookWorkspace from './components/NotebookWorkspace';
 const GraficasProgreso = lazy(() => import('./components/GraficasProgreso'));
 const SesionEstudio = lazy(() => import('./components/SesionEstudio'));
 const ConceptMap = lazy(() => import('./components/ConceptMap'));
@@ -24,7 +25,7 @@ const ConceptMap = lazy(() => import('./components/ConceptMap'));
 ChartJS.register(ArcElement, BarElement, Tooltip, Legend, CategoryScale, LinearScale, PointElement, LineElement);
 GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).toString();
 
-const tabs = ['Ingest', 'Flashcards', 'Concept Map', 'Tasks', 'Quizzes', 'Chat', 'Presentations', 'Academics', 'AI Tutor'];
+const tabs = ['Ingest', 'Flashcards', 'Notebook', 'Concept Map', 'Tasks', 'Quizzes', 'Chat', 'Presentations', 'Academics', 'AI Tutor'];
 
 function cleanAcademicText(raw) {
   return (raw || '')
@@ -108,6 +109,96 @@ async function generateConceptMapWithOllama({ text, title }) {
     nodes: Array.isArray(data.nodes) ? data.nodes : [],
     links: Array.isArray(data.links) ? data.links : [],
   };
+}
+
+async function sourceChatWithOllama({ question, sources }) {
+  const resp = await fetchWithTimeout('/api/source-chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question, sources }),
+  }, 45000);
+  if (!resp.ok) throw new Error('Source chat API error');
+  return await resp.json();
+}
+
+async function generateSummaryWithOllama({ sources }) {
+  const resp = await fetchWithTimeout('/api/summary', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sources }),
+  }, 45000);
+  if (!resp.ok) throw new Error('Summary API error');
+  return await resp.json();
+}
+
+async function generateStudyGuideWithOllama({ sources }) {
+  const resp = await fetchWithTimeout('/api/study-guide', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sources }),
+  }, 45000);
+  if (!resp.ok) throw new Error('Study guide API error');
+  return await resp.json();
+}
+
+async function compareSourcesWithOllama({ sources }) {
+  const resp = await fetchWithTimeout('/api/source-compare', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sources }),
+  }, 45000);
+  if (!resp.ok) throw new Error('Source compare API error');
+  return await resp.json();
+}
+
+async function generateAudioOverviewWithOllama({ sources }) {
+  const resp = await fetchWithTimeout('/api/audio-overview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sources }),
+  }, 45000);
+  if (!resp.ok) throw new Error('Audio overview API error');
+  return await resp.json();
+}
+
+async function generateQuizWithOllama({ mode, difficulty, count, sources }) {
+  const resp = await fetchWithTimeout('/api/quiz-generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode, difficulty, count, sources }),
+  }, 45000);
+  if (!resp.ok) throw new Error('Quiz API error');
+  return await resp.json();
+}
+
+async function tutorChatWithOllama({ prompt, sources }) {
+  const resp = await fetchWithTimeout('/api/tutor-chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt, sources }),
+  }, 45000);
+  if (!resp.ok) throw new Error('Tutor API error');
+  return await resp.json();
+}
+
+async function academicsAdviceWithOllama({ grades, target, finalWeight, avg }) {
+  const resp = await fetchWithTimeout('/api/academics-advice', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ grades, target, finalWeight, avg }),
+  }, 45000);
+  if (!resp.ok) throw new Error('Academics advice API error');
+  return await resp.json();
+}
+
+async function academicsEstimateWithOllama({ target, finalWeight, avg }) {
+  const resp = await fetchWithTimeout('/api/academics-estimate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target, finalWeight, avg }),
+  }, 45000);
+  if (!resp.ok) throw new Error('Academics estimate API error');
+  return await resp.json();
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
@@ -278,8 +369,12 @@ export default function App() {
   const [studyMode, setStudyMode] = useState(null);
   const [conceptMapData, setConceptMapData] = useState(null);
   const [isGeneratingConceptMap, setIsGeneratingConceptMap] = useState(false);
+  const [isNotebookBusy, setIsNotebookBusy] = useState(false);
   const [modelStatus, setModelStatus] = useState({ ok: false, model: 'qwen2.5:7b' });
   const [quizConfig, setQuizConfig] = useState({ mode: 'quiz', difficulty: 'medium', count: 10 });
+  const [isGeneratingQuiz, setIsGeneratingQuiz] = useState(false);
+  const [isTutorBusy, setIsTutorBusy] = useState(false);
+  const [isAcademicsAiBusy, setIsAcademicsAiBusy] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -532,18 +627,43 @@ export default function App() {
     }
   };
 
-  const generateQuiz = () => {
-    setQuizResults((prev) => [
-      {
-        id: Date.now(),
-        topic: quizConfig.mode.toUpperCase(),
-        total: Number(quizConfig.count),
-        correct: Math.round(Number(quizConfig.count) * 0.75),
-        sec: 120,
+  const runNotebookAction = async (action, label) => {
+    setIsNotebookBusy(true);
+    setNotice(`${label}...`);
+    try {
+      const result = await action();
+      setNotice(`${label} completed.`);
+      return result;
+    } catch (error) {
+      setNotice(`${error?.message || `${label} failed`}.`);
+      throw error;
+    } finally {
+      setIsNotebookBusy(false);
+    }
+  };
+
+  const generateQuiz = async () => {
+    const sources = (chunks.length ? [chunks[0]] : []).map((c) => ({ name: c.name, content: c.content }));
+    if (!sources.length) {
+      setNotice('Upload a PDF first to generate AI quizzes.');
+      return;
+    }
+    setIsGeneratingQuiz(true);
+    setNotice('Powered by Ollama: generating quiz...');
+    try {
+      const result = await generateQuizWithOllama({
+        mode: quizConfig.mode,
         difficulty: quizConfig.difficulty,
-      },
-      ...prev,
-    ]);
+        count: Number(quizConfig.count),
+        sources,
+      });
+      setQuizResults((prev) => [result, ...prev]);
+      setNotice('Powered by Ollama: quiz generated.');
+    } catch (error) {
+      setNotice(`${error?.message || 'Quiz generation failed'}.`);
+    } finally {
+      setIsGeneratingQuiz(false);
+    }
   };
 
   const gradesChartData = useMemo(() => ({
@@ -640,9 +760,53 @@ export default function App() {
           ) : null}
         </>
       ) : null}
+      {tab === 'Notebook' ? (
+        <NotebookWorkspace
+          chunks={chunks}
+          isBusy={isNotebookBusy}
+          onSourceChat={({ question, sources }) =>
+            runNotebookAction(
+              () => sourceChatWithOllama({ question, sources }),
+              'Source-grounded chat',
+            )
+          }
+          onSummary={({ sources }) =>
+            runNotebookAction(
+              () => generateSummaryWithOllama({ sources }),
+              'Summary generation',
+            )
+          }
+          onStudyGuide={({ sources }) =>
+            runNotebookAction(
+              () => generateStudyGuideWithOllama({ sources }),
+              'Study guide generation',
+            )
+          }
+          onCompare={({ sources }) =>
+            runNotebookAction(
+              () => compareSourcesWithOllama({ sources }),
+              'Source comparison',
+            )
+          }
+          onAudioOverview={({ sources }) =>
+            runNotebookAction(
+              () => generateAudioOverviewWithOllama({ sources }),
+              'Audio overview generation',
+            )
+          }
+        />
+      ) : null}
 
       {tab === 'Tasks' ? <Tasks tasks={tasks} setTasks={setTasks} /> : null}
-      {tab === 'Quizzes' ? <Quizzes config={quizConfig} setConfig={setQuizConfig} onGenerate={generateQuiz} results={quizResults} /> : null}
+      {tab === 'Quizzes' ? (
+        <Quizzes
+          config={quizConfig}
+          setConfig={setQuizConfig}
+          onGenerate={generateQuiz}
+          results={quizResults}
+          isGenerating={isGeneratingQuiz}
+        />
+      ) : null}
       {tab === 'Chat' ? <Chat room={room} setRoom={setRoom} messages={messages} setMessages={setMessages} /> : null}
       {tab === 'Presentations' ? (
         <Presentations
@@ -674,13 +838,67 @@ export default function App() {
             avg={avg}
             gradesChartData={gradesChartData}
             kpiData={kpiData}
+            isBusy={isAcademicsAiBusy}
+            onAiAdvice={async ({ target, finalWeight }) => {
+              setIsAcademicsAiBusy(true);
+              setNotice('Powered by Ollama: generating academic recommendations...');
+              try {
+                const data = await academicsAdviceWithOllama({ grades, target, finalWeight, avg });
+                setNotice('Powered by Ollama: recommendations ready.');
+                return data;
+              } catch (error) {
+                setNotice(`${error?.message || 'Advice generation failed'}.`);
+                return null;
+              } finally {
+                setIsAcademicsAiBusy(false);
+              }
+            }}
+            onAiEstimate={async ({ target, finalWeight }) => {
+              setIsAcademicsAiBusy(true);
+              setNotice('Powered by Ollama: estimating required final...');
+              try {
+                const data = await academicsEstimateWithOllama({ target, finalWeight, avg });
+                if (typeof data?.requiredFinal === 'number') {
+                  setSimulations((prev) => [{ id: Date.now(), req: data.requiredFinal, target }, ...prev]);
+                }
+                setNotice('Powered by Ollama: estimate ready.');
+                return data;
+              } catch (error) {
+                setNotice(`${error?.message || 'Estimate failed'}.`);
+                return null;
+              } finally {
+                setIsAcademicsAiBusy(false);
+              }
+            }}
           />
           <Suspense fallback={<section className="panel mt-4 text-sm text-muted">Loading charts...</section>}>
             <GraficasProgreso apartados={apartados} />
           </Suspense>
         </>
       ) : null}
-      {tab === 'AI Tutor' ? <AiTutor tutorMessages={tutorMessages} setTutorMessages={setTutorMessages} /> : null}
+      {tab === 'AI Tutor' ? (
+        <AiTutor
+          tutorMessages={tutorMessages}
+          setTutorMessages={setTutorMessages}
+          chunks={chunks}
+          isBusy={isTutorBusy}
+          onAsk={async (prompt) => {
+            setIsTutorBusy(true);
+            setNotice('Powered by Ollama: AI Tutor is thinking...');
+            try {
+              const sources = (chunks.length ? [chunks[0]] : []).map((c) => ({ name: c.name, content: c.content }));
+              const data = await tutorChatWithOllama({ prompt, sources });
+              setNotice('Powered by Ollama: tutor response ready.');
+              return String(data?.reply || '').trim();
+            } catch (error) {
+              setNotice(`${error?.message || 'Tutor request failed'}.`);
+              return 'I could not respond right now. Please try again.';
+            } finally {
+              setIsTutorBusy(false);
+            }
+          }}
+        />
+      ) : null}
     </AppShell>
   );
 }
@@ -713,10 +931,11 @@ function Tasks({ tasks, setTasks }) {
   );
 }
 
-function Quizzes({ config, setConfig, onGenerate, results }) {
+function Quizzes({ config, setConfig, onGenerate, results, isGenerating }) {
   return (
     <section className="panel">
       <h3 className="mb-3 text-lg font-semibold">Quiz / Exam Generator</h3>
+      <p className="mb-2 text-xs text-muted">Powered by Ollama</p>
       <div className="mb-3 grid grid-cols-1 gap-2 md:grid-cols-4">
         <select className="input" value={config.mode} onChange={(e) => setConfig((c) => ({ ...c, mode: e.target.value }))}>
           <option value="quiz">Quiz</option>
@@ -727,7 +946,9 @@ function Quizzes({ config, setConfig, onGenerate, results }) {
           <option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option>
         </select>
         <input className="input" type="number" value={config.count} onChange={(e) => setConfig((c) => ({ ...c, count: e.target.value }))} />
-        <button className="btn-primary" onClick={onGenerate}>Generate</button>
+        <button className="btn-primary" disabled={isGenerating} onClick={onGenerate}>
+          {isGenerating ? 'Generating...' : 'Generate'}
+        </button>
       </div>
       <div className="mb-3 inline-flex items-center rounded-full border border-border bg-slate-50 px-3 py-1 text-xs">Timer chip: 02:00</div>
       <ul className="space-y-2">
@@ -1036,12 +1257,24 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
 
 
 
-function Academics({ grades, setGrades, simulations, setSimulations, avg, gradesChartData, kpiData }) {
+function Academics({
+  grades,
+  setGrades,
+  simulations,
+  setSimulations,
+  avg,
+  gradesChartData,
+  kpiData,
+  onAiAdvice,
+  onAiEstimate,
+  isBusy,
+}) {
   const [subject, setSubject] = useState('Math');
   const [score, setScore] = useState(85);
   const [weight, setWeight] = useState(0.4);
   const [target, setTarget] = useState(90);
   const [finalWeight, setFinalWeight] = useState(0.5);
+  const [advice, setAdvice] = useState(null);
   const add = () => setGrades([{ id: Date.now(), subject, score: Number(score), weight: Number(weight) }, ...grades]);
   const simulate = () => {
     const req = finalWeight <= 0 ? 0 : Math.max(0, Math.min(100, (target - avg * (1 - finalWeight)) / finalWeight));
@@ -1050,6 +1283,7 @@ function Academics({ grades, setGrades, simulations, setSimulations, avg, grades
   return (
     <section className="panel">
       <h3 className="mb-3 text-lg font-semibold">Academic Progress</h3>
+      <p className="mb-2 text-xs text-muted">Powered by Ollama</p>
       <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-3">
         <div className="rounded-xl border border-border bg-slate-50 p-3"><p className="text-xs text-muted">Average</p><p className="text-xl font-semibold">{avg.toFixed(1)}</p></div>
         <div className="rounded-xl border border-border bg-slate-50 p-3"><p className="text-xs text-muted">Target</p><p className="text-xl font-semibold">{target}</p></div>
@@ -1069,19 +1303,59 @@ function Academics({ grades, setGrades, simulations, setSimulations, avg, grades
         <input className="input" type="number" value={target} onChange={(e) => setTarget(Number(e.target.value))} />
         <input className="input" type="number" step="0.1" value={finalWeight} onChange={(e) => setFinalWeight(Number(e.target.value))} />
         <button className="btn-ghost" onClick={simulate}>Simulate final</button>
+        <button
+          className="btn-primary"
+          disabled={isBusy}
+          onClick={async () => {
+            const data = await onAiEstimate({ target, finalWeight });
+            if (data?.requiredFinal !== undefined) {
+              setSimulations((prev) => [{ id: Date.now(), req: Number(data.requiredFinal), target }, ...prev]);
+            }
+          }}
+        >
+          {isBusy ? 'Estimating...' : 'AI Estimate'}
+        </button>
+        <button
+          className="btn-ghost"
+          disabled={isBusy}
+          onClick={async () => setAdvice(await onAiAdvice({ target, finalWeight }))}
+        >
+          {isBusy ? 'Thinking...' : 'AI Advice'}
+        </button>
       </div>
+      {advice ? (
+        <div className="mb-3 rounded-lg border border-border bg-slate-50 p-3 text-sm">
+          <p className="font-semibold">Recommendations</p>
+          <ul className="mt-1 list-disc pl-5 text-muted">
+            {(advice.recommendations || []).map((r, i) => <li key={`ar-${i}`}>{r}</li>)}
+          </ul>
+        </div>
+      ) : null}
       <ul className="space-y-2">{simulations.map((s) => <li key={s.id} className="rounded-lg border border-border bg-white px-3 py-2 text-sm">Need {s.req.toFixed(1)} to reach {s.target}</li>)}</ul>
     </section>
   );
 }
 
-function AiTutor({ tutorMessages, setTutorMessages }) {
+function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy }) {
   const [prompt, setPrompt] = useState('');
   return (
     <section className="panel">
       <h3 className="mb-3 text-lg font-semibold">AI Tutor</h3>
+      <p className="mb-2 text-xs text-muted">Powered by Ollama</p>
       <textarea className="input min-h-24" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Ask study guidance..." />
-      <button className="btn-primary mt-2" onClick={() => { if (!prompt.trim()) return; setTutorMessages((prev) => [...prev, { id: Date.now(), you: prompt, tutor: 'Break work into 25-minute focused blocks and review weak topics first.' }]); setPrompt(''); }}>Ask Tutor</button>
+      <button
+        className="btn-primary mt-2"
+        disabled={isBusy}
+        onClick={async () => {
+          if (!prompt.trim()) return;
+          const you = prompt;
+          setPrompt('');
+          const tutor = await onAsk(you);
+          setTutorMessages((prev) => [...prev, { id: Date.now(), you, tutor }]);
+        }}
+      >
+        {isBusy ? 'Thinking...' : 'Ask Tutor'}
+      </button>
       <ul className="mt-3 space-y-2">{tutorMessages.map((m) => <li key={m.id} className="rounded-lg border border-border bg-white px-3 py-2 text-sm"><b>You:</b> {m.you}<br /><b>Tutor:</b> {m.tutor}</li>)}</ul>
     </section>
   );
