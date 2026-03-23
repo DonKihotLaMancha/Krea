@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist';
 import { Bar, Doughnut, Line } from 'react-chartjs-2';
 import {
@@ -21,6 +21,8 @@ import TablaApartados from './components/TablaApartados';
 import NotebookWorkspace from './components/NotebookWorkspace';
 import { supabase as supabaseBrowser } from './lib/supabaseClient';
 import TeacherWindow from './components/teacher/TeacherWindow';
+import CommandPalette from './components/CommandPalette';
+import TasksCalendar from './components/TasksCalendar';
 const GraficasProgreso = lazy(() => import('./components/GraficasProgreso'));
 const SesionEstudio = lazy(() => import('./components/SesionEstudio'));
 const ConceptMap = lazy(() => import('./components/ConceptMap'));
@@ -29,6 +31,19 @@ ChartJS.register(ArcElement, BarElement, Tooltip, Legend, CategoryScale, LinearS
 GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).toString();
 
 const tabs = ['Ingest', 'Flashcards', 'Notebook', 'Concept Map', 'Tasks', 'Quizzes', 'Chat', 'Presentations', 'Academics', 'AI Tutor', 'Teacher Window'];
+
+/** Local-only PDF backup (before sign-in). Cleared after successful sync to Supabase. */
+const LOCAL_PDFS_KEY = 'sa_account_pdfs_v1';
+const LOCAL_PDFS_MAX_BYTES = 4_500_000;
+
+function mapLibraryPdfToChunk(p) {
+  return {
+    id: `db-pdf-${p.id}`,
+    name: p.name,
+    content: p.content || '',
+    createdAt: p.createdAt || null,
+  };
+}
 function cleanAcademicText(raw) {
   let text = (raw || '')
     .replace(/[^\S\r\n]+/g, ' ')
@@ -247,12 +262,21 @@ async function upsertStudent(studentId, name = 'Student') {
 }
 
 async function savePdfToLibrary({ studentId, name, content }) {
-  if (!studentId) return;
-  await fetchWithTimeout('/api/library/pdf', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ studentId, name, content }),
-  }, 20000);
+  if (!studentId) return null;
+  const resp = await fetchWithTimeout(
+    '/api/library/pdf',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ studentId, name, content }),
+    },
+    120_000,
+  );
+  if (!resp.ok) {
+    const t = await resp.text();
+    throw new Error(t || 'Could not save PDF to your account.');
+  }
+  return await resp.json();
 }
 
 async function saveConceptMapToLibrary({ studentId, sourceName, title, map }) {
@@ -420,6 +444,10 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(!!supabaseBrowser);
   const studentId = session?.user?.id ?? null;
+  const [theme, setTheme] = useState('light');
+  const [isFocusMode, setIsFocusMode] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [isCommandOpen, setIsCommandOpen] = useState(false);
   const [tab, setTab] = useState('Ingest');
   const [chunks, setChunks] = useState([]);
   const [cards, setCards] = useState([]);
@@ -473,6 +501,22 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setIsCommandOpen((v) => !v);
+      }
+      if (e.key === 'Escape') setIsCommandOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  useEffect(() => {
+    document.body.dataset.theme = theme;
+  }, [theme]);
+
+  useEffect(() => {
     let mounted = true;
     const ping = async () => {
       try {
@@ -497,16 +541,31 @@ export default function App() {
     const bootstrapDb = async () => {
       try {
         await upsertStudent(studentId, displayNameFromUser(session?.user));
+        // Push any PDFs that were uploaded while signed out into this account.
+        try {
+          const raw = localStorage.getItem(LOCAL_PDFS_KEY);
+          if (raw) {
+            const local = JSON.parse(raw);
+            if (Array.isArray(local) && local.length) {
+              let anyFailed = false;
+              for (const p of local) {
+                if (!p?.name || !p?.content) continue;
+                try {
+                  await savePdfToLibrary({ studentId, name: p.name, content: p.content });
+                } catch {
+                  anyFailed = true;
+                }
+              }
+              if (!anyFailed) localStorage.removeItem(LOCAL_PDFS_KEY);
+            }
+          }
+        } catch {
+          /* ignore migration */
+        }
         const data = await loadLibrary(studentId);
         if (!mounted) return;
-        const dbChunks = Array.isArray(data?.pdfs)
-          ? data.pdfs.map((p) => ({
-            id: `db-pdf-${p.id}`,
-            name: p.name,
-            content: p.content,
-          }))
-          : [];
-        if (dbChunks.length) setChunks(dbChunks);
+        const dbChunks = Array.isArray(data?.pdfs) ? data.pdfs.map(mapLibraryPdfToChunk) : [];
+        setChunks(dbChunks);
       } catch {
         // Keep app usable even if DB bootstrap fails.
       }
@@ -517,18 +576,75 @@ export default function App() {
     };
   }, [studentId, session?.user]);
 
+  const offlinePdfHydratedRef = useRef(false);
+  const offlinePdfSizeWarnedRef = useRef(false);
+
+  /** Signed-out: hydrate from localStorage (or clear cloud state on logout), then persist edits */
+  useEffect(() => {
+    if (studentId) {
+      offlinePdfHydratedRef.current = false;
+      offlinePdfSizeWarnedRef.current = false;
+      return;
+    }
+    if (!offlinePdfHydratedRef.current) {
+      offlinePdfHydratedRef.current = true;
+      try {
+        const raw = localStorage.getItem(LOCAL_PDFS_KEY);
+        if (raw) {
+          const local = JSON.parse(raw);
+          if (Array.isArray(local) && local.length) {
+            setChunks(local);
+            return;
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+      setChunks([]);
+      return;
+    }
+    try {
+      if (!chunks.length) {
+        localStorage.removeItem(LOCAL_PDFS_KEY);
+        return;
+      }
+      const payload = JSON.stringify(
+        chunks.map((c) => ({ id: c.id, name: c.name, content: c.content, createdAt: c.createdAt })),
+      );
+      if (payload.length > LOCAL_PDFS_MAX_BYTES) {
+        if (!offlinePdfSizeWarnedRef.current) {
+          offlinePdfSizeWarnedRef.current = true;
+          setNotice('Library is too large for offline storage in this browser — sign in to keep everything in your account.');
+        }
+        return;
+      }
+      localStorage.setItem(LOCAL_PDFS_KEY, payload);
+    } catch {
+      if (!offlinePdfSizeWarnedRef.current) {
+        offlinePdfSizeWarnedRef.current = true;
+        setNotice('Could not save PDFs offline — sign in to store them in your account.');
+      }
+    }
+  }, [chunks, studentId, setNotice]);
+
   const avg = useMemo(() => {
     const w = grades.reduce((s, g) => s + g.weight, 0);
     if (!w) return 0;
     return grades.reduce((s, g) => s + g.score * g.weight, 0) / w;
   }, [grades]);
 
-  const stats = useMemo(() => ({
-    cardsCount: cards.length,
-    tasksDone: tasks.filter((t) => t.done).length,
-    tasksTotal: tasks.length,
-    avg,
-  }), [cards.length, tasks, avg]);
+  const commandItems = useMemo(() => {
+    const items = [];
+    chunks.forEach((c) => items.push({ id: `pdf-${c.id}`, label: c.name, category: 'PDF', action: () => setTab('Ingest') }));
+    cards.slice(0, 20).forEach((c) => items.push({ id: `card-${c.id}`, label: c.question, category: 'Flashcard', action: () => setTab('Flashcards') }));
+    messages.slice(-20).forEach((m) => items.push({ id: `chat-${m.id}`, label: m.text, category: 'Chat', action: () => setTab('Chat') }));
+    tutorMessages.slice(-20).forEach((m) => items.push({ id: `tutor-${m.id}`, label: m.you, category: 'AI Tutor', action: () => setTab('AI Tutor') }));
+    presentations.forEach((p) => items.push({ id: `pres-${p.id}`, label: p.title, category: 'Presentation', action: () => setTab('Presentations') }));
+    tasks.slice(0, 40).forEach((t) =>
+      items.push({ id: `task-${t.id}`, label: t.title || 'Task', category: 'Task', action: () => setTab('Tasks') }),
+    );
+    return items;
+  }, [chunks, cards, messages, tutorMessages, presentations, tasks]);
 
   const generateForChunk = async (chunk, { append = false } = {}) => {
     if (!chunk?.content?.trim()) {
@@ -621,15 +737,21 @@ export default function App() {
       }
       const chunk = { id: `${Date.now()}`, name: file.name, content: cleaned };
       setChunks((prev) => [chunk, ...prev]);
-      try {
-        await savePdfToLibrary({ studentId, name: chunk.name, content: chunk.content });
-      } catch {
-        // Non-blocking persistence.
+      if (studentId) {
+        try {
+          const saved = await savePdfToLibrary({ studentId, name: chunk.name, content: chunk.content });
+          if (saved?.id) {
+            setChunks((prev) =>
+              prev.map((c) => (c.id === chunk.id ? { ...c, id: `db-pdf-${saved.id}`, createdAt: new Date().toISOString() } : c)),
+            );
+          }
+        } catch (e) {
+          setNotice(`PDF read OK, but not saved to your account: ${e?.message || 'API error'}`);
+        }
+      } else {
+        setNotice('Saved in this browser only — sign in to keep PDFs in your account across devices.');
       }
       await generateForChunk(chunk);
-      if (!studentId) {
-        setNotice('Generated locally. Sign in to sync this upload to Supabase.');
-      }
     } catch (error) {
       setNotice(`Upload failed: ${error?.message || 'Unknown error.'}`);
       setGenerationProgress(0);
@@ -841,6 +963,7 @@ export default function App() {
   }), [avg, requiredFinal]);
 
   return (
+    <>
     <AppShell
       tabs={tabs}
       tab={tab}
@@ -848,15 +971,14 @@ export default function App() {
       modelStatus={modelStatus}
       latestBatchAt={latestBatchAt}
       notice={notice}
-      stats={stats}
-      authPanel={(
-        <AuthPanel
-          supabase={supabaseBrowser}
-          session={session}
-          loading={authLoading}
-          onAuthChange={(nextSession) => setSession(nextSession)}
-        />
-      )}
+      authPanel={<AuthPanel supabase={supabaseBrowser} session={session} loading={authLoading} onAuthChange={(nextSession) => setSession(nextSession)} />}
+      theme={theme}
+      setTheme={setTheme}
+      isFocusMode={isFocusMode}
+      setIsFocusMode={setIsFocusMode}
+      onOpenSearch={() => setIsCommandOpen(true)}
+      sidebarCollapsed={sidebarCollapsed}
+      setSidebarCollapsed={setSidebarCollapsed}
     >
       {tab === 'Ingest' ? (
         <>
@@ -926,6 +1048,30 @@ export default function App() {
         <NotebookWorkspace
           chunks={chunks}
           isBusy={isNotebookBusy}
+          conceptMapData={conceptMapData}
+          onCitationSelect={(citation) => {
+            if (citation?.source) setNotice(`Citation selected: ${citation.source}`);
+          }}
+          onCreateFlashcardFromSelection={(text) => {
+            if (!text?.trim()) return;
+            const generated = normalizeStudyCards([{ question: `Explain this highlighted idea`, answer: text.trim() }]);
+            setCards((prev) => [...generated, ...prev]);
+            setTab('Flashcards');
+            setNotice('Flashcard created from selected text.');
+          }}
+          onSummarizeSelection={async (text) => {
+            const result = await runNotebookAction(
+              () => generateSummaryWithOllama({ sources: [{ name: 'Selection', content: text }] }),
+              'Selection summary',
+              'summary',
+              [{ name: 'Selection' }],
+            );
+            if (result?.keyPoints?.length) setNotice(`Summary: ${result.keyPoints[0]}`);
+          }}
+          onExplainSelection={async (text) => {
+            const data = await tutorChatWithOllama({ prompt: `Explain this like I am 5: ${text}`, sources: [] });
+            setNotice(String(data?.reply || 'Explanation generated.'));
+          }}
           onSourceChat={({ question, sources }) =>
             runNotebookAction(
               () => sourceChatWithOllama({ question, sources }),
@@ -969,7 +1115,9 @@ export default function App() {
         />
       ) : null}
 
-      {tab === 'Tasks' ? <Tasks tasks={tasks} setTasks={setTasks} /> : null}
+      {tab === 'Tasks' ? (
+        <TasksCalendar tasks={tasks} setTasks={setTasks} studentId={studentId} session={session} setNotice={setNotice} />
+      ) : null}
       {tab === 'Quizzes' ? (
         <Quizzes
           config={quizConfig}
@@ -1072,34 +1220,13 @@ export default function App() {
         <TeacherWindow teacherId={studentId} setNotice={setNotice} />
       ) : null}
     </AppShell>
-  );
-}
-
-function Tasks({ tasks, setTasks }) {
-  const [title, setTitle] = useState('');
-  const [priority, setPriority] = useState('medium');
-  return (
-    <section className="panel">
-      <h3 className="mb-3 text-lg font-semibold">Daily Tasks</h3>
-      <div className="mb-3 flex flex-wrap gap-2">
-        <input className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Task title" />
-        <select className="input" value={priority} onChange={(e) => setPriority(e.target.value)}>
-          <option>low</option><option>medium</option><option>high</option>
-        </select>
-        <button className="btn-primary" onClick={() => { if (!title.trim()) return; setTasks([{ id: Date.now(), title, priority, done: false }, ...tasks]); setTitle(''); }}>Add task</button>
-      </div>
-      <ul className="space-y-2">
-        {tasks.map((t) => (
-          <li key={t.id} className="rounded-lg border border-border bg-white px-3 py-2 text-sm">
-            <label className="flex items-center gap-2">
-              <input type="checkbox" checked={t.done} onChange={() => setTasks(tasks.map((x) => x.id === t.id ? { ...x, done: !x.done } : x))} />
-              <span>{t.title}</span>
-              <span className="ml-auto text-xs text-muted">{t.priority}</span>
-            </label>
-          </li>
-        ))}
-      </ul>
-    </section>
+    <CommandPalette
+      open={isCommandOpen}
+      onClose={() => setIsCommandOpen(false)}
+      items={commandItems}
+      onSelect={(item) => item.action?.()}
+    />
+    </>
   );
 }
 
@@ -1163,6 +1290,59 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
     ? chunks.filter((c) => selectedChunkIds.includes(c.id))
     : (chunks[0] ? [chunks[0]] : []);
   const previewPresentation = presentations.find((p) => p.id === previewId) || null;
+
+  const downloadTextFile = (filename, content, type = 'text/plain') => {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportMarp = (presentation) => {
+    const markdown = [
+      '---',
+      'marp: true',
+      'theme: default',
+      `title: ${presentation.title}`,
+      '---',
+      '',
+      ...presentation.slides.flatMap((s) => [
+        `## ${s.title}`,
+        ...(s.bullets || []).map((b) => `- ${b}`),
+        '',
+        s.notes ? `> ${s.notes}` : '',
+        '---',
+      ]),
+    ].join('\n');
+    downloadTextFile(`${presentation.title.replace(/\s+/g, '_') || 'presentation'}.md`, markdown, 'text/markdown');
+  };
+
+  const exportPptx = async (presentation) => {
+    const mod = await import('pptxgenjs');
+    const PptxGenJS = mod.default;
+    const pptx = new PptxGenJS();
+    pptx.layout = 'LAYOUT_WIDE';
+    presentation.slides.forEach((s) => {
+      const slide = pptx.addSlide();
+      slide.addText(String(s.title || 'Slide'), { x: 0.5, y: 0.4, w: 12, h: 0.6, fontSize: 28, bold: true, color: '1F2937' });
+      const bullets = (s.bullets || []).map((b) => ({ text: String(b) }));
+      slide.addText(bullets, {
+        x: 0.8,
+        y: 1.3,
+        w: 11.8,
+        h: 4.7,
+        fontSize: 18,
+        color: '111827',
+        breakLine: true,
+        bullet: { indent: 22 },
+      });
+      if (s.notes) slide.addNotes(String(s.notes));
+    });
+    await pptx.writeFile({ fileName: `${presentation.title.replace(/\s+/g, '_') || 'presentation'}.pptx` });
+  };
 
   const beginEdit = (p) => {
     setEditingId(p.id);
@@ -1279,15 +1459,19 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
         <div className="mt-4 rounded-2xl border border-border bg-slate-50 p-4 shadow-sm">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <p className="text-base font-semibold">Preview: {previewPresentation.title}</p>
-            <button
-              className="btn-ghost"
-              onClick={() => {
-                const p = presentations.find((x) => x.id === previewPresentation.id);
-                if (p) beginEdit(p);
-              }}
-            >
-              Edit this presentation
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                className="btn-ghost"
+                onClick={() => {
+                  const p = presentations.find((x) => x.id === previewPresentation.id);
+                  if (p) beginEdit(p);
+                }}
+              >
+                Edit this presentation
+              </button>
+              <button className="btn-ghost" onClick={() => exportMarp(previewPresentation)}>Export Marp (.md)</button>
+              <button className="btn-primary" onClick={() => exportPptx(previewPresentation)}>Export .pptx</button>
+            </div>
           </div>
           <div className="max-h-[76vh] space-y-3 overflow-y-auto pr-1">
             {previewPresentation.slides.map((s, idx) => (
@@ -1446,12 +1630,14 @@ function Academics({
   const [weight, setWeight] = useState(0.4);
   const [target, setTarget] = useState(90);
   const [finalWeight, setFinalWeight] = useState(0.5);
+  const [projectedFinal, setProjectedFinal] = useState(75);
   const [advice, setAdvice] = useState(null);
   const add = () => setGrades([{ id: Date.now(), subject, score: Number(score), weight: Number(weight) }, ...grades]);
   const simulate = () => {
     const req = finalWeight <= 0 ? 0 : Math.max(0, Math.min(100, (target - avg * (1 - finalWeight)) / finalWeight));
     setSimulations([{ id: Date.now(), req, target }, ...simulations]);
   };
+  const projectedAverage = avg * (1 - finalWeight) + Number(projectedFinal || 0) * finalWeight;
   return (
     <section className="panel">
       <h3 className="mb-3 text-lg font-semibold">Academic Progress</h3>
@@ -1495,6 +1681,15 @@ function Academics({
           {isBusy ? 'Thinking...' : 'AI Advice'}
         </button>
       </div>
+      <div className="mb-3 rounded-lg border border-border bg-slate-50 p-3 text-sm">
+        <p className="font-semibold">What-if Calculator</p>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <span className="text-xs text-muted">If final exam score is</span>
+          <input className="input w-24" type="number" value={projectedFinal} onChange={(e) => setProjectedFinal(Number(e.target.value))} />
+          <span className="text-xs text-muted">projected average:</span>
+          <span className="rounded-full border border-indigo-200 bg-indigo-50 px-2 py-1 text-xs font-semibold text-indigo-700">{projectedAverage.toFixed(1)}</span>
+        </div>
+      </div>
       {advice ? (
         <div className="mb-3 rounded-lg border border-border bg-slate-50 p-3 text-sm">
           <p className="font-semibold">Recommendations</p>
@@ -1510,24 +1705,58 @@ function Academics({
 
 function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy }) {
   const [prompt, setPrompt] = useState('');
+  const [isListening, setIsListening] = useState(false);
+
+  const startVoiceInput = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+    const rec = new SpeechRecognition();
+    rec.lang = 'en-US';
+    rec.interimResults = false;
+    rec.maxAlternatives = 1;
+    setIsListening(true);
+    rec.onresult = (event) => {
+      const transcript = event.results?.[0]?.[0]?.transcript || '';
+      setPrompt((prev) => `${prev} ${transcript}`.trim());
+    };
+    rec.onend = () => setIsListening(false);
+    rec.onerror = () => setIsListening(false);
+    rec.start();
+  };
+
+  const speakText = (text) => {
+    if (!('speechSynthesis' in window) || !text) return;
+    window.speechSynthesis.cancel();
+    const utter = new SpeechSynthesisUtterance(String(text).slice(0, 1200));
+    utter.rate = 1;
+    utter.pitch = 1;
+    window.speechSynthesis.speak(utter);
+  };
+
   return (
     <section className="panel">
       <h3 className="mb-3 text-lg font-semibold">AI Tutor</h3>
       <p className="mb-2 text-xs text-muted">Powered by Ollama</p>
       <textarea className="input min-h-24" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Ask study guidance..." />
-      <button
-        className="btn-primary mt-2"
-        disabled={isBusy}
-        onClick={async () => {
-          if (!prompt.trim()) return;
-          const you = prompt;
-          setPrompt('');
-          const tutor = await onAsk(you);
-          setTutorMessages((prev) => [...prev, { id: Date.now(), you, tutor }]);
-        }}
-      >
-        {isBusy ? 'Thinking...' : 'Ask Tutor'}
-      </button>
+      <div className="mt-2 flex flex-wrap gap-2">
+        <button
+          className="btn-primary"
+          disabled={isBusy}
+          onClick={async () => {
+            if (!prompt.trim()) return;
+            const you = prompt;
+            setPrompt('');
+            const tutor = await onAsk(you);
+            setTutorMessages((prev) => [...prev, { id: Date.now(), you, tutor }]);
+            speakText(tutor);
+          }}
+        >
+          {isBusy ? 'Thinking...' : 'Ask Tutor'}
+        </button>
+        <button className="btn-ghost" onClick={startVoiceInput} disabled={isListening}>
+          {isListening ? 'Listening...' : 'Push-to-talk'}
+        </button>
+      </div>
       <ul className="mt-3 space-y-2">{tutorMessages.map((m) => <li key={m.id} className="rounded-lg border border-border bg-white px-3 py-2 text-sm"><b>You:</b> {m.you}<br /><b>Tutor:</b> {m.tutor}</li>)}</ul>
     </section>
   );

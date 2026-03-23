@@ -11,11 +11,16 @@ export default function UploadCard({
 }) {
   return (
     <section className="panel">
-      <h3 className="mb-3 text-lg font-semibold">Upload Study Material</h3>
+      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="text-lg font-semibold">Upload Study Material</h3>
+        <span className="rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-900">
+          {chunks.length} PDF{chunks.length === 1 ? '' : 's'} saved
+        </span>
+      </div>
       <label className="mb-3 flex cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed border-indigo-200 bg-gradient-to-br from-indigo-50 via-violet-50 to-cyan-50 p-8 text-center transition hover:shadow-soft">
         <UploadCloud className="mb-2" size={24} />
         <p className="text-sm font-medium">Drag and drop PDF here, or click to upload</p>
-        <p className="text-xs text-muted">Text-based PDF works best for accurate cards.</p>
+        <p className="text-xs text-muted">Text-based PDF works best for accurate cards. AI will read and index after upload.</p>
         <input
           type="file"
           accept=".pdf,.txt,.md,.csv"
@@ -33,7 +38,7 @@ export default function UploadCard({
         <div className="mt-3">
           <div className="mb-1 flex items-center justify-between text-xs text-muted">
             <span>{progressLabel || 'Working...'}</span>
-            {!isIndeterminate ? <span>{Math.round(progress)}%</span> : <span>AI thinking...</span>}
+            {!isIndeterminate ? <span>{Math.round(progress)}%</span> : <span>AI is reading and indexing...</span>}
           </div>
           <div className="h-2 w-full rounded-full bg-slate-100">
             {isIndeterminate ? (
@@ -49,8 +54,11 @@ export default function UploadCard({
       ) : null}
       <ul className="mt-4 space-y-2">
         {chunks.map((c) => (
-          <li key={c.id} className="flex items-center justify-between rounded-lg border border-border bg-white/90 px-3 py-2 text-sm">
-            <span className="truncate">{c.name}</span>
+          <li key={c.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-white/90 px-3 py-2 text-sm">
+            <span className="min-w-0 flex-1 truncate font-medium">{c.name}</span>
+            {c.createdAt ? (
+              <span className="shrink-0 text-xs text-muted">{new Date(c.createdAt).toLocaleString()}</span>
+            ) : null}
           </li>
         ))}
       </ul>

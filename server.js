@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
+import nodemailer from 'nodemailer';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -134,7 +135,7 @@ app.get('/api/library', async (req, res) => {
         .eq('source_type', 'pdf')
         .is('deleted_at', null)
         .order('created_at', { ascending: false })
-        .limit(30),
+        .limit(1000),
       supabase
         .from('concept_maps')
         .select('id,title,created_at,concept_map_nodes(id,label,description),concept_map_edges(id,source_node_id,target_node_id,label)')
@@ -150,12 +151,16 @@ app.get('/api/library', async (req, res) => {
     ]);
     if (srcErr || mapsErr || notebookErr) throw (srcErr || mapsErr || notebookErr);
     return res.json({
-      pdfs: (sources || []).map((s) => ({
-        id: s.id,
-        name: s.title,
-        content: s.source_contents?.cleaned_text || '',
-        createdAt: s.created_at,
-      })),
+      pdfs: (sources || []).map((s) => {
+        const sc = s.source_contents;
+        const text = Array.isArray(sc) ? sc[0]?.cleaned_text : sc?.cleaned_text;
+        return {
+          id: s.id,
+          name: s.title,
+          content: text || '',
+          createdAt: s.created_at,
+        };
+      }),
       maps: (maps || []).map((m) => ({
         title: m.title,
         id: m.id,
@@ -195,16 +200,7 @@ app.post('/api/library/pdf', async (req, res) => {
   if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
   try {
     await ensureProfile(studentId);
-    const { data: existing, error: existingError } = await supabase
-      .from('sources')
-      .select('id')
-      .eq('owner_id', studentId)
-      .eq('title', name)
-      .eq('source_type', 'pdf')
-      .limit(1);
-    if (existingError) throw existingError;
-    if (existing?.[0]?.id) return res.json({ ok: true, id: existing[0].id, deduped: true });
-
+    // Always create a new source row so every upload is kept (same filename allowed).
     const { data: source, error: sourceError } = await supabase
       .from('sources')
       .insert({ owner_id: studentId, title: name, source_type: 'pdf', status: 'ready' })
@@ -715,6 +711,25 @@ ${JSON.stringify(buildPassagesFromSources([{ name: title, content: `${promptText
     return res.json({ ok: true, quiz: data });
   } catch (error) {
     return res.status(500).json(formatSupabaseError(error, 'Could not generate teacher quiz.'));
+  }
+});
+
+app.post('/api/ai-job', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const jobType = String(req.body?.jobType || '').trim();
+  const userId = String(req.body?.userId || '').trim();
+  const sessionId = String(req.body?.sessionId || '').trim();
+  if (!jobType || !userId || !sessionId) {
+    return res.status(400).json({ error: 'Missing jobType/userId/sessionId.' });
+  }
+  try {
+    const { data, error } = await supabase.functions.invoke('ai-jobs', {
+      body: { jobType, userId, sessionId, payload: req.body?.payload || {} },
+    });
+    if (error) throw error;
+    return res.json({ ok: true, result: data });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not schedule AI edge job.'));
   }
 });
 
@@ -1638,6 +1653,103 @@ function safeParseStoredJson(raw) {
   }
 }
 
+const SMTP_CONFIGURED = !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+let mailTransporter = null;
+
+function getMailTransporter() {
+  if (!SMTP_CONFIGURED) return null;
+  if (!mailTransporter) {
+    mailTransporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: Number(process.env.SMTP_PORT || 587),
+      secure: process.env.SMTP_SECURE === 'true',
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    });
+  }
+  return mailTransporter;
+}
+
+async function sendTaskReminderEmail(to, { title, kind, dueAt, whenLabel }) {
+  const tx = getMailTransporter();
+  if (!tx || !to) return false;
+  const kindLabel = kind === 'event' ? 'Event' : 'Task';
+  const when = new Date(dueAt).toLocaleString();
+  await tx.sendMail({
+    from: process.env.SMTP_FROM || process.env.SMTP_USER,
+    to,
+    subject: `[Student Assistant] ${whenLabel} until due: ${title}`,
+    text: `${kindLabel} "${title}" is scheduled for ${when}.\n\nThis is your ${whenLabel} reminder before the due time.`,
+  });
+  return true;
+}
+
+async function processTaskEmailReminders() {
+  if (!supabase) return;
+  const { data: rows, error } = await supabase
+    .from('tasks')
+    .select('id,owner_id,title,due_at,done,reminder_1h_sent,reminder_10m_sent,kind')
+    .eq('done', false)
+    .not('due_at', 'is', null);
+  if (error) {
+    if (!String(error.message || '').includes('column')) {
+      console.warn('[task-email]', error.message);
+    }
+    return;
+  }
+  const now = Date.now();
+  for (const row of rows || []) {
+    const due = new Date(row.due_at).getTime();
+    if (Number.isNaN(due) || due <= now) continue;
+
+    const rem1 = due - 60 * 60 * 1000;
+    const rem10 = due - 10 * 60 * 1000;
+
+    let email = null;
+    try {
+      const { data: adminData, error: adminErr } = await supabase.auth.admin.getUserById(row.owner_id);
+      if (adminErr) continue;
+      email = adminData?.user?.email || null;
+    } catch {
+      continue;
+    }
+    if (!email) continue;
+
+    if (!row.reminder_1h_sent && now >= rem1 && now < due) {
+      try {
+        const ok = await sendTaskReminderEmail(email, {
+          title: row.title,
+          kind: row.kind,
+          dueAt: row.due_at,
+          whenLabel: '1 hour',
+        });
+        if (ok) await supabase.from('tasks').update({ reminder_1h_sent: true }).eq('id', row.id);
+      } catch (e) {
+        console.warn('[task-email] 1h send failed', e?.message || e);
+      }
+    }
+    if (!row.reminder_10m_sent && now >= rem10 && now < due) {
+      try {
+        const ok = await sendTaskReminderEmail(email, {
+          title: row.title,
+          kind: row.kind,
+          dueAt: row.due_at,
+          whenLabel: '10 minutes',
+        });
+        if (ok) await supabase.from('tasks').update({ reminder_10m_sent: true }).eq('id', row.id);
+      } catch (e) {
+        console.warn('[task-email] 10m send failed', e?.message || e);
+      }
+    }
+  }
+}
+
+setInterval(() => {
+  processTaskEmailReminders().catch(() => {});
+}, 60_000);
+
 app.listen(PORT, () => {
   console.log(`API listening on http://localhost:${PORT}`);
+  if (SMTP_CONFIGURED) console.log('[task-email] SMTP reminders enabled (checks every 60s).');
+  else console.log('[task-email] SMTP not configured — set SMTP_HOST, SMTP_USER, SMTP_PASS for email reminders.');
+  processTaskEmailReminders().catch(() => {});
 });

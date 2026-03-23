@@ -7,6 +7,11 @@ export default function NotebookWorkspace({
   onStudyGuide,
   onCompare,
   onAudioOverview,
+  conceptMapData,
+  onCitationSelect,
+  onCreateFlashcardFromSelection,
+  onSummarizeSelection,
+  onExplainSelection,
   isBusy,
 }) {
   const [selectedChunkIds, setSelectedChunkIds] = useState([]);
@@ -16,6 +21,8 @@ export default function NotebookWorkspace({
   const [studyGuide, setStudyGuide] = useState(null);
   const [comparison, setComparison] = useState(null);
   const [audioOverview, setAudioOverview] = useState(null);
+  const [selectionText, setSelectionText] = useState('');
+  const [selectionPos, setSelectionPos] = useState({ x: 0, y: 0 });
 
   const selectedSources = useMemo(() => {
     if (!chunks.length) return [];
@@ -35,17 +42,39 @@ export default function NotebookWorkspace({
     }
   };
 
+  const handleSelection = (event) => {
+    const selected = String(window.getSelection?.()?.toString?.() || '').trim();
+    if (selected.length < 8) {
+      setSelectionText('');
+      return;
+    }
+    setSelectionText(selected.slice(0, 400));
+    setSelectionPos({ x: event.clientX, y: event.clientY });
+  };
+
   return (
-    <section className="panel">
+    <section className="panel" onMouseUp={handleSelection}>
       <h3 className="mb-1 text-lg font-semibold">Notebook</h3>
       <p className="mb-3 text-xs text-muted">Source-grounded workflows with citations, guides, compare, and audio script.</p>
+      {conceptMapData?.nodes?.length ? (
+        <div className="mb-3 rounded-xl border border-border bg-white p-3">
+          <p className="text-xs font-semibold text-muted">Concept Map Snapshot</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {conceptMapData.nodes.slice(0, 6).map((n) => (
+              <span key={n.id} className="rounded-full border border-indigo-200 bg-indigo-50 px-2 py-1 text-xs text-indigo-700">
+                {n.label}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       <div className="mb-3 flex flex-col gap-2">
         <select
           className="input"
           multiple
           value={selectedChunkIds}
-          onChange={(e) => setSelectedChunkIds(Array.from(e.target.selectedOptions).map((o) => o.value))}
+          onChange={(e) => setSelectedChunkIds(Array.from(e.target.selectedOptions).map((o) => o.value).slice(0, 5))}
           disabled={noSources || isBusy}
           size={Math.min(6, Math.max(3, chunks.length || 3))}
         >
@@ -54,7 +83,7 @@ export default function NotebookWorkspace({
             <option key={c.id} value={c.id}>{c.name}</option>
           ))}
         </select>
-        {!!chunks.length ? <p className="text-xs text-muted">Select one or more sources for Notebook actions.</p> : null}
+        {!!chunks.length ? <p className="text-xs text-muted">Select up to 5 sources for Notebook actions.</p> : null}
       </div>
 
       <div className="rounded-xl border border-border bg-white p-3">
@@ -78,8 +107,14 @@ export default function NotebookWorkspace({
             <ul className="mt-2 space-y-2">
               {(chatResult.citations || []).map((c, i) => (
                 <li key={`c-${i}`} className="rounded border border-border bg-white p-2 text-xs">
-                  <p className="font-semibold">{c.source}</p>
-                  <p className="text-muted">{c.excerpt}</p>
+                  <button
+                    className="text-left"
+                    onClick={() => onCitationSelect?.(c)}
+                    title="Jump to citation source"
+                  >
+                    <p className="font-semibold underline decoration-dotted">{c.source}</p>
+                    <p className="text-muted">{c.excerpt}</p>
+                  </button>
                 </li>
               ))}
             </ul>
@@ -178,6 +213,17 @@ export default function NotebookWorkspace({
           ) : <p className="text-xs text-muted">No audio/script generated yet.</p>}
         </div>
       </div>
+      {selectionText ? (
+        <div
+          className="fixed z-40 flex gap-1 rounded-lg border border-border bg-white p-1 shadow-soft"
+          style={{ left: Math.max(12, selectionPos.x - 130), top: Math.max(12, selectionPos.y - 46) }}
+        >
+          <button className="btn-ghost !px-2 !py-1 text-xs" onClick={() => onCreateFlashcardFromSelection?.(selectionText)}>Create Flashcard</button>
+          <button className="btn-ghost !px-2 !py-1 text-xs" onClick={() => onSummarizeSelection?.(selectionText)}>Summarize This</button>
+          <button className="btn-ghost !px-2 !py-1 text-xs" onClick={() => onExplainSelection?.(selectionText)}>Explain Like I&apos;m 5</button>
+          <button className="btn-ghost !px-2 !py-1 text-xs" onClick={() => setSelectionText('')}>X</button>
+        </div>
+      ) : null}
     </section>
   );
 }

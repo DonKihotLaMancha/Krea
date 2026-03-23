@@ -29,6 +29,9 @@ create index if not exists idx_chat_members_user_room on public.chat_members(use
 create index if not exists idx_chat_messages_room_created on public.chat_messages(room_id, created_at desc);
 create index if not exists idx_tutor_conv_owner_created on public.tutor_conversations(owner_id, created_at desc);
 create index if not exists idx_tutor_messages_conversation_created on public.tutor_messages(conversation_id, created_at desc);
+create index if not exists idx_source_embeddings_owner on public.source_embeddings(owner_id, created_at desc);
+create index if not exists idx_source_embeddings_source on public.source_embeddings(source_id);
+create index if not exists idx_source_embeddings_vector on public.source_embeddings using ivfflat (embedding vector_cosine_ops) with (lists = 100);
 create index if not exists idx_teacher_classes_teacher_created on public.teacher_classes(teacher_id, created_at desc);
 create index if not exists idx_teacher_classes_code on public.teacher_classes(code);
 create index if not exists idx_class_enrollments_student on public.class_enrollments(student_id, class_id);

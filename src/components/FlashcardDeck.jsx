@@ -11,6 +11,16 @@ export default function FlashcardDeck({
   onClear,
 }) {
   const currentCard = cards[0];
+  const urgent = cards
+    .map((c) => {
+      const due = c.proxima_revision ? new Date(c.proxima_revision) : null;
+      const daysLate = due ? Math.floor((Date.now() - due.getTime()) / (1000 * 60 * 60 * 24)) : 0;
+      const wrongWeight = Number(c.veces_mal || c.wrong || 0) * 2;
+      const urgency = Math.max(0, daysLate) + wrongWeight;
+      return { ...c, urgency };
+    })
+    .sort((a, b) => b.urgency - a.urgency)
+    .slice(0, 3);
   return (
     <section className="panel">
       <div className="mb-3 flex items-center justify-between">
@@ -21,6 +31,18 @@ export default function FlashcardDeck({
         <p className="text-sm text-muted">No cards yet. Upload material in Ingest.</p>
       ) : (
         <>
+          {urgent.length ? (
+            <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 p-3">
+              <p className="text-xs font-semibold text-amber-900">Daily Review (SRS urgency)</p>
+              <ul className="mt-1 space-y-1 text-xs text-amber-800">
+                {urgent.map((u) => (
+                  <li key={`u-${u.id}`}>
+                    {String(u.question).slice(0, 80)}... <span className="font-semibold">Urgency {u.urgency}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
           <p className="mb-2 text-xs text-muted">Card 1 of {cards.length}</p>
           <div className="mb-3 h-2 w-full rounded-full bg-slate-100">
             <div className="h-2 rounded-full bg-gradient-to-r from-indigo-600 via-violet-600 to-cyan-500" style={{ width: `${Math.max(8, (1 / cards.length) * 100)}%` }} />

@@ -1,4 +1,5 @@
 create extension if not exists pgcrypto;
+create extension if not exists vector;
 
 do $$
 begin
@@ -374,6 +375,9 @@ create table if not exists public.tasks (
   done boolean not null default false,
   priority public.task_priority not null default 'medium',
   due_at timestamptz,
+  kind text not null default 'task' check (kind in ('task', 'event')),
+  reminder_1h_sent boolean not null default false,
+  reminder_10m_sent boolean not null default false,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -415,6 +419,16 @@ create table if not exists public.tutor_messages (
   role public.tutor_role not null,
   content text not null,
   citations jsonb not null default '[]'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.source_embeddings (
+  id uuid primary key default gen_random_uuid(),
+  source_id uuid not null references public.sources(id) on delete cascade,
+  chunk_id uuid references public.source_chunks(id) on delete cascade,
+  owner_id uuid not null references public.profiles(id) on delete cascade,
+  content text not null,
+  embedding vector(1536) not null,
   created_at timestamptz not null default now()
 );
 

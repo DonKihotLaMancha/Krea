@@ -15,6 +15,34 @@
       radial-gradient(900px 500px at 100% 0%, rgba(14, 165, 233, 0.18), transparent 58%),
       linear-gradient(180deg, #f8faff 0%, #f4f7ff 100%);
   }
+  body[data-theme='dark'] {
+    color: #e5e7eb;
+    background-image: linear-gradient(180deg, #0f172a 0%, #111827 100%);
+  }
+  body[data-theme='dark'] .panel,
+  body[data-theme='dark'] .input,
+  body[data-theme='dark'] .btn-ghost {
+    border-color: #334155;
+    background: rgba(15, 23, 42, 0.9);
+    color: #e5e7eb;
+  }
+  body[data-theme='sepia'] {
+    background-image: linear-gradient(180deg, #f7f1e3 0%, #f0e6d2 100%);
+    color: #4b3f2f;
+  }
+  body[data-theme='contrast'] {
+    background-image: none;
+    background: #fff;
+    color: #000;
+  }
+  body[data-theme='contrast'] .panel,
+  body[data-theme='contrast'] .input,
+  body[data-theme='contrast'] .btn-ghost {
+    border-color: #000;
+    background: #fff;
+    color: #000;
+    box-shadow: none;
+  }
 }
 
 @layer components {

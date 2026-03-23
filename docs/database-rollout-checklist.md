@@ -8,6 +8,9 @@
 4. If upgrading existing project data, run `supabase-backfill.sql`
 5. Deploy backend with dual-write enabled
 6. Validate and then switch reads to normalized tables only
+7. Deploy edge function: `supabase functions deploy ai-jobs`
+8. Apply vector migration: `supabase/migrations/0006_pgvector_rag.sql`
+9. **Tasks calendar / email reminders:** apply `supabase/migrations/0007_tasks_calendar_reminders.sql` (adds `kind`, `reminder_1h_sent`, `reminder_10m_sent` on `public.tasks`).
 
 ## Validation Checklist
 
@@ -25,6 +28,8 @@
   - Uploading a PDF creates rows in `sources` and `source_contents`.
   - Concept map write creates map + nodes + edges.
   - Notebook output persists in `notebook_outputs`.
+  - Edge AI queue endpoint returns job id (`POST /api/ai-job`).
+  - Vector table accepts embeddings (`source_embeddings`).
 
 ## Smoke Tests (API)
 

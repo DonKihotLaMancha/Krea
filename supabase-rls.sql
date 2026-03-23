@@ -33,6 +33,7 @@ alter table public.chat_members enable row level security;
 alter table public.chat_messages enable row level security;
 alter table public.tutor_conversations enable row level security;
 alter table public.tutor_messages enable row level security;
+alter table public.source_embeddings enable row level security;
 alter table public.teacher_classes enable row level security;
 alter table public.class_enrollments enable row level security;
 alter table public.class_materials enable row level security;
@@ -260,6 +261,10 @@ for all using (exists (
 )) with check (exists (
   select 1 from public.tutor_conversations tc where tc.id = tutor_messages.conversation_id and tc.owner_id = auth.uid()
 ));
+
+drop policy if exists source_embeddings_owner on public.source_embeddings;
+create policy source_embeddings_owner on public.source_embeddings
+for all using (owner_id = auth.uid()) with check (owner_id = auth.uid());
 
 drop policy if exists teacher_classes_owner on public.teacher_classes;
 create policy teacher_classes_owner on public.teacher_classes
