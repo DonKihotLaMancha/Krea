@@ -1,14 +1,32 @@
-* { box-sizing: border-box; }
-body { margin: 0; font-family: Arial, sans-serif; background: #0f172a; color: #e2e8f0; }
-.app { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
-.sidebar { border-right: 1px solid #334155; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
-.sidebar button { text-align: left; padding: 10px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0; cursor: pointer; }
-.sidebar button.active { background: #2563eb; border-color: #2563eb; }
-.main { padding: 20px; }
-section { background: #111827; border: 1px solid #334155; border-radius: 10px; padding: 16px; }
-input, textarea, select, button { margin: 6px 6px 6px 0; padding: 8px; border-radius: 6px; border: 1px solid #475569; background: #0b1220; color: #e2e8f0; }
-button { cursor: pointer; }
-.card { border: 1px solid #334155; border-radius: 8px; padding: 12px; }
-.row { display: flex; gap: 8px; }
-.grid { display: grid; grid-template-columns: repeat(2, minmax(120px, 1fr)); gap: 8px; }
-.notice { margin-bottom: 10px; background: #0b3b2a; border: 1px solid #1e7a54; padding: 10px; border-radius: 8px; }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply box-border;
+  }
+  body {
+    @apply m-0 bg-bg text-text font-sans;
+  }
+}
+
+@layer components {
+  .input {
+    @apply rounded-xl border border-border bg-white px-3 py-2 text-sm text-text shadow-sm outline-none focus:border-accent;
+  }
+  .btn {
+    @apply rounded-xl px-4 py-2 text-sm font-medium transition;
+  }
+  .btn-primary {
+    @apply btn bg-accent text-white hover:opacity-90 disabled:opacity-50;
+  }
+  .btn-ghost {
+    @apply btn border border-border bg-white text-text hover:bg-slate-50 disabled:opacity-50;
+  }
+  .panel {
+    @apply rounded-xl2 border border-border bg-card p-4 shadow-soft;
+  }
+}
