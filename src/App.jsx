@@ -63,10 +63,11 @@ async function generateCardsWithOllama(text) {
   return Array.isArray(data.cards) ? data.cards : [];
 }
 
-async function extractPdfText(file) {
+async function extractPdfText(file, onProgress) {
   const buffer = await file.arrayBuffer();
   const pdf = await getDocument({ data: buffer }).promise;
   let allText = '';
+  const totalPages = Math.max(pdf.numPages, 1);
   for (let page = 1; page <= pdf.numPages; page += 1) {
     const p = await pdf.getPage(page);
     const content = await p.getTextContent();
@@ -81,13 +82,20 @@ async function extractPdfText(file) {
       lastY = y;
     }
     allText += `${pageText}\n`;
+    if (onProgress) {
+      onProgress({
+        phase: 'extract',
+        progress: Math.round((page / totalPages) * 100),
+        label: `Reading PDF page ${page} of ${totalPages}...`,
+      });
+    }
   }
   return allText;
 }
 
-async function fileToText(file) {
+async function fileToText(file, onProgress) {
   const ext = file.name.toLowerCase().split('.').pop() || '';
-  if (ext === 'pdf') return extractPdfText(file);
+  if (ext === 'pdf') return extractPdfText(file, onProgress);
   const buffer = await file.arrayBuffer();
   if (ext === 'txt' || ext === 'md' || ext === 'csv') return new TextDecoder().decode(buffer);
   return '';
@@ -109,6 +117,9 @@ export default function App() {
   const [notice, setNotice] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [latestBatchAt, setLatestBatchAt] = useState(null);
+  const [generationProgress, setGenerationProgress] = useState(0);
+  const [generationStage, setGenerationStage] = useState('');
+  const [generationIndeterminate, setGenerationIndeterminate] = useState(false);
   const [modelStatus, setModelStatus] = useState({ ok: false, model: 'qwen2.5:7b' });
   const [quizConfig, setQuizConfig] = useState({ mode: 'quiz', difficulty: 'medium', count: 10 });
 
@@ -144,37 +155,81 @@ export default function App() {
     avg,
   };
 
-  const generateForChunk = async (chunk) => {
+  const generateForChunk = async (chunk, { append = false } = {}) => {
     setIsGenerating(true);
+    setGenerationProgress(100);
+    setGenerationIndeterminate(true);
+    setGenerationStage('AI is generating flashcards...');
     setNotice('Generating your study set...');
     try {
       const aiCards = await generateCardsWithOllama(chunk.content);
       if (aiCards.length) {
-        setCards(aiCards);
+        setCards((prev) => (append ? [...prev, ...aiCards] : aiCards));
         setLatestBatchAt(new Date().toLocaleTimeString());
         setShowAnswer(false);
-        setNotice(`Generated ${aiCards.length} AI flashcards.`);
+        setGenerationIndeterminate(false);
+        setGenerationProgress(100);
+        setGenerationStage('Completed');
+        setNotice(
+          append
+            ? `Generated ${aiCards.length} more AI flashcards.`
+            : `Generated ${aiCards.length} AI flashcards.`,
+        );
         return;
       }
       const fallback = fallbackCardsFromText(chunk.content);
-      setCards(fallback);
+      setCards((prev) => (append ? [...prev, ...fallback] : fallback));
       setLatestBatchAt(new Date().toLocaleTimeString());
-      setNotice(`AI returned no cards. Generated ${fallback.length} backup cards.`);
+      setGenerationIndeterminate(false);
+      setGenerationProgress(100);
+      setGenerationStage('Completed');
+      setNotice(
+        append
+          ? `AI returned no cards. Added ${fallback.length} backup flashcards.`
+          : `AI returned no cards. Generated ${fallback.length} backup cards.`,
+      );
     } catch {
+      setGenerationIndeterminate(true);
+      setGenerationStage('AI unavailable, switching to backup mode...');
       const fallback = fallbackCardsFromText(chunk.content);
-      setCards(fallback);
+      setCards((prev) => (append ? [...prev, ...fallback] : fallback));
       setLatestBatchAt(new Date().toLocaleTimeString());
-      setNotice(`AI model offline — using backup mode (${fallback.length} cards).`);
+      setGenerationIndeterminate(false);
+      setGenerationProgress(100);
+      setGenerationStage('Completed');
+      setNotice(
+        append
+          ? `AI model offline — added ${fallback.length} backup cards.`
+          : `AI model offline — using backup mode (${fallback.length} cards).`,
+      );
     } finally {
       setIsGenerating(false);
+      setTimeout(() => {
+        setGenerationProgress(0);
+        setGenerationStage('');
+        setGenerationIndeterminate(false);
+      }, 900);
     }
   };
 
   const onFileUpload = async (file) => {
-    const text = await fileToText(file);
+    setGenerationIndeterminate(false);
+    setGenerationProgress(5);
+    setGenerationStage('Uploading file...');
+    const text = await fileToText(file, ({ progress, label }) => {
+      setGenerationIndeterminate(false);
+      setGenerationProgress(progress);
+      setGenerationStage(label);
+    });
+    if (!file.name.toLowerCase().endsWith('.pdf')) {
+      setGenerationProgress(100);
+      setGenerationStage('Preparing extracted text...');
+    }
     const cleaned = cleanAcademicText(text);
     if (!cleaned || looksLikeGibberish(cleaned)) {
       setNotice('Could not extract readable text. Use a text-based PDF/TXT.');
+      setGenerationProgress(0);
+      setGenerationStage('');
       return;
     }
     const chunk = { id: `${Date.now()}`, name: file.name, content: cleaned };
@@ -243,6 +298,9 @@ export default function App() {
           onGenerateLatest={() => chunks[0] && generateForChunk(chunks[0])}
           chunks={chunks}
           isGenerating={isGenerating}
+          progress={generationProgress}
+          progressLabel={generationStage}
+          isIndeterminate={generationIndeterminate}
         />
       ) : null}
 
@@ -254,6 +312,7 @@ export default function App() {
           onRight={() => markCard(true)}
           onWrong={() => markCard(false)}
           latestBatchAt={latestBatchAt}
+          onGenerateMore={() => chunks[0] && generateForChunk(chunks[0], { append: true })}
           onClear={() => {
             setCards([]);
             setLatestBatchAt(null);

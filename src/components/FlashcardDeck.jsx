@@ -7,6 +7,7 @@ export default function FlashcardDeck({
   onRight,
   onWrong,
   latestBatchAt,
+  onGenerateMore,
   onClear,
 }) {
   const currentCard = cards[0];
@@ -43,6 +44,7 @@ export default function FlashcardDeck({
               {!showAnswer ? <button className="btn-ghost" onClick={() => setShowAnswer(true)}>Reveal answer</button> : null}
               <button className="btn-ghost" onClick={onWrong}>I got it wrong</button>
               <button className="btn-primary" onClick={onRight}>I got it right</button>
+              <button className="btn-ghost" onClick={onGenerateMore}>Generate more</button>
               <button className="btn-ghost" onClick={onClear}>Clear set</button>
             </div>
           </div>
