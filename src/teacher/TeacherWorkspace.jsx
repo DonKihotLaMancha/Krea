@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
+import { apiUrl, enhanceFetchError } from '../lib/apiBase';
 
 function errorMessageFromBody(data, resp, rawText) {
   if (data && typeof data === 'object') {
@@ -24,11 +25,19 @@ function errorMessageFromBody(data, resp, rawText) {
   if (snippet && !snippet.startsWith('<')) return snippet;
   const status = resp.status;
   const reason = resp.statusText || '';
+  if (status === 404) {
+    return `API not found (404). Start the backend (npm run server or npm run dev:full). If you use vite preview, run the server on port 3001. For a static deploy, set VITE_API_BASE_URL to your API origin.`;
+  }
   return `Request failed (${status}${reason ? ` ${reason}` : ''}).`;
 }
 
-async function apiFetch(url, options = {}) {
-  const resp = await fetch(url, options);
+async function apiFetch(path, options = {}) {
+  let resp;
+  try {
+    resp = await fetch(apiUrl(path), options);
+  } catch (e) {
+    throw enhanceFetchError(e);
+  }
   const rawText = await resp.text();
   let data = null;
   if (rawText) {

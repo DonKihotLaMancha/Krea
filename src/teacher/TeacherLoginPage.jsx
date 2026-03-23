@@ -3,11 +3,34 @@ import { Link } from 'react-router-dom';
 import { LogIn, UserPlus } from 'lucide-react';
 import { supabase as supabaseBrowser } from '../lib/supabaseClient';
 
+/** Supabase returns terse messages; map them to actionable copy. */
+function messageForAuthError(err) {
+  const raw = String(err?.message || err || '');
+  const lower = raw.toLowerCase();
+  if (/rate limit|too many requests|over_request|over_email_send|email rate limit/.test(lower)) {
+    return 'Too many attempts (Supabase rate limit). Wait about 5–15 minutes, then try again. If you were creating an account, wait before clicking Create account again.';
+  }
+  if (/invalid login|invalid credentials|invalid_grant/.test(lower)) {
+    return 'Wrong email or password. If this email is not registered yet, use Create account instead of Sign in.';
+  }
+  if (/already registered|user already exists|email.*already been registered|already been taken/.test(lower)) {
+    return 'This email already has an account. Use Sign in, or reset your password in the Supabase dashboard.';
+  }
+  if (/email not confirmed|signup_not_completed|email_not_confirmed/.test(lower)) {
+    return 'Confirm your email (open the link Supabase sent) before signing in.';
+  }
+  if (/weak password|password.*short|least \d+ char/i.test(lower)) {
+    return raw;
+  }
+  return raw || 'Something went wrong.';
+}
+
 export default function TeacherLoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState('');
+  const [infoMessage, setInfoMessage] = useState('');
 
   if (!supabaseBrowser) {
     return (
@@ -28,7 +51,7 @@ export default function TeacherLoginPage() {
         <p className="text-xs font-semibold uppercase tracking-wider text-indigo-600">Faculty</p>
         <h1 className="mt-1 text-2xl font-semibold text-slate-900">Teacher portal</h1>
         <p className="mt-2 text-sm text-slate-600">
-          Sign in with the same account as the student app to manage classes, assignments, and grades.
+          Use the same account as the student app. New email? Choose <span className="font-medium text-slate-800">Create account</span> first, then sign in after you confirm your email (if your project requires it).
         </p>
         <div className="mt-6 grid gap-2">
           <input
@@ -48,7 +71,16 @@ export default function TeacherLoginPage() {
             placeholder="••••••••"
           />
         </div>
-        {localError ? <p className="mt-3 text-xs text-red-700">{localError}</p> : null}
+        {localError ? (
+          <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs leading-relaxed text-red-800">
+            {localError}
+          </p>
+        ) : null}
+        {infoMessage ? (
+          <p className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs leading-relaxed text-emerald-900">
+            {infoMessage}
+          </p>
+        ) : null}
         <div className="mt-4 flex flex-wrap gap-2">
           <button
             type="button"
@@ -57,6 +89,7 @@ export default function TeacherLoginPage() {
             onClick={async () => {
               setBusy(true);
               setLocalError('');
+              setInfoMessage('');
               try {
                 const { error } = await supabaseBrowser.auth.signInWithPassword({
                   email: email.trim(),
@@ -64,7 +97,7 @@ export default function TeacherLoginPage() {
                 });
                 if (error) throw error;
               } catch (e) {
-                setLocalError(e?.message || 'Sign in failed.');
+                setLocalError(messageForAuthError(e));
               } finally {
                 setBusy(false);
               }
@@ -80,6 +113,7 @@ export default function TeacherLoginPage() {
             onClick={async () => {
               setBusy(true);
               setLocalError('');
+              setInfoMessage('');
               try {
                 const { data, error } = await supabaseBrowser.auth.signUp({
                   email: email.trim(),
@@ -87,10 +121,12 @@ export default function TeacherLoginPage() {
                 });
                 if (error) throw error;
                 if (!data.session) {
-                  setLocalError('Check your email to confirm your account.');
+                  setInfoMessage(
+                    'Account created. Check your email for a confirmation link if required by your Supabase project, then return here and use Sign in.',
+                  );
                 }
               } catch (e) {
-                setLocalError(e?.message || 'Sign up failed.');
+                setLocalError(messageForAuthError(e));
               } finally {
                 setBusy(false);
               }

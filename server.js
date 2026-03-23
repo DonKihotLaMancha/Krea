@@ -4,6 +4,12 @@ import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
 import nodemailer from 'nodemailer';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -1862,6 +1868,22 @@ async function processTaskEmailReminders() {
 setInterval(() => {
   processTaskEmailReminders().catch(() => {});
 }, 60_000);
+
+/** Production: serve Vite build from dist/ so one process hosts API + SPA (e.g. Render free tier). */
+const distDir = path.join(__dirname, 'dist');
+if (fs.existsSync(distDir)) {
+  app.use(express.static(distDir));
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    if (req.path.startsWith('/api')) {
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
+    res.sendFile(path.join(distDir, 'index.html'), (err) => {
+      if (err) next(err);
+    });
+  });
+}
 
 app.listen(PORT, () => {
   console.log(`API listening on http://localhost:${PORT}`);

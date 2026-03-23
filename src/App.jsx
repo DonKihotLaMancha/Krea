@@ -20,6 +20,7 @@ import SubirArchivoPanel from './components/SubirArchivoPanel';
 import TablaApartados from './components/TablaApartados';
 import NotebookWorkspace from './components/NotebookWorkspace';
 import { supabase as supabaseBrowser } from './lib/supabaseClient';
+import { enhanceFetchError } from './lib/apiBase';
 import CommandPalette from './components/CommandPalette';
 import TasksCalendar from './components/TasksCalendar';
 const GraficasProgreso = lazy(() => import('./components/GraficasProgreso'));
@@ -249,7 +250,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
     return await fetch(url, { ...options, signal: controller.signal });
   } catch (error) {
     if (error?.name === 'AbortError') throw new Error('Request timed out.');
-    throw error;
+    throw enhanceFetchError(error);
   } finally {
     clearTimeout(timeoutId);
   }

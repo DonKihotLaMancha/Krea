@@ -37,4 +37,13 @@ export default defineConfig({
       },
     },
   },
+  // Same as dev: without this, `vite preview` serves the SPA but /api/* returns 404 (no Express).
+  preview: {
+    proxy: {
+      '/api': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
+    },
+  },
 });
