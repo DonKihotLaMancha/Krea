@@ -15,17 +15,17 @@ export default function AppShell({
   children,
 }) {
   return (
-    <div className="grid min-h-screen grid-cols-1 md:grid-cols-[256px_1fr]">
+    <div className="grid min-h-screen grid-cols-1 bg-gradient-to-br from-slate-50 via-indigo-50/40 to-cyan-50/40 md:grid-cols-[256px_1fr]">
       <SidebarNav tabs={tabs} tab={tab} onChange={setTab} />
       <main className="p-4 md:p-6">
         <div className="mx-auto w-full max-w-[1320px]">
-        <TopbarStatus title={tab} modelStatus={modelStatus} latestBatchAt={latestBatchAt} />
-        {authPanel ? <div className="mb-4">{authPanel}</div> : null}
-        <NoticeBanner text={notice} />
-        {tab !== 'Ingest' ? (
-          <StatsCards cardsCount={stats.cardsCount} tasksDone={stats.tasksDone} tasksTotal={stats.tasksTotal} avg={stats.avg} />
-        ) : null}
-        <div className="space-y-4">{children}</div>
+          <TopbarStatus title={tab} modelStatus={modelStatus} latestBatchAt={latestBatchAt} />
+          {authPanel ? <div className="mb-4">{authPanel}</div> : null}
+          <NoticeBanner text={notice} />
+          {tab !== 'Ingest' ? (
+            <StatsCards cardsCount={stats.cardsCount} tasksDone={stats.tasksDone} tasksTotal={stats.tasksTotal} avg={stats.avg} />
+          ) : null}
+          <div className="space-y-4">{children}</div>
         </div>
       </main>
     </div>

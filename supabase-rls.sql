@@ -33,6 +33,14 @@ alter table public.chat_members enable row level security;
 alter table public.chat_messages enable row level security;
 alter table public.tutor_conversations enable row level security;
 alter table public.tutor_messages enable row level security;
+alter table public.teacher_classes enable row level security;
+alter table public.class_enrollments enable row level security;
+alter table public.class_materials enable row level security;
+alter table public.teacher_assignments enable row level security;
+alter table public.assignment_submissions enable row level security;
+alter table public.teacher_announcements enable row level security;
+alter table public.teacher_grades enable row level security;
+alter table public.teacher_generated_quizzes enable row level security;
 
 drop policy if exists profiles_self on public.profiles;
 create policy profiles_self on public.profiles
@@ -252,6 +260,122 @@ for all using (exists (
 )) with check (exists (
   select 1 from public.tutor_conversations tc where tc.id = tutor_messages.conversation_id and tc.owner_id = auth.uid()
 ));
+
+drop policy if exists teacher_classes_owner on public.teacher_classes;
+create policy teacher_classes_owner on public.teacher_classes
+for all using (teacher_id = auth.uid()) with check (teacher_id = auth.uid());
+
+drop policy if exists class_enrollments_visible on public.class_enrollments;
+create policy class_enrollments_visible on public.class_enrollments
+for select using (
+  student_id = auth.uid()
+  or exists (
+    select 1 from public.teacher_classes tc where tc.id = class_enrollments.class_id and tc.teacher_id = auth.uid()
+  )
+);
+drop policy if exists class_enrollments_teacher_write on public.class_enrollments;
+create policy class_enrollments_teacher_write on public.class_enrollments
+for all using (
+  exists (
+    select 1 from public.teacher_classes tc where tc.id = class_enrollments.class_id and tc.teacher_id = auth.uid()
+  )
+) with check (
+  exists (
+    select 1 from public.teacher_classes tc where tc.id = class_enrollments.class_id and tc.teacher_id = auth.uid()
+  )
+);
+
+drop policy if exists class_materials_access on public.class_materials;
+create policy class_materials_access on public.class_materials
+for select using (
+  exists (
+    select 1
+    from public.teacher_classes tc
+    left join public.class_enrollments ce on ce.class_id = tc.id and ce.student_id = auth.uid()
+    where tc.id = class_materials.class_id and (tc.teacher_id = auth.uid() or ce.student_id is not null)
+  )
+);
+drop policy if exists class_materials_teacher_write on public.class_materials;
+create policy class_materials_teacher_write on public.class_materials
+for all using (
+  exists (
+    select 1 from public.teacher_classes tc where tc.id = class_materials.class_id and tc.teacher_id = auth.uid()
+  )
+) with check (
+  exists (
+    select 1 from public.teacher_classes tc where tc.id = class_materials.class_id and tc.teacher_id = auth.uid()
+  )
+);
+
+drop policy if exists teacher_assignments_access on public.teacher_assignments;
+create policy teacher_assignments_access on public.teacher_assignments
+for select using (
+  teacher_id = auth.uid()
+  or exists (
+    select 1 from public.class_enrollments ce where ce.class_id = teacher_assignments.class_id and ce.student_id = auth.uid()
+  )
+);
+drop policy if exists teacher_assignments_teacher_write on public.teacher_assignments;
+create policy teacher_assignments_teacher_write on public.teacher_assignments
+for all using (teacher_id = auth.uid()) with check (teacher_id = auth.uid());
+
+drop policy if exists assignment_submissions_access on public.assignment_submissions;
+create policy assignment_submissions_access on public.assignment_submissions
+for select using (
+  student_id = auth.uid()
+  or exists (
+    select 1
+    from public.teacher_assignments ta
+    where ta.id = assignment_submissions.assignment_id and ta.teacher_id = auth.uid()
+  )
+);
+drop policy if exists assignment_submissions_student_insert on public.assignment_submissions;
+create policy assignment_submissions_student_insert on public.assignment_submissions
+for insert with check (student_id = auth.uid());
+drop policy if exists assignment_submissions_teacher_update on public.assignment_submissions;
+create policy assignment_submissions_teacher_update on public.assignment_submissions
+for update using (
+  exists (
+    select 1 from public.teacher_assignments ta where ta.id = assignment_submissions.assignment_id and ta.teacher_id = auth.uid()
+  )
+) with check (
+  exists (
+    select 1 from public.teacher_assignments ta where ta.id = assignment_submissions.assignment_id and ta.teacher_id = auth.uid()
+  )
+);
+
+drop policy if exists teacher_announcements_access on public.teacher_announcements;
+create policy teacher_announcements_access on public.teacher_announcements
+for select using (
+  teacher_id = auth.uid()
+  or exists (
+    select 1 from public.class_enrollments ce where ce.class_id = teacher_announcements.class_id and ce.student_id = auth.uid()
+  )
+);
+drop policy if exists teacher_announcements_teacher_write on public.teacher_announcements;
+create policy teacher_announcements_teacher_write on public.teacher_announcements
+for all using (teacher_id = auth.uid()) with check (teacher_id = auth.uid());
+
+drop policy if exists teacher_grades_access on public.teacher_grades;
+create policy teacher_grades_access on public.teacher_grades
+for select using (
+  teacher_id = auth.uid() or student_id = auth.uid()
+);
+drop policy if exists teacher_grades_teacher_write on public.teacher_grades;
+create policy teacher_grades_teacher_write on public.teacher_grades
+for all using (teacher_id = auth.uid()) with check (teacher_id = auth.uid());
+
+drop policy if exists teacher_generated_quizzes_access on public.teacher_generated_quizzes;
+create policy teacher_generated_quizzes_access on public.teacher_generated_quizzes
+for select using (
+  teacher_id = auth.uid()
+  or exists (
+    select 1 from public.class_enrollments ce where ce.class_id = teacher_generated_quizzes.class_id and ce.student_id = auth.uid()
+  )
+);
+drop policy if exists teacher_generated_quizzes_teacher_write on public.teacher_generated_quizzes;
+create policy teacher_generated_quizzes_teacher_write on public.teacher_generated_quizzes
+for all using (teacher_id = auth.uid()) with check (teacher_id = auth.uid());
 
 insert into storage.buckets (id, name, public)
 values ('sources-private', 'sources-private', false)

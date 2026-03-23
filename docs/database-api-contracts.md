@@ -79,3 +79,51 @@ This document maps current endpoints to normalized Supabase schema and defines t
 
 ### `POST /api/v2/chat/rooms`
 - Writes `chat_rooms` + `chat_members`.
+
+## Teacher Window Routes
+
+### `GET /api/teacher/dashboard?teacherId=...`
+- Reads aggregate stats from:
+  - `teacher_classes`
+  - `teacher_assignments`
+  - `teacher_announcements`
+  - `assignment_submissions`
+
+### `GET /api/teacher/classes?teacherId=...`
+- Reads teacher-owned rows from `teacher_classes`.
+
+### `POST /api/teacher/classes`
+- Request: `{ teacherId, name, description }`
+- Writes `teacher_classes`.
+
+### `GET /api/teacher/materials?teacherId=...&classId=...`
+- Reads class-scoped rows from `class_materials`.
+
+### `POST /api/teacher/materials`
+- Request: `{ teacherId, classId, title, materialType, content }`
+- Writes `class_materials`.
+
+### `GET /api/teacher/assignments?teacherId=...&classId=...`
+- Reads class assignments from `teacher_assignments`.
+
+### `POST /api/teacher/assignments`
+- Request: `{ teacherId, classId, title, description, dueAt }`
+- Writes `teacher_assignments`.
+
+### `GET /api/teacher/announcements?teacherId=...&classId=...`
+- Reads `teacher_announcements`.
+
+### `POST /api/teacher/announcements`
+- Request: `{ teacherId, classId, title, message }`
+- Writes `teacher_announcements`.
+
+### `POST /api/teacher/grading`
+- Request: `{ teacherId, classId, studentId, assignmentId?, score, feedback }`
+- Writes `teacher_grades`.
+
+### `GET /api/teacher/progress?teacherId=...&classId=...`
+- Reads aggregated class metrics from enrollments, assignments, and grades.
+
+### `POST /api/teacher/quiz-generate`
+- Request: `{ teacherId, classId, title, difficulty, count, promptText }`
+- Reads `class_materials`, uses Ollama quiz generation, writes `teacher_generated_quizzes`.

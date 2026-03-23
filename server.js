@@ -74,6 +74,20 @@ async function createDefaultNotebookSession(studentId) {
   return data.id;
 }
 
+async function ensureTeacherOwnsClass(teacherId, classId) {
+  const { data, error } = await supabase
+    .from('teacher_classes')
+    .select('id,name')
+    .eq('id', classId)
+    .eq('teacher_id', teacherId)
+    .limit(1);
+  if (error) throw error;
+  if (!data?.[0]) {
+    throw new Error('Class not found or not owned by this teacher.');
+  }
+  return data[0];
+}
+
 app.get('/api/health', async (_req, res) => {
   try {
     const resp = await fetch(`${OLLAMA_URL}/api/tags`);
@@ -349,6 +363,358 @@ app.post('/api/library/notebook', async (req, res) => {
     return res.json({ ok: true, id: data?.id || null });
   } catch (error) {
     return res.status(500).json(formatSupabaseError(error, 'Could not save notebook output.'));
+  }
+});
+
+app.get('/api/teacher/dashboard', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const teacherId = String(req.query?.teacherId || '').trim();
+  if (!teacherId) return res.status(400).json({ error: 'Missing teacherId.' });
+  if (!isUuid(teacherId)) return res.status(400).json({ error: 'teacherId must be a valid Supabase auth user UUID.' });
+  try {
+    const [{ count: classCount, error: classesErr }, { count: assignmentCount, error: assErr }, { count: announcementCount, error: annErr }] = await Promise.all([
+      supabase.from('teacher_classes').select('*', { count: 'exact', head: true }).eq('teacher_id', teacherId),
+      supabase.from('teacher_assignments').select('*', { count: 'exact', head: true }).eq('teacher_id', teacherId),
+      supabase.from('teacher_announcements').select('*', { count: 'exact', head: true }).eq('teacher_id', teacherId),
+    ]);
+    if (classesErr || assErr || annErr) throw (classesErr || assErr || annErr);
+
+    const { data: classes, error: classErr } = await supabase
+      .from('teacher_classes')
+      .select('id,name')
+      .eq('teacher_id', teacherId);
+    if (classErr) throw classErr;
+    const classIds = (classes || []).map((c) => c.id);
+
+    let submissionCount = 0;
+    if (classIds.length) {
+      const { count, error } = await supabase
+        .from('assignment_submissions')
+        .select('*', { count: 'exact', head: true })
+        .in('assignment_id', (
+          (await supabase.from('teacher_assignments').select('id').in('class_id', classIds)).data || []
+        ).map((a) => a.id));
+      if (error) throw error;
+      submissionCount = count || 0;
+    }
+
+    return res.json({
+      stats: {
+        classes: classCount || 0,
+        assignments: assignmentCount || 0,
+        announcements: announcementCount || 0,
+        submissions: submissionCount || 0,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not load teacher dashboard.'));
+  }
+});
+
+app.get('/api/teacher/classes', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const teacherId = String(req.query?.teacherId || '').trim();
+  if (!teacherId) return res.status(400).json({ error: 'Missing teacherId.' });
+  if (!isUuid(teacherId)) return res.status(400).json({ error: 'teacherId must be a valid Supabase auth user UUID.' });
+  try {
+    const { data, error } = await supabase
+      .from('teacher_classes')
+      .select('id,name,code,description,created_at')
+      .eq('teacher_id', teacherId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    return res.json({ classes: data || [] });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not load classes.'));
+  }
+});
+
+app.post('/api/teacher/classes', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const teacherId = String(req.body?.teacherId || '').trim();
+  const name = String(req.body?.name || '').trim();
+  const description = String(req.body?.description || '').trim();
+  if (!teacherId || !name) return res.status(400).json({ error: 'Missing teacherId/name.' });
+  if (!isUuid(teacherId)) return res.status(400).json({ error: 'teacherId must be a valid Supabase auth user UUID.' });
+  try {
+    await ensureProfile(teacherId);
+    const code = `CLS-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    const { data, error } = await supabase
+      .from('teacher_classes')
+      .insert({ teacher_id: teacherId, name, description, code })
+      .select('id,name,code,description,created_at')
+      .single();
+    if (error) throw error;
+    return res.json({ ok: true, class: data });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not create class.'));
+  }
+});
+
+app.get('/api/teacher/materials', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const teacherId = String(req.query?.teacherId || '').trim();
+  const classId = String(req.query?.classId || '').trim();
+  if (!teacherId || !classId) return res.status(400).json({ error: 'Missing teacherId/classId.' });
+  if (!isUuid(teacherId) || !isUuid(classId)) return res.status(400).json({ error: 'teacherId/classId must be valid UUIDs.' });
+  try {
+    await ensureTeacherOwnsClass(teacherId, classId);
+    const { data, error } = await supabase
+      .from('class_materials')
+      .select('id,title,material_type,content,created_at')
+      .eq('class_id', classId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    return res.json({ materials: data || [] });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not load class materials.'));
+  }
+});
+
+app.post('/api/teacher/materials', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const teacherId = String(req.body?.teacherId || '').trim();
+  const classId = String(req.body?.classId || '').trim();
+  const title = String(req.body?.title || '').trim();
+  const content = String(req.body?.content || '').trim();
+  const materialType = String(req.body?.materialType || 'pdf').trim();
+  if (!teacherId || !classId || !title) return res.status(400).json({ error: 'Missing teacherId/classId/title.' });
+  if (!isUuid(teacherId) || !isUuid(classId)) return res.status(400).json({ error: 'teacherId/classId must be valid UUIDs.' });
+  try {
+    await ensureProfile(teacherId);
+    await ensureTeacherOwnsClass(teacherId, classId);
+    const { data, error } = await supabase
+      .from('class_materials')
+      .insert({
+        class_id: classId,
+        title,
+        material_type: materialType,
+        content,
+        created_by: teacherId,
+      })
+      .select('id,title,material_type,content,created_at')
+      .single();
+    if (error) throw error;
+    return res.json({ ok: true, material: data });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not save class material.'));
+  }
+});
+
+app.get('/api/teacher/assignments', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const teacherId = String(req.query?.teacherId || '').trim();
+  const classId = String(req.query?.classId || '').trim();
+  if (!teacherId) return res.status(400).json({ error: 'Missing teacherId.' });
+  if (!isUuid(teacherId)) return res.status(400).json({ error: 'teacherId must be a valid UUID.' });
+  try {
+    let query = supabase
+      .from('teacher_assignments')
+      .select('id,class_id,title,description,due_at,status,created_at')
+      .eq('teacher_id', teacherId)
+      .order('created_at', { ascending: false });
+    if (classId) query = query.eq('class_id', classId);
+    const { data, error } = await query;
+    if (error) throw error;
+    return res.json({ assignments: data || [] });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not load assignments.'));
+  }
+});
+
+app.post('/api/teacher/assignments', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const teacherId = String(req.body?.teacherId || '').trim();
+  const classId = String(req.body?.classId || '').trim();
+  const title = String(req.body?.title || '').trim();
+  const description = String(req.body?.description || '').trim();
+  const dueAt = req.body?.dueAt || null;
+  if (!teacherId || !classId || !title) return res.status(400).json({ error: 'Missing teacherId/classId/title.' });
+  if (!isUuid(teacherId) || !isUuid(classId)) return res.status(400).json({ error: 'teacherId/classId must be valid UUIDs.' });
+  try {
+    await ensureProfile(teacherId);
+    await ensureTeacherOwnsClass(teacherId, classId);
+    const { data, error } = await supabase
+      .from('teacher_assignments')
+      .insert({ teacher_id: teacherId, class_id: classId, title, description, due_at: dueAt, status: 'published' })
+      .select('id,class_id,title,description,due_at,status,created_at')
+      .single();
+    if (error) throw error;
+    return res.json({ ok: true, assignment: data });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not create assignment.'));
+  }
+});
+
+app.get('/api/teacher/announcements', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const teacherId = String(req.query?.teacherId || '').trim();
+  const classId = String(req.query?.classId || '').trim();
+  if (!teacherId) return res.status(400).json({ error: 'Missing teacherId.' });
+  if (!isUuid(teacherId)) return res.status(400).json({ error: 'teacherId must be a valid UUID.' });
+  try {
+    let query = supabase
+      .from('teacher_announcements')
+      .select('id,class_id,title,message,created_at')
+      .eq('teacher_id', teacherId)
+      .order('created_at', { ascending: false });
+    if (classId) query = query.eq('class_id', classId);
+    const { data, error } = await query;
+    if (error) throw error;
+    return res.json({ announcements: data || [] });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not load announcements.'));
+  }
+});
+
+app.post('/api/teacher/announcements', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const teacherId = String(req.body?.teacherId || '').trim();
+  const classId = String(req.body?.classId || '').trim();
+  const title = String(req.body?.title || '').trim();
+  const message = String(req.body?.message || '').trim();
+  if (!teacherId || !classId || !title || !message) return res.status(400).json({ error: 'Missing teacherId/classId/title/message.' });
+  if (!isUuid(teacherId) || !isUuid(classId)) return res.status(400).json({ error: 'teacherId/classId must be valid UUIDs.' });
+  try {
+    await ensureProfile(teacherId);
+    await ensureTeacherOwnsClass(teacherId, classId);
+    const { data, error } = await supabase
+      .from('teacher_announcements')
+      .insert({ teacher_id: teacherId, class_id: classId, title, message })
+      .select('id,class_id,title,message,created_at')
+      .single();
+    if (error) throw error;
+    return res.json({ ok: true, announcement: data });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not publish announcement.'));
+  }
+});
+
+app.post('/api/teacher/grading', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const teacherId = String(req.body?.teacherId || '').trim();
+  const classId = String(req.body?.classId || '').trim();
+  const studentId = String(req.body?.studentId || '').trim();
+  const assignmentId = req.body?.assignmentId ? String(req.body.assignmentId).trim() : null;
+  const score = Number(req.body?.score);
+  const feedback = String(req.body?.feedback || '').trim();
+  if (!teacherId || !classId || !studentId || Number.isNaN(score)) {
+    return res.status(400).json({ error: 'Missing teacherId/classId/studentId/score.' });
+  }
+  if (!isUuid(teacherId) || !isUuid(classId) || !isUuid(studentId) || (assignmentId && !isUuid(assignmentId))) {
+    return res.status(400).json({ error: 'teacherId/classId/studentId/assignmentId must be valid UUIDs.' });
+  }
+  try {
+    await ensureTeacherOwnsClass(teacherId, classId);
+    const { data, error } = await supabase
+      .from('teacher_grades')
+      .insert({
+        class_id: classId,
+        teacher_id: teacherId,
+        student_id: studentId,
+        assignment_id: assignmentId,
+        score,
+        feedback,
+      })
+      .select('id,class_id,student_id,assignment_id,score,feedback,created_at')
+      .single();
+    if (error) throw error;
+    return res.json({ ok: true, grade: data });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not save grade.'));
+  }
+});
+
+app.get('/api/teacher/progress', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const teacherId = String(req.query?.teacherId || '').trim();
+  const classId = String(req.query?.classId || '').trim();
+  if (!teacherId || !classId) return res.status(400).json({ error: 'Missing teacherId/classId.' });
+  if (!isUuid(teacherId) || !isUuid(classId)) return res.status(400).json({ error: 'teacherId/classId must be valid UUIDs.' });
+  try {
+    await ensureTeacherOwnsClass(teacherId, classId);
+    const [{ count: enrolled, error: enrErr }, { data: gradeRows, error: gradeErr }, { count: assignmentCount, error: assErr }] = await Promise.all([
+      supabase.from('class_enrollments').select('*', { count: 'exact', head: true }).eq('class_id', classId).eq('status', 'active'),
+      supabase.from('teacher_grades').select('student_id,score').eq('class_id', classId),
+      supabase.from('teacher_assignments').select('*', { count: 'exact', head: true }).eq('class_id', classId),
+    ]);
+    if (enrErr || gradeErr || assErr) throw (enrErr || gradeErr || assErr);
+    const avgScore = (gradeRows && gradeRows.length)
+      ? gradeRows.reduce((sum, r) => sum + Number(r.score || 0), 0) / gradeRows.length
+      : 0;
+    return res.json({
+      progress: {
+        enrolled: enrolled || 0,
+        assignments: assignmentCount || 0,
+        gradedEntries: gradeRows?.length || 0,
+        averageScore: Number(avgScore.toFixed(2)),
+      },
+    });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not load class progress.'));
+  }
+});
+
+app.post('/api/teacher/quiz-generate', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const teacherId = String(req.body?.teacherId || '').trim();
+  const classId = String(req.body?.classId || '').trim();
+  const title = String(req.body?.title || 'Class Quiz').trim();
+  const difficulty = String(req.body?.difficulty || 'medium').trim();
+  const count = Math.max(3, Math.min(30, Number(req.body?.count || 10)));
+  const promptText = String(req.body?.promptText || '').trim();
+  if (!teacherId || !classId) return res.status(400).json({ error: 'Missing teacherId/classId.' });
+  if (!isUuid(teacherId) || !isUuid(classId)) return res.status(400).json({ error: 'teacherId/classId must be valid UUIDs.' });
+  try {
+    await ensureTeacherOwnsClass(teacherId, classId);
+    const { data: materials, error: matErr } = await supabase
+      .from('class_materials')
+      .select('title,content')
+      .eq('class_id', classId)
+      .order('created_at', { ascending: false })
+      .limit(10);
+    if (matErr) throw matErr;
+    const mergedText = (materials || [])
+      .map((m) => `${m.title}\n${String(m.content || '').slice(0, 3000)}`)
+      .join('\n\n')
+      .slice(0, 16000);
+    const quizPrompt = `
+Generate a quiz with ${count} questions at ${difficulty} difficulty from SOURCE_PASSAGES.
+Return strict JSON:
+{
+  "topic":"${title}",
+  "total":${count},
+  "estimatedCorrect":0,
+  "sec":120
+}
+SOURCE_PASSAGES:
+${JSON.stringify(buildPassagesFromSources([{ name: title, content: `${promptText}\n\n${mergedText}` }]).slice(0, 25))}
+`;
+    let result;
+    try {
+      const modelData = await callOllama(quizPrompt);
+      const parsed = safeParseModelJson(String(modelData.response || '').trim());
+      result = normalizeQuizResult(parsed, { mode: 'quiz', count, difficulty });
+    } catch {
+      result = buildQuizFallback({ mode: 'quiz', count, difficulty });
+    }
+
+    const { data, error } = await supabase
+      .from('teacher_generated_quizzes')
+      .insert({
+        class_id: classId,
+        teacher_id: teacherId,
+        title,
+        difficulty,
+        question_count: count,
+        payload: result,
+      })
+      .select('id,class_id,title,difficulty,question_count,payload,created_at')
+      .single();
+    if (error) throw error;
+    return res.json({ ok: true, quiz: data });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not generate teacher quiz.'));
   }
 });
 

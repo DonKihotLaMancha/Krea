@@ -2,6 +2,42 @@ create extension if not exists pgcrypto;
 
 do $$
 begin
+  -- If legacy tables exist with incompatible structures/types, preserve them by renaming.
+  if exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'concept_maps'
+      and column_name = 'id'
+      and udt_name <> 'uuid'
+  ) then
+    if not exists (
+      select 1 from information_schema.tables
+      where table_schema = 'public' and table_name = 'concept_maps_legacy'
+    ) then
+      execute 'alter table public.concept_maps rename to concept_maps_legacy';
+    end if;
+  end if;
+
+  if exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'notebook_outputs'
+      and column_name = 'id'
+      and udt_name <> 'uuid'
+  ) then
+    if not exists (
+      select 1 from information_schema.tables
+      where table_schema = 'public' and table_name = 'notebook_outputs_legacy'
+    ) then
+      execute 'alter table public.notebook_outputs rename to notebook_outputs_legacy';
+    end if;
+  end if;
+end$$;
+
+do $$
+begin
   if not exists (select 1 from pg_type where typname = 'source_type') then
     create type public.source_type as enum ('pdf', 'doc', 'txt', 'url', 'note');
   end if;
@@ -382,6 +418,91 @@ create table if not exists public.tutor_messages (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.teacher_classes (
+  id uuid primary key default gen_random_uuid(),
+  teacher_id uuid not null references public.profiles(id) on delete cascade,
+  name text not null,
+  code text not null unique,
+  description text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.class_enrollments (
+  class_id uuid not null references public.teacher_classes(id) on delete cascade,
+  student_id uuid not null references public.profiles(id) on delete cascade,
+  status text not null default 'active' check (status in ('active', 'invited', 'removed')),
+  created_at timestamptz not null default now(),
+  primary key (class_id, student_id)
+);
+
+create table if not exists public.class_materials (
+  id uuid primary key default gen_random_uuid(),
+  class_id uuid not null references public.teacher_classes(id) on delete cascade,
+  source_id uuid references public.sources(id) on delete set null,
+  title text not null,
+  material_type text not null default 'pdf' check (material_type in ('pdf', 'doc', 'note', 'link', 'other')),
+  content text,
+  created_by uuid not null references public.profiles(id) on delete cascade,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.teacher_assignments (
+  id uuid primary key default gen_random_uuid(),
+  class_id uuid not null references public.teacher_classes(id) on delete cascade,
+  teacher_id uuid not null references public.profiles(id) on delete cascade,
+  title text not null,
+  description text,
+  due_at timestamptz,
+  status text not null default 'published' check (status in ('draft', 'published', 'closed')),
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.assignment_submissions (
+  id uuid primary key default gen_random_uuid(),
+  assignment_id uuid not null references public.teacher_assignments(id) on delete cascade,
+  student_id uuid not null references public.profiles(id) on delete cascade,
+  submission_text text,
+  submitted_at timestamptz,
+  score numeric(5,2),
+  feedback text,
+  graded_by uuid references public.profiles(id) on delete set null,
+  graded_at timestamptz,
+  created_at timestamptz not null default now(),
+  unique (assignment_id, student_id)
+);
+
+create table if not exists public.teacher_announcements (
+  id uuid primary key default gen_random_uuid(),
+  class_id uuid not null references public.teacher_classes(id) on delete cascade,
+  teacher_id uuid not null references public.profiles(id) on delete cascade,
+  title text not null,
+  message text not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.teacher_grades (
+  id uuid primary key default gen_random_uuid(),
+  class_id uuid not null references public.teacher_classes(id) on delete cascade,
+  teacher_id uuid not null references public.profiles(id) on delete cascade,
+  student_id uuid not null references public.profiles(id) on delete cascade,
+  assignment_id uuid references public.teacher_assignments(id) on delete set null,
+  score numeric(5,2) not null check (score >= 0 and score <= 100),
+  feedback text,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.teacher_generated_quizzes (
+  id uuid primary key default gen_random_uuid(),
+  class_id uuid not null references public.teacher_classes(id) on delete cascade,
+  teacher_id uuid not null references public.profiles(id) on delete cascade,
+  title text not null,
+  difficulty public.quiz_difficulty not null default 'medium',
+  question_count int not null default 10,
+  payload jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
 drop trigger if exists trg_profiles_updated_at on public.profiles;
 create trigger trg_profiles_updated_at before update on public.profiles for each row execute function public.set_updated_at();
 drop trigger if exists trg_sources_updated_at on public.sources;
@@ -396,3 +517,5 @@ drop trigger if exists trg_presentations_updated_at on public.presentations;
 create trigger trg_presentations_updated_at before update on public.presentations for each row execute function public.set_updated_at();
 drop trigger if exists trg_tasks_updated_at on public.tasks;
 create trigger trg_tasks_updated_at before update on public.tasks for each row execute function public.set_updated_at();
+drop trigger if exists trg_teacher_classes_updated_at on public.teacher_classes;
+create trigger trg_teacher_classes_updated_at before update on public.teacher_classes for each row execute function public.set_updated_at();

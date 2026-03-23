@@ -29,6 +29,17 @@ create index if not exists idx_chat_members_user_room on public.chat_members(use
 create index if not exists idx_chat_messages_room_created on public.chat_messages(room_id, created_at desc);
 create index if not exists idx_tutor_conv_owner_created on public.tutor_conversations(owner_id, created_at desc);
 create index if not exists idx_tutor_messages_conversation_created on public.tutor_messages(conversation_id, created_at desc);
+create index if not exists idx_teacher_classes_teacher_created on public.teacher_classes(teacher_id, created_at desc);
+create index if not exists idx_teacher_classes_code on public.teacher_classes(code);
+create index if not exists idx_class_enrollments_student on public.class_enrollments(student_id, class_id);
+create index if not exists idx_class_materials_class_created on public.class_materials(class_id, created_at desc);
+create index if not exists idx_teacher_assignments_class_due on public.teacher_assignments(class_id, due_at);
+create index if not exists idx_teacher_assignments_teacher_created on public.teacher_assignments(teacher_id, created_at desc);
+create index if not exists idx_assignment_submissions_assignment on public.assignment_submissions(assignment_id, created_at desc);
+create index if not exists idx_assignment_submissions_student on public.assignment_submissions(student_id, created_at desc);
+create index if not exists idx_teacher_announcements_class_created on public.teacher_announcements(class_id, created_at desc);
+create index if not exists idx_teacher_grades_class_student on public.teacher_grades(class_id, student_id, created_at desc);
+create index if not exists idx_teacher_generated_quizzes_class_created on public.teacher_generated_quizzes(class_id, created_at desc);
 
 create index if not exists idx_sources_title_fts on public.sources using gin (to_tsvector('simple', coalesce(title, '')));
 create index if not exists idx_source_contents_text_fts on public.source_contents using gin (to_tsvector('english', coalesce(cleaned_text, '')));

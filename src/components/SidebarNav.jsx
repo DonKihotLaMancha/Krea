@@ -1,4 +1,4 @@
-import { BookOpen, ClipboardList, FileQuestion, GitBranch, GraduationCap, MessageSquare, Presentation, Upload } from 'lucide-react';
+import { BookOpen, ClipboardList, FileQuestion, GitBranch, GraduationCap, MessageSquare, Presentation, Upload, UserRoundCog } from 'lucide-react';
 
 const icons = {
   Ingest: Upload,
@@ -11,16 +11,17 @@ const icons = {
   Presentations: Presentation,
   Academics: GraduationCap,
   'AI Tutor': BookOpen,
+  'Teacher Window': UserRoundCog,
 };
 
 export default function SidebarNav({ tabs, tab, onChange }) {
   return (
-    <aside className="w-full border-r border-border bg-white/85 p-3 backdrop-blur md:w-64 md:p-4">
+    <aside className="w-full border-r border-border bg-white/90 p-3 backdrop-blur md:sticky md:top-0 md:h-screen md:w-64 md:p-4">
       <div className="mb-4 rounded-xl bg-gradient-to-r from-indigo-600 via-violet-600 to-sky-500 p-3 text-white shadow-soft">
         <h1 className="text-lg font-semibold">Student Assistant</h1>
         <p className="text-xs text-indigo-100">Learn smarter every day</p>
       </div>
-      <nav className="flex gap-2 overflow-x-auto pb-1 md:flex-col md:overflow-visible">
+      <nav className="flex gap-2 overflow-x-auto pb-1 md:h-[calc(100vh-120px)] md:flex-col md:overflow-auto">
         {tabs.map((item) => {
           const Icon = icons[item] || BookOpen;
           const active = tab === item;

@@ -20,6 +20,7 @@ import SubirArchivoPanel from './components/SubirArchivoPanel';
 import TablaApartados from './components/TablaApartados';
 import NotebookWorkspace from './components/NotebookWorkspace';
 import { supabase as supabaseBrowser } from './lib/supabaseClient';
+import TeacherWindow from './components/teacher/TeacherWindow';
 const GraficasProgreso = lazy(() => import('./components/GraficasProgreso'));
 const SesionEstudio = lazy(() => import('./components/SesionEstudio'));
 const ConceptMap = lazy(() => import('./components/ConceptMap'));
@@ -27,7 +28,7 @@ const ConceptMap = lazy(() => import('./components/ConceptMap'));
 ChartJS.register(ArcElement, BarElement, Tooltip, Legend, CategoryScale, LinearScale, PointElement, LineElement);
 GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).toString();
 
-const tabs = ['Ingest', 'Flashcards', 'Notebook', 'Concept Map', 'Tasks', 'Quizzes', 'Chat', 'Presentations', 'Academics', 'AI Tutor'];
+const tabs = ['Ingest', 'Flashcards', 'Notebook', 'Concept Map', 'Tasks', 'Quizzes', 'Chat', 'Presentations', 'Academics', 'AI Tutor', 'Teacher Window'];
 function cleanAcademicText(raw) {
   let text = (raw || '')
     .replace(/[^\S\r\n]+/g, ' ')
@@ -626,6 +627,9 @@ export default function App() {
         // Non-blocking persistence.
       }
       await generateForChunk(chunk);
+      if (!studentId) {
+        setNotice('Generated locally. Sign in to sync this upload to Supabase.');
+      }
     } catch (error) {
       setNotice(`Upload failed: ${error?.message || 'Unknown error.'}`);
       setGenerationProgress(0);
@@ -750,7 +754,11 @@ export default function App() {
         } catch {
           // Non-blocking persistence.
         }
-        setNotice(`Concept map generated with ${generated.nodes.length} concepts.`);
+        setNotice(
+          studentId
+            ? `Concept map generated with ${generated.nodes.length} concepts.`
+            : `Concept map generated with ${generated.nodes.length} concepts (local only until sign-in).`,
+        );
         return;
       }
       setConceptMapData(null);
@@ -778,7 +786,7 @@ export default function App() {
       } catch {
         // Non-blocking persistence.
       }
-      setNotice(`${label} completed.`);
+      setNotice(studentId ? `${label} completed.` : `${label} completed (local only until sign-in).`);
       return result;
     } catch (error) {
       setNotice(`${error?.message || `${label} failed`}.`);
@@ -1059,6 +1067,9 @@ export default function App() {
             }
           }}
         />
+      ) : null}
+      {tab === 'Teacher Window' ? (
+        <TeacherWindow teacherId={studentId} setNotice={setNotice} />
       ) : null}
     </AppShell>
   );

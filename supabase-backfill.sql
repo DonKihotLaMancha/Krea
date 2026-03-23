@@ -4,8 +4,8 @@
 -- Legacy tables expected:
 -- students(id text, name text, created_at timestamptz)
 -- student_pdfs(student_id text, name text, content text, created_at timestamptz)
--- concept_maps(student_id text, source_name text, title text, map_json text, created_at timestamptz)
--- notebook_outputs(student_id text, source_names text, output_type text, output_json text, created_at timestamptz)
+-- concept_maps_legacy(student_id text, source_name text, title text, map_json text, created_at timestamptz)
+-- notebook_outputs_legacy(student_id text, source_names text, output_type text, output_json text, created_at timestamptz)
 
 -- 1) Build profile rows for users that exist in auth.users
 insert into public.profiles (id, display_name)
@@ -54,7 +54,7 @@ select
   coalesce(nullif(trim(cm.title), ''), 'Concept Map') as title,
   1,
   coalesce(cm.created_at, now())
-from public.concept_maps cm
+from public.concept_maps_legacy cm
 join auth.users au on au.id::text = cm.student_id
 join public.sources s on s.owner_id = au.id and s.title = cm.source_name
 on conflict do nothing;
@@ -80,6 +80,6 @@ select
   end,
   coalesce(no.output_json::jsonb, '{}'::jsonb),
   coalesce(no.created_at, now())
-from public.notebook_outputs no
+from public.notebook_outputs_legacy no
 join auth.users au on au.id::text = no.student_id
 join public.notebook_sessions ns on ns.owner_id = au.id and ns.title = 'Imported session';
