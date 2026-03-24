@@ -31,8 +31,8 @@ export default defineConfig(({ mode }) => {
 
   return {
   build: {
-    // pdf.js / main bundle exceed default 500 kB warning — acceptable for this app
-    chunkSizeWarningLimit: 2500,
+    // Main app chunk + pdf deps exceed Vite’s default 500 kB warning (Rolldown/Vite 8).
+    chunkSizeWarningLimit: 3500,
   },
   // Force client bundle to see the same merged URL + anon key as index.html (fixes Vercel/CI where only process.env.SUPABASE_* is set).
   define: {
