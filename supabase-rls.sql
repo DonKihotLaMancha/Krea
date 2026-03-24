@@ -1,4 +1,6 @@
 alter table public.profiles enable row level security;
+alter table public.students enable row level security;
+alter table public.student_pdfs enable row level security;
 alter table public.sources enable row level security;
 alter table public.source_contents enable row level security;
 alter table public.source_chunks enable row level security;
@@ -42,10 +44,44 @@ alter table public.assignment_submissions enable row level security;
 alter table public.teacher_announcements enable row level security;
 alter table public.teacher_grades enable row level security;
 alter table public.teacher_generated_quizzes enable row level security;
+alter table public.lms_courses enable row level security;
+alter table public.lms_course_sections enable row level security;
+alter table public.lms_enrollments enable row level security;
+alter table public.lms_modules enable row level security;
+alter table public.lms_pages enable row level security;
+alter table public.lms_files enable row level security;
+alter table public.lms_assignments enable row level security;
+alter table public.lms_quizzes enable row level security;
+alter table public.lms_quiz_attempts enable row level security;
+alter table public.lms_submissions enable row level security;
+alter table public.lms_rubric_sets enable row level security;
+alter table public.lms_rubric_scores enable row level security;
+alter table public.lms_module_items enable row level security;
+alter table public.lms_discussions enable row level security;
+alter table public.lms_discussion_replies enable row level security;
+alter table public.lms_inbox_threads enable row level security;
+alter table public.lms_inbox_participants enable row level security;
+alter table public.lms_inbox_messages enable row level security;
+alter table public.lms_calendar_events enable row level security;
+alter table public.lms_notifications enable row level security;
+alter table public.lms_todo_items enable row level security;
+alter table public.lms_analytics_events enable row level security;
+alter table public.lms_attendance enable row level security;
+alter table public.lms_role_bindings enable row level security;
+alter table public.lms_permission_overrides enable row level security;
+alter table public.lms_audit_events enable row level security;
 
 drop policy if exists profiles_self on public.profiles;
 create policy profiles_self on public.profiles
 for all using (id = auth.uid()) with check (id = auth.uid());
+
+drop policy if exists students_self on public.students;
+create policy students_self on public.students
+for all using (id = auth.uid()) with check (id = auth.uid());
+
+drop policy if exists student_pdfs_owner on public.student_pdfs;
+create policy student_pdfs_owner on public.student_pdfs
+for all using (student_id = auth.uid()) with check (student_id = auth.uid());
 
 drop policy if exists sources_owner on public.sources;
 create policy sources_owner on public.sources
@@ -381,6 +417,416 @@ for select using (
 drop policy if exists teacher_generated_quizzes_teacher_write on public.teacher_generated_quizzes;
 create policy teacher_generated_quizzes_teacher_write on public.teacher_generated_quizzes
 for all using (teacher_id = auth.uid()) with check (teacher_id = auth.uid());
+
+drop policy if exists lms_courses_access on public.lms_courses;
+create policy lms_courses_access on public.lms_courses
+for select using (
+  owner_teacher_id = auth.uid()
+  or exists (
+    select 1 from public.lms_enrollments e
+    where e.course_id = lms_courses.id and e.user_id = auth.uid() and e.status = 'active'
+  )
+);
+drop policy if exists lms_courses_owner_write on public.lms_courses;
+create policy lms_courses_owner_write on public.lms_courses
+for all using (owner_teacher_id = auth.uid()) with check (owner_teacher_id = auth.uid());
+
+drop policy if exists lms_sections_access on public.lms_course_sections;
+create policy lms_sections_access on public.lms_course_sections
+for select using (
+  exists (
+    select 1 from public.lms_courses c
+    where c.id = lms_course_sections.course_id
+      and (c.owner_teacher_id = auth.uid() or exists (
+        select 1 from public.lms_enrollments e
+        where e.course_id = c.id and e.user_id = auth.uid() and e.status = 'active'
+      ))
+  )
+);
+drop policy if exists lms_sections_teacher_write on public.lms_course_sections;
+create policy lms_sections_teacher_write on public.lms_course_sections
+for all using (
+  exists (select 1 from public.lms_courses c where c.id = lms_course_sections.course_id and c.owner_teacher_id = auth.uid())
+) with check (
+  exists (select 1 from public.lms_courses c where c.id = lms_course_sections.course_id and c.owner_teacher_id = auth.uid())
+);
+
+drop policy if exists lms_enrollments_access on public.lms_enrollments;
+create policy lms_enrollments_access on public.lms_enrollments
+for select using (
+  user_id = auth.uid()
+  or exists (select 1 from public.lms_courses c where c.id = lms_enrollments.course_id and c.owner_teacher_id = auth.uid())
+);
+drop policy if exists lms_enrollments_teacher_write on public.lms_enrollments;
+create policy lms_enrollments_teacher_write on public.lms_enrollments
+for all using (
+  exists (select 1 from public.lms_courses c where c.id = lms_enrollments.course_id and c.owner_teacher_id = auth.uid())
+) with check (
+  exists (select 1 from public.lms_courses c where c.id = lms_enrollments.course_id and c.owner_teacher_id = auth.uid())
+);
+
+drop policy if exists lms_modules_access on public.lms_modules;
+create policy lms_modules_access on public.lms_modules
+for select using (
+  exists (
+    select 1 from public.lms_courses c
+    where c.id = lms_modules.course_id
+      and (c.owner_teacher_id = auth.uid() or exists (
+        select 1 from public.lms_enrollments e where e.course_id = c.id and e.user_id = auth.uid() and e.status = 'active'
+      ))
+  )
+);
+drop policy if exists lms_modules_teacher_write on public.lms_modules;
+create policy lms_modules_teacher_write on public.lms_modules
+for all using (
+  exists (select 1 from public.lms_courses c where c.id = lms_modules.course_id and c.owner_teacher_id = auth.uid())
+) with check (
+  exists (select 1 from public.lms_courses c where c.id = lms_modules.course_id and c.owner_teacher_id = auth.uid())
+);
+
+drop policy if exists lms_pages_access on public.lms_pages;
+create policy lms_pages_access on public.lms_pages
+for select using (
+  exists (
+    select 1 from public.lms_courses c
+    where c.id = lms_pages.course_id
+      and (c.owner_teacher_id = auth.uid() or exists (
+        select 1 from public.lms_enrollments e where e.course_id = c.id and e.user_id = auth.uid() and e.status = 'active'
+      ))
+  )
+);
+drop policy if exists lms_pages_teacher_write on public.lms_pages;
+create policy lms_pages_teacher_write on public.lms_pages
+for all using (
+  exists (select 1 from public.lms_courses c where c.id = lms_pages.course_id and c.owner_teacher_id = auth.uid())
+) with check (
+  exists (select 1 from public.lms_courses c where c.id = lms_pages.course_id and c.owner_teacher_id = auth.uid())
+);
+
+drop policy if exists lms_files_access on public.lms_files;
+create policy lms_files_access on public.lms_files
+for select using (
+  exists (
+    select 1 from public.lms_courses c
+    where c.id = lms_files.course_id
+      and (c.owner_teacher_id = auth.uid() or exists (
+        select 1 from public.lms_enrollments e where e.course_id = c.id and e.user_id = auth.uid() and e.status = 'active'
+      ))
+  )
+);
+drop policy if exists lms_files_teacher_write on public.lms_files;
+create policy lms_files_teacher_write on public.lms_files
+for all using (
+  exists (select 1 from public.lms_courses c where c.id = lms_files.course_id and c.owner_teacher_id = auth.uid())
+) with check (
+  exists (select 1 from public.lms_courses c where c.id = lms_files.course_id and c.owner_teacher_id = auth.uid())
+);
+
+drop policy if exists lms_assignments_access on public.lms_assignments;
+create policy lms_assignments_access on public.lms_assignments
+for select using (
+  exists (
+    select 1 from public.lms_courses c
+    where c.id = lms_assignments.course_id
+      and (c.owner_teacher_id = auth.uid() or exists (
+        select 1 from public.lms_enrollments e where e.course_id = c.id and e.user_id = auth.uid() and e.status = 'active'
+      ))
+  )
+);
+drop policy if exists lms_assignments_teacher_write on public.lms_assignments;
+create policy lms_assignments_teacher_write on public.lms_assignments
+for all using (
+  exists (select 1 from public.lms_courses c where c.id = lms_assignments.course_id and c.owner_teacher_id = auth.uid())
+) with check (
+  exists (select 1 from public.lms_courses c where c.id = lms_assignments.course_id and c.owner_teacher_id = auth.uid())
+);
+
+drop policy if exists lms_quizzes_access on public.lms_quizzes;
+create policy lms_quizzes_access on public.lms_quizzes
+for select using (
+  exists (
+    select 1 from public.lms_courses c
+    where c.id = lms_quizzes.course_id and (
+      c.owner_teacher_id = auth.uid() or exists (
+        select 1 from public.lms_enrollments e where e.course_id = c.id and e.user_id = auth.uid() and e.status = 'active'
+      )
+    )
+  )
+);
+drop policy if exists lms_quizzes_teacher_write on public.lms_quizzes;
+create policy lms_quizzes_teacher_write on public.lms_quizzes
+for all using (
+  exists (select 1 from public.lms_courses c where c.id = lms_quizzes.course_id and c.owner_teacher_id = auth.uid())
+) with check (
+  exists (select 1 from public.lms_courses c where c.id = lms_quizzes.course_id and c.owner_teacher_id = auth.uid())
+);
+
+drop policy if exists lms_quiz_attempts_access on public.lms_quiz_attempts;
+create policy lms_quiz_attempts_access on public.lms_quiz_attempts
+for select using (
+  student_id = auth.uid()
+  or exists (
+    select 1 from public.lms_quizzes q join public.lms_courses c on c.id = q.course_id
+    where q.id = lms_quiz_attempts.quiz_id and c.owner_teacher_id = auth.uid()
+  )
+);
+drop policy if exists lms_quiz_attempts_student_insert on public.lms_quiz_attempts;
+create policy lms_quiz_attempts_student_insert on public.lms_quiz_attempts
+for insert with check (student_id = auth.uid());
+
+drop policy if exists lms_submissions_access on public.lms_submissions;
+create policy lms_submissions_access on public.lms_submissions
+for select using (
+  student_id = auth.uid()
+  or exists (
+    select 1
+    from public.lms_assignments a
+    join public.lms_courses c on c.id = a.course_id
+    where a.id = lms_submissions.assignment_id and c.owner_teacher_id = auth.uid()
+  )
+);
+drop policy if exists lms_submissions_student_insert on public.lms_submissions;
+create policy lms_submissions_student_insert on public.lms_submissions
+for insert with check (student_id = auth.uid());
+drop policy if exists lms_submissions_teacher_update on public.lms_submissions;
+create policy lms_submissions_teacher_update on public.lms_submissions
+for update using (
+  exists (
+    select 1
+    from public.lms_assignments a
+    join public.lms_courses c on c.id = a.course_id
+    where a.id = lms_submissions.assignment_id and c.owner_teacher_id = auth.uid()
+  )
+) with check (
+  exists (
+    select 1
+    from public.lms_assignments a
+    join public.lms_courses c on c.id = a.course_id
+    where a.id = lms_submissions.assignment_id and c.owner_teacher_id = auth.uid()
+  )
+);
+
+drop policy if exists lms_rubric_sets_access on public.lms_rubric_sets;
+create policy lms_rubric_sets_access on public.lms_rubric_sets
+for select using (
+  exists (
+    select 1 from public.lms_assignments a join public.lms_courses c on c.id = a.course_id
+    where a.id = lms_rubric_sets.assignment_id and (c.owner_teacher_id = auth.uid() or exists (
+      select 1 from public.lms_enrollments e where e.course_id = c.id and e.user_id = auth.uid() and e.status = 'active'
+    ))
+  )
+);
+drop policy if exists lms_rubric_sets_teacher_write on public.lms_rubric_sets;
+create policy lms_rubric_sets_teacher_write on public.lms_rubric_sets
+for all using (
+  exists (
+    select 1 from public.lms_assignments a join public.lms_courses c on c.id = a.course_id
+    where a.id = lms_rubric_sets.assignment_id and c.owner_teacher_id = auth.uid()
+  )
+) with check (
+  exists (
+    select 1 from public.lms_assignments a join public.lms_courses c on c.id = a.course_id
+    where a.id = lms_rubric_sets.assignment_id and c.owner_teacher_id = auth.uid()
+  )
+);
+
+drop policy if exists lms_rubric_scores_access on public.lms_rubric_scores;
+create policy lms_rubric_scores_access on public.lms_rubric_scores
+for select using (
+  exists (
+    select 1 from public.lms_submissions s
+    where s.id = lms_rubric_scores.submission_id and (
+      s.student_id = auth.uid() or exists (
+        select 1 from public.lms_assignments a join public.lms_courses c on c.id = a.course_id
+        where a.id = s.assignment_id and c.owner_teacher_id = auth.uid()
+      )
+    )
+  )
+);
+drop policy if exists lms_rubric_scores_teacher_write on public.lms_rubric_scores;
+create policy lms_rubric_scores_teacher_write on public.lms_rubric_scores
+for all using (scorer_id = auth.uid()) with check (scorer_id = auth.uid());
+
+drop policy if exists lms_module_items_access on public.lms_module_items;
+create policy lms_module_items_access on public.lms_module_items
+for select using (
+  exists (
+    select 1 from public.lms_modules m join public.lms_courses c on c.id = m.course_id
+    where m.id = lms_module_items.module_id and (
+      c.owner_teacher_id = auth.uid() or exists (
+        select 1 from public.lms_enrollments e where e.course_id = c.id and e.user_id = auth.uid() and e.status = 'active'
+      )
+    )
+  )
+);
+drop policy if exists lms_module_items_teacher_write on public.lms_module_items;
+create policy lms_module_items_teacher_write on public.lms_module_items
+for all using (
+  exists (
+    select 1 from public.lms_modules m join public.lms_courses c on c.id = m.course_id
+    where m.id = lms_module_items.module_id and c.owner_teacher_id = auth.uid()
+  )
+) with check (
+  exists (
+    select 1 from public.lms_modules m join public.lms_courses c on c.id = m.course_id
+    where m.id = lms_module_items.module_id and c.owner_teacher_id = auth.uid()
+  )
+);
+
+drop policy if exists lms_discussions_access on public.lms_discussions;
+create policy lms_discussions_access on public.lms_discussions
+for select using (
+  exists (
+    select 1 from public.lms_courses c
+    where c.id = lms_discussions.course_id and (
+      c.owner_teacher_id = auth.uid() or exists (
+        select 1 from public.lms_enrollments e where e.course_id = c.id and e.user_id = auth.uid() and e.status = 'active'
+      )
+    )
+  )
+);
+drop policy if exists lms_discussions_member_write on public.lms_discussions;
+create policy lms_discussions_member_write on public.lms_discussions
+for all using (
+  exists (
+    select 1 from public.lms_courses c
+    where c.id = lms_discussions.course_id and (
+      c.owner_teacher_id = auth.uid() or exists (
+        select 1 from public.lms_enrollments e where e.course_id = c.id and e.user_id = auth.uid() and e.status = 'active'
+      )
+    )
+  )
+) with check (
+  exists (
+    select 1 from public.lms_courses c
+    where c.id = lms_discussions.course_id and (
+      c.owner_teacher_id = auth.uid() or exists (
+        select 1 from public.lms_enrollments e where e.course_id = c.id and e.user_id = auth.uid() and e.status = 'active'
+      )
+    )
+  )
+);
+
+drop policy if exists lms_discussion_replies_access on public.lms_discussion_replies;
+create policy lms_discussion_replies_access on public.lms_discussion_replies
+for all using (
+  exists (
+    select 1 from public.lms_discussions d join public.lms_courses c on c.id = d.course_id
+    where d.id = lms_discussion_replies.discussion_id and (
+      c.owner_teacher_id = auth.uid() or exists (
+        select 1 from public.lms_enrollments e where e.course_id = c.id and e.user_id = auth.uid() and e.status = 'active'
+      )
+    )
+  )
+) with check (
+  exists (
+    select 1 from public.lms_discussions d join public.lms_courses c on c.id = d.course_id
+    where d.id = lms_discussion_replies.discussion_id and (
+      c.owner_teacher_id = auth.uid() or exists (
+        select 1 from public.lms_enrollments e where e.course_id = c.id and e.user_id = auth.uid() and e.status = 'active'
+      )
+    )
+  )
+);
+
+drop policy if exists lms_inbox_threads_participant on public.lms_inbox_threads;
+create policy lms_inbox_threads_participant on public.lms_inbox_threads
+for select using (
+  exists (select 1 from public.lms_inbox_participants p where p.thread_id = lms_inbox_threads.id and p.user_id = auth.uid())
+);
+drop policy if exists lms_inbox_threads_creator_write on public.lms_inbox_threads;
+create policy lms_inbox_threads_creator_write on public.lms_inbox_threads
+for all using (created_by = auth.uid()) with check (created_by = auth.uid());
+
+drop policy if exists lms_inbox_participants_access on public.lms_inbox_participants;
+create policy lms_inbox_participants_access on public.lms_inbox_participants
+for all using (
+  user_id = auth.uid() or exists (
+    select 1 from public.lms_inbox_threads t where t.id = lms_inbox_participants.thread_id and t.created_by = auth.uid()
+  )
+) with check (
+  user_id = auth.uid() or exists (
+    select 1 from public.lms_inbox_threads t where t.id = lms_inbox_participants.thread_id and t.created_by = auth.uid()
+  )
+);
+
+drop policy if exists lms_inbox_messages_participant on public.lms_inbox_messages;
+create policy lms_inbox_messages_participant on public.lms_inbox_messages
+for all using (
+  exists (select 1 from public.lms_inbox_participants p where p.thread_id = lms_inbox_messages.thread_id and p.user_id = auth.uid())
+) with check (
+  exists (select 1 from public.lms_inbox_participants p where p.thread_id = lms_inbox_messages.thread_id and p.user_id = auth.uid())
+  and sender_id = auth.uid()
+);
+
+drop policy if exists lms_calendar_owner on public.lms_calendar_events;
+create policy lms_calendar_owner on public.lms_calendar_events
+for all using (owner_id = auth.uid()) with check (owner_id = auth.uid());
+
+drop policy if exists lms_notifications_owner on public.lms_notifications;
+create policy lms_notifications_owner on public.lms_notifications
+for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+drop policy if exists lms_todo_owner on public.lms_todo_items;
+create policy lms_todo_owner on public.lms_todo_items
+for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+drop policy if exists lms_analytics_access on public.lms_analytics_events;
+create policy lms_analytics_access on public.lms_analytics_events
+for select using (
+  user_id = auth.uid() or exists (
+    select 1 from public.lms_courses c where c.id = lms_analytics_events.course_id and c.owner_teacher_id = auth.uid()
+  )
+);
+drop policy if exists lms_analytics_insert_self on public.lms_analytics_events;
+create policy lms_analytics_insert_self on public.lms_analytics_events
+for insert with check (user_id = auth.uid());
+
+drop policy if exists lms_attendance_access on public.lms_attendance;
+create policy lms_attendance_access on public.lms_attendance
+for select using (
+  student_id = auth.uid() or exists (
+    select 1 from public.lms_courses c where c.id = lms_attendance.course_id and c.owner_teacher_id = auth.uid()
+  )
+);
+drop policy if exists lms_attendance_teacher_write on public.lms_attendance;
+create policy lms_attendance_teacher_write on public.lms_attendance
+for all using (
+  exists (select 1 from public.lms_courses c where c.id = lms_attendance.course_id and c.owner_teacher_id = auth.uid())
+) with check (
+  exists (select 1 from public.lms_courses c where c.id = lms_attendance.course_id and c.owner_teacher_id = auth.uid())
+);
+
+drop policy if exists lms_role_bindings_access on public.lms_role_bindings;
+create policy lms_role_bindings_access on public.lms_role_bindings
+for select using (user_id = auth.uid());
+drop policy if exists lms_role_bindings_self_write on public.lms_role_bindings;
+create policy lms_role_bindings_self_write on public.lms_role_bindings
+for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+drop policy if exists lms_permission_overrides_read on public.lms_permission_overrides;
+create policy lms_permission_overrides_read on public.lms_permission_overrides
+for select using (true);
+drop policy if exists lms_permission_overrides_write on public.lms_permission_overrides;
+create policy lms_permission_overrides_write on public.lms_permission_overrides
+for all using (
+  exists (
+    select 1 from public.lms_role_bindings rb
+    where rb.user_id = auth.uid() and rb.scope_type = 'global' and rb.role = 'admin'
+  )
+) with check (
+  exists (
+    select 1 from public.lms_role_bindings rb
+    where rb.user_id = auth.uid() and rb.scope_type = 'global' and rb.role = 'admin'
+  )
+);
+
+drop policy if exists lms_audit_events_read on public.lms_audit_events;
+create policy lms_audit_events_read on public.lms_audit_events
+for select using (actor_id = auth.uid());
+drop policy if exists lms_audit_events_insert on public.lms_audit_events;
+create policy lms_audit_events_insert on public.lms_audit_events
+for insert with check (actor_id = auth.uid());
 
 insert into storage.buckets (id, name, public)
 values ('sources-private', 'sources-private', false)

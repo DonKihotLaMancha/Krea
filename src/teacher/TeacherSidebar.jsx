@@ -1,15 +1,24 @@
 import {
   BarChart3,
   Bell,
+  CalendarDays,
+  FolderTree,
   ClipboardList,
   FileQuestion,
   LayoutDashboard,
+  Library,
+  MessageCircleMore,
   PenLine,
   ScrollText,
 } from 'lucide-react';
 
 const items = [
   { id: 'dashboard', label: 'Dashboard', Icon: LayoutDashboard },
+  { id: 'lms-courses', label: 'LMS Courses', Icon: Library },
+  { id: 'lms-modules', label: 'Modules', Icon: FolderTree },
+  { id: 'lms-discussions', label: 'Discussions', Icon: MessageCircleMore },
+  { id: 'lms-calendar', label: 'Calendar', Icon: CalendarDays },
+  { id: 'lms-analytics', label: 'LMS Analytics', Icon: BarChart3 },
   { id: 'materials', label: 'Materials', Icon: ScrollText },
   { id: 'quizzes', label: 'Quiz builder', Icon: FileQuestion },
   { id: 'assignments', label: 'Assignments', Icon: ClipboardList },

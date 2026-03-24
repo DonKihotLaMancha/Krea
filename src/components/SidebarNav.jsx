@@ -1,8 +1,9 @@
 import { Link } from 'react-router-dom';
-import { BookOpen, ClipboardList, FileQuestion, GitBranch, GraduationCap, MessageSquare, Presentation, Upload, UserRoundCog } from 'lucide-react';
+import { BookOpen, ClipboardList, FileQuestion, GitBranch, GraduationCap, Library, MessageSquare, Presentation, Upload, UserRoundCog } from 'lucide-react';
 
 const icons = {
   Ingest: Upload,
+  LMS: Library,
   Flashcards: BookOpen,
   Notebook: BookOpen,
   'Concept Map': GitBranch,

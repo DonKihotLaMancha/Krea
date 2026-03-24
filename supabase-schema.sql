@@ -85,7 +85,10 @@ returns trigger
 language plpgsql
 as $$
 begin
-  new.updated_at = now();
+  -- Some legacy tables may not include updated_at yet.
+  if to_jsonb(new) ? 'updated_at' then
+    new := jsonb_populate_record(new, jsonb_build_object('updated_at', now()));
+  end if;
   return new;
 end;
 $$;
@@ -105,6 +108,9 @@ create table if not exists public.students (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table if exists public.students add column if not exists created_at timestamptz not null default now();
+alter table if exists public.students add column if not exists updated_at timestamptz not null default now();
 
 create table if not exists public.sources (
   id uuid primary key default gen_random_uuid(),
@@ -525,6 +531,293 @@ create table if not exists public.teacher_generated_quizzes (
   created_at timestamptz not null default now()
 );
 
+-- Canvas-like LMS domain (teacher + student unified model).
+create table if not exists public.lms_courses (
+  id uuid primary key default gen_random_uuid(),
+  owner_teacher_id uuid not null references public.profiles(id) on delete cascade,
+  title text not null,
+  code text not null unique,
+  description text,
+  term_id uuid references public.academic_terms(id) on delete set null,
+  published boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.lms_course_sections (
+  id uuid primary key default gen_random_uuid(),
+  course_id uuid not null references public.lms_courses(id) on delete cascade,
+  name text not null,
+  start_at timestamptz,
+  end_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.lms_enrollments (
+  id uuid primary key default gen_random_uuid(),
+  course_id uuid not null references public.lms_courses(id) on delete cascade,
+  section_id uuid references public.lms_course_sections(id) on delete set null,
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  role text not null check (role in ('teacher', 'ta', 'student', 'observer')),
+  status text not null default 'active' check (status in ('active', 'invited', 'inactive', 'completed')),
+  created_at timestamptz not null default now(),
+  unique (course_id, user_id)
+);
+
+create table if not exists public.lms_modules (
+  id uuid primary key default gen_random_uuid(),
+  course_id uuid not null references public.lms_courses(id) on delete cascade,
+  title text not null,
+  description text,
+  position int not null default 0,
+  published boolean not null default false,
+  created_by uuid not null references public.profiles(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.lms_pages (
+  id uuid primary key default gen_random_uuid(),
+  course_id uuid not null references public.lms_courses(id) on delete cascade,
+  title text not null,
+  body text not null default '',
+  author_id uuid not null references public.profiles(id) on delete cascade,
+  published boolean not null default false,
+  version int not null default 1,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.lms_files (
+  id uuid primary key default gen_random_uuid(),
+  course_id uuid not null references public.lms_courses(id) on delete cascade,
+  uploader_id uuid not null references public.profiles(id) on delete cascade,
+  name text not null,
+  storage_path text,
+  mime_type text,
+  size_bytes bigint,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.lms_assignments (
+  id uuid primary key default gen_random_uuid(),
+  course_id uuid not null references public.lms_courses(id) on delete cascade,
+  title text not null,
+  description text,
+  due_at timestamptz,
+  points numeric(7,2) not null default 100,
+  status text not null default 'published' check (status in ('draft', 'published', 'closed')),
+  created_by uuid not null references public.profiles(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.lms_quizzes (
+  id uuid primary key default gen_random_uuid(),
+  course_id uuid not null references public.lms_courses(id) on delete cascade,
+  title text not null,
+  difficulty public.quiz_difficulty not null default 'medium',
+  question_count int not null default 10 check (question_count > 0),
+  payload jsonb not null default '{}'::jsonb,
+  status text not null default 'published' check (status in ('draft', 'published', 'closed')),
+  created_by uuid not null references public.profiles(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.lms_quiz_attempts (
+  id uuid primary key default gen_random_uuid(),
+  quiz_id uuid not null references public.lms_quizzes(id) on delete cascade,
+  student_id uuid not null references public.profiles(id) on delete cascade,
+  score numeric(7,2),
+  answers jsonb not null default '[]'::jsonb,
+  started_at timestamptz not null default now(),
+  completed_at timestamptz
+);
+
+create table if not exists public.lms_submissions (
+  id uuid primary key default gen_random_uuid(),
+  assignment_id uuid not null references public.lms_assignments(id) on delete cascade,
+  student_id uuid not null references public.profiles(id) on delete cascade,
+  attempt_no int not null default 1,
+  submission_text text,
+  file_url text,
+  submitted_at timestamptz,
+  status text not null default 'submitted' check (status in ('draft', 'submitted', 'graded', 'returned')),
+  grade numeric(7,2),
+  feedback text,
+  graded_by uuid references public.profiles(id) on delete set null,
+  graded_at timestamptz,
+  created_at timestamptz not null default now(),
+  unique (assignment_id, student_id, attempt_no)
+);
+
+create table if not exists public.lms_rubric_sets (
+  id uuid primary key default gen_random_uuid(),
+  assignment_id uuid not null references public.lms_assignments(id) on delete cascade,
+  title text not null,
+  criteria jsonb not null default '[]'::jsonb,
+  created_by uuid not null references public.profiles(id) on delete cascade,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.lms_rubric_scores (
+  id uuid primary key default gen_random_uuid(),
+  rubric_set_id uuid not null references public.lms_rubric_sets(id) on delete cascade,
+  submission_id uuid not null references public.lms_submissions(id) on delete cascade,
+  scorer_id uuid not null references public.profiles(id) on delete cascade,
+  score numeric(7,2) not null default 0,
+  notes text,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.lms_module_items (
+  id uuid primary key default gen_random_uuid(),
+  module_id uuid not null references public.lms_modules(id) on delete cascade,
+  item_type text not null check (item_type in ('page', 'file', 'assignment', 'quiz', 'discussion', 'url')),
+  ref_id uuid,
+  title text not null,
+  position int not null default 0,
+  published boolean not null default false,
+  url text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.lms_discussions (
+  id uuid primary key default gen_random_uuid(),
+  course_id uuid not null references public.lms_courses(id) on delete cascade,
+  title text not null,
+  body text not null default '',
+  created_by uuid not null references public.profiles(id) on delete cascade,
+  locked boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.lms_discussion_replies (
+  id uuid primary key default gen_random_uuid(),
+  discussion_id uuid not null references public.lms_discussions(id) on delete cascade,
+  parent_reply_id uuid references public.lms_discussion_replies(id) on delete cascade,
+  author_id uuid not null references public.profiles(id) on delete cascade,
+  body text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.lms_inbox_threads (
+  id uuid primary key default gen_random_uuid(),
+  course_id uuid references public.lms_courses(id) on delete set null,
+  subject text not null,
+  created_by uuid not null references public.profiles(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.lms_inbox_participants (
+  thread_id uuid not null references public.lms_inbox_threads(id) on delete cascade,
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  last_read_at timestamptz,
+  primary key (thread_id, user_id)
+);
+
+create table if not exists public.lms_inbox_messages (
+  id uuid primary key default gen_random_uuid(),
+  thread_id uuid not null references public.lms_inbox_threads(id) on delete cascade,
+  sender_id uuid not null references public.profiles(id) on delete cascade,
+  body text not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.lms_calendar_events (
+  id uuid primary key default gen_random_uuid(),
+  owner_id uuid not null references public.profiles(id) on delete cascade,
+  course_id uuid references public.lms_courses(id) on delete set null,
+  title text not null,
+  description text,
+  event_type text not null default 'event' check (event_type in ('event', 'deadline', 'meeting', 'reminder')),
+  start_at timestamptz not null,
+  end_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.lms_notifications (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  kind text not null,
+  title text not null,
+  body text not null default '',
+  meta jsonb not null default '{}'::jsonb,
+  read_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.lms_todo_items (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  course_id uuid references public.lms_courses(id) on delete set null,
+  title text not null,
+  due_at timestamptz,
+  status text not null default 'pending' check (status in ('pending', 'in_progress', 'done')),
+  meta jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.lms_analytics_events (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references public.profiles(id) on delete set null,
+  course_id uuid references public.lms_courses(id) on delete set null,
+  event_name text not null,
+  payload jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.lms_attendance (
+  id uuid primary key default gen_random_uuid(),
+  course_id uuid not null references public.lms_courses(id) on delete cascade,
+  section_id uuid references public.lms_course_sections(id) on delete set null,
+  student_id uuid not null references public.profiles(id) on delete cascade,
+  attendance_date date not null,
+  status text not null check (status in ('present', 'absent', 'late', 'excused')),
+  marked_by uuid references public.profiles(id) on delete set null,
+  created_at timestamptz not null default now(),
+  unique (course_id, student_id, attendance_date)
+);
+
+create table if not exists public.lms_role_bindings (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  scope_type text not null check (scope_type in ('global', 'course', 'section')),
+  scope_id uuid,
+  role text not null check (role in ('admin', 'teacher', 'ta', 'student', 'observer')),
+  created_at timestamptz not null default now(),
+  unique (user_id, scope_type, scope_id, role)
+);
+
+create table if not exists public.lms_permission_overrides (
+  id uuid primary key default gen_random_uuid(),
+  scope_type text not null check (scope_type in ('global', 'course', 'section')),
+  scope_id uuid,
+  role text not null,
+  permission_key text not null,
+  allowed boolean not null default true,
+  created_at timestamptz not null default now(),
+  unique (scope_type, scope_id, role, permission_key)
+);
+
+create table if not exists public.lms_audit_events (
+  id uuid primary key default gen_random_uuid(),
+  actor_id uuid references public.profiles(id) on delete set null,
+  action text not null,
+  entity_type text not null,
+  entity_id uuid,
+  payload jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
 -- Legacy-compatible PDF archive table to preserve uploads across refreshes.
 create table if not exists public.student_pdfs (
   id uuid primary key default gen_random_uuid(),
@@ -555,3 +848,27 @@ drop trigger if exists trg_tasks_updated_at on public.tasks;
 create trigger trg_tasks_updated_at before update on public.tasks for each row execute function public.set_updated_at();
 drop trigger if exists trg_teacher_classes_updated_at on public.teacher_classes;
 create trigger trg_teacher_classes_updated_at before update on public.teacher_classes for each row execute function public.set_updated_at();
+drop trigger if exists trg_lms_courses_updated_at on public.lms_courses;
+create trigger trg_lms_courses_updated_at before update on public.lms_courses for each row execute function public.set_updated_at();
+drop trigger if exists trg_lms_course_sections_updated_at on public.lms_course_sections;
+create trigger trg_lms_course_sections_updated_at before update on public.lms_course_sections for each row execute function public.set_updated_at();
+drop trigger if exists trg_lms_modules_updated_at on public.lms_modules;
+create trigger trg_lms_modules_updated_at before update on public.lms_modules for each row execute function public.set_updated_at();
+drop trigger if exists trg_lms_pages_updated_at on public.lms_pages;
+create trigger trg_lms_pages_updated_at before update on public.lms_pages for each row execute function public.set_updated_at();
+drop trigger if exists trg_lms_assignments_updated_at on public.lms_assignments;
+create trigger trg_lms_assignments_updated_at before update on public.lms_assignments for each row execute function public.set_updated_at();
+drop trigger if exists trg_lms_quizzes_updated_at on public.lms_quizzes;
+create trigger trg_lms_quizzes_updated_at before update on public.lms_quizzes for each row execute function public.set_updated_at();
+drop trigger if exists trg_lms_module_items_updated_at on public.lms_module_items;
+create trigger trg_lms_module_items_updated_at before update on public.lms_module_items for each row execute function public.set_updated_at();
+drop trigger if exists trg_lms_discussions_updated_at on public.lms_discussions;
+create trigger trg_lms_discussions_updated_at before update on public.lms_discussions for each row execute function public.set_updated_at();
+drop trigger if exists trg_lms_discussion_replies_updated_at on public.lms_discussion_replies;
+create trigger trg_lms_discussion_replies_updated_at before update on public.lms_discussion_replies for each row execute function public.set_updated_at();
+drop trigger if exists trg_lms_inbox_threads_updated_at on public.lms_inbox_threads;
+create trigger trg_lms_inbox_threads_updated_at before update on public.lms_inbox_threads for each row execute function public.set_updated_at();
+drop trigger if exists trg_lms_calendar_events_updated_at on public.lms_calendar_events;
+create trigger trg_lms_calendar_events_updated_at before update on public.lms_calendar_events for each row execute function public.set_updated_at();
+drop trigger if exists trg_lms_todo_items_updated_at on public.lms_todo_items;
+create trigger trg_lms_todo_items_updated_at before update on public.lms_todo_items for each row execute function public.set_updated_at();

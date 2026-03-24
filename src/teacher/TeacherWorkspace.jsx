@@ -12,9 +12,9 @@ function errorMessageFromBody(data, resp, rawText) {
           ? detail.message || detail.msg || null
           : null;
     const msg =
-      data.error ||
-      data.message ||
       detailStr ||
+      data.message ||
+      data.error ||
       (typeof data.detail === 'string' ? data.detail : null);
     if (msg) return String(msg).trim();
   }
@@ -55,6 +55,11 @@ async function apiFetch(path, options = {}) {
 
 const paneLabels = {
   dashboard: 'Dashboard',
+  'lms-courses': 'LMS Courses',
+  'lms-modules': 'Modules',
+  'lms-discussions': 'Discussions',
+  'lms-calendar': 'Calendar',
+  'lms-analytics': 'LMS Analytics',
   materials: 'Materials',
   quizzes: 'Quiz builder',
   assignments: 'Assignments',
@@ -95,6 +100,25 @@ export default function TeacherWorkspace() {
   const [quizCount, setQuizCount] = useState(10);
   const [quizPrompt, setQuizPrompt] = useState('');
   const [latestQuiz, setLatestQuiz] = useState(null);
+  const [teacherQuizzes, setTeacherQuizzes] = useState([]);
+  const [lmsCourses, setLmsCourses] = useState([]);
+  const [selectedCourseId, setSelectedCourseId] = useState('');
+  const [lmsModules, setLmsModules] = useState([]);
+  const [lmsAssignments, setLmsAssignments] = useState([]);
+  const [lmsQuizzes, setLmsQuizzes] = useState([]);
+  const [lmsDiscussions, setLmsDiscussions] = useState([]);
+  const [lmsEvents, setLmsEvents] = useState([]);
+  const [lmsAnalytics, setLmsAnalytics] = useState({});
+  const [courseTitle, setCourseTitle] = useState('');
+  const [moduleTitle, setModuleTitle] = useState('');
+  const [lmsAssignmentTitle, setLmsAssignmentTitle] = useState('');
+  const [lmsAssignmentDueAt, setLmsAssignmentDueAt] = useState('');
+  const [lmsQuizTitle, setLmsQuizTitle] = useState('');
+  const [lmsQuizDifficulty, setLmsQuizDifficulty] = useState('medium');
+  const [discussionTitle, setDiscussionTitle] = useState('');
+  const [discussionBody, setDiscussionBody] = useState('');
+  const [calendarTitle, setCalendarTitle] = useState('');
+  const [calendarStartAt, setCalendarStartAt] = useState('');
 
   const selectedClass = useMemo(
     () => classes.find((c) => c.id === selectedClassId) || null,
@@ -112,6 +136,14 @@ export default function TeacherWorkspace() {
       ]);
       setClasses(cls || []);
       setDashboard(stats || null);
+      try {
+        const lms = await apiFetch(`/api/courses?userId=${encodeURIComponent(teacherId)}`);
+        const teacherCourses = (lms.courses || []).filter((c) => c.membershipRole === 'teacher');
+        setLmsCourses(teacherCourses);
+        if (!selectedCourseId && teacherCourses[0]?.id) setSelectedCourseId(teacherCourses[0].id);
+      } catch {
+        // Non-blocking if LMS endpoints are unavailable.
+      }
       if (!selectedClassId && cls?.[0]?.id) setSelectedClassId(cls[0].id);
     } catch (err) {
       setError(err.message);
@@ -130,16 +162,18 @@ export default function TeacherWorkspace() {
     if (!teacherId || !selectedClassId) return;
     const loadClassData = async () => {
       try {
-        const [mat, ass, ann, prog] = await Promise.all([
+        const [mat, ass, ann, prog, quizList] = await Promise.all([
           apiFetch(`/api/teacher/materials?teacherId=${encodeURIComponent(teacherId)}&classId=${encodeURIComponent(selectedClassId)}`),
           apiFetch(`/api/teacher/assignments?teacherId=${encodeURIComponent(teacherId)}&classId=${encodeURIComponent(selectedClassId)}`),
           apiFetch(`/api/teacher/announcements?teacherId=${encodeURIComponent(teacherId)}&classId=${encodeURIComponent(selectedClassId)}`),
           apiFetch(`/api/teacher/progress?teacherId=${encodeURIComponent(teacherId)}&classId=${encodeURIComponent(selectedClassId)}`),
+          apiFetch(`/api/teacher/quizzes?teacherId=${encodeURIComponent(teacherId)}&classId=${encodeURIComponent(selectedClassId)}`),
         ]);
         setMaterials(mat.materials || []);
         setAssignments(ass.assignments || []);
         setAnnouncements(ann.announcements || []);
         setProgress(prog.progress || null);
+        setTeacherQuizzes(quizList.quizzes || []);
       } catch (err) {
         setError(err.message);
       }
@@ -147,11 +181,37 @@ export default function TeacherWorkspace() {
     loadClassData();
   }, [teacherId, selectedClassId]);
 
+  useEffect(() => {
+    if (!teacherId || !selectedCourseId) return;
+    const loadLms = async () => {
+      try {
+        const [mods, discussions, calendar, analytics, assignmentsResp, quizzesResp] = await Promise.all([
+          apiFetch(`/api/modules?userId=${encodeURIComponent(teacherId)}&courseId=${encodeURIComponent(selectedCourseId)}`),
+          apiFetch(`/api/discussions?userId=${encodeURIComponent(teacherId)}&courseId=${encodeURIComponent(selectedCourseId)}`),
+          apiFetch(`/api/calendar?userId=${encodeURIComponent(teacherId)}&courseId=${encodeURIComponent(selectedCourseId)}`),
+          apiFetch(`/api/analytics?userId=${encodeURIComponent(teacherId)}&courseId=${encodeURIComponent(selectedCourseId)}&limit=300`),
+          apiFetch(`/api/assignments?userId=${encodeURIComponent(teacherId)}&courseId=${encodeURIComponent(selectedCourseId)}`),
+          apiFetch(`/api/quizzes?userId=${encodeURIComponent(teacherId)}&courseId=${encodeURIComponent(selectedCourseId)}`),
+        ]);
+        setLmsModules(mods.modules || []);
+        setLmsDiscussions(discussions.discussions || []);
+        setLmsEvents(calendar.events || []);
+        setLmsAnalytics(analytics.aggregates || {});
+        setLmsAssignments(assignmentsResp.assignments || []);
+        setLmsQuizzes(quizzesResp.quizzes || []);
+      } catch (err) {
+        setError(err.message);
+      }
+    };
+    loadLms();
+  }, [teacherId, selectedCourseId]);
+
   if (!teacherId) {
     return null;
   }
 
   const needsClass = ['materials', 'quizzes', 'assignments', 'progress', 'announcements', 'grading'].includes(activePane);
+  const needsCourse = ['lms-modules', 'lms-discussions', 'lms-calendar', 'lms-analytics'].includes(activePane);
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -193,6 +253,11 @@ export default function TeacherWorkspace() {
       {needsClass && !selectedClassId ? (
         <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
           Select a class to use this section, or create one from the dashboard.
+        </div>
+      ) : null}
+      {needsCourse && !selectedCourseId ? (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          Select an LMS course to use this section, or create one in LMS Courses.
         </div>
       ) : null}
 
@@ -237,6 +302,12 @@ export default function TeacherWorkspace() {
                       body: JSON.stringify({ teacherId, name: className, description: classDescription }),
                     });
                     setClasses((prev) => [data.class, ...prev]);
+                    setDashboard((prev) => ({
+                      classes: (prev?.classes || 0) + 1,
+                      assignments: prev?.assignments || 0,
+                      announcements: prev?.announcements || 0,
+                      submissions: prev?.submissions || 0,
+                    }));
                     setSelectedClassId(data.class.id);
                     setClassName('');
                     setClassDescription('');
@@ -253,6 +324,296 @@ export default function TeacherWorkspace() {
               </button>
             </div>
           </div>
+        </div>
+      ) : null}
+
+      {activePane === 'lms-courses' ? (
+        <div className="space-y-4">
+          <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+            <p className="text-sm font-semibold text-slate-900">Create LMS course</p>
+            <input className="input mt-3" placeholder="Course title" value={courseTitle} onChange={(e) => setCourseTitle(e.target.value)} />
+            <button
+              type="button"
+              className="btn-primary mt-3"
+              onClick={async () => {
+                if (!courseTitle.trim()) return;
+                try {
+                  const data = await apiFetch('/api/courses', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ownerId: teacherId, title: courseTitle, published: true }),
+                  });
+                  setLmsCourses((prev) => [data.course, ...prev]);
+                  setSelectedCourseId(data.course.id);
+                  setCourseTitle('');
+                  setNotice?.('LMS course created.');
+                } catch (err) {
+                  setError(err.message);
+                }
+              }}
+            >
+              Create course
+            </button>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+            <p className="mb-2 text-sm font-semibold text-slate-900">Your LMS courses</p>
+            <select className="input mb-3" value={selectedCourseId} onChange={(e) => setSelectedCourseId(e.target.value)}>
+              <option value="">Select course</option>
+              {lmsCourses.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.title} ({c.code})
+                </option>
+              ))}
+            </select>
+            <ul className="space-y-2">
+              {lmsCourses.length ? lmsCourses.map((c) => (
+                <li key={c.id} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+                  <strong>{c.title}</strong> <span className="text-xs text-slate-500">({c.code})</span>
+                </li>
+              )) : <li className="text-sm text-slate-500">No courses yet.</li>}
+            </ul>
+          </div>
+        </div>
+      ) : null}
+
+      {activePane === 'lms-modules' ? (
+        <div className="space-y-4">
+          <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+            <p className="text-sm font-semibold text-slate-900">Add module</p>
+            <input className="input mt-3" placeholder="Module title" value={moduleTitle} onChange={(e) => setModuleTitle(e.target.value)} />
+            <button
+              type="button"
+              className="btn-primary mt-3"
+              disabled={!selectedCourseId}
+              onClick={async () => {
+                if (!selectedCourseId || !moduleTitle.trim()) return;
+                try {
+                  const data = await apiFetch('/api/modules', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ userId: teacherId, courseId: selectedCourseId, title: moduleTitle, published: true }),
+                  });
+                  setLmsModules((prev) => [...prev, { ...data.module, items: [] }].sort((a, b) => (a.position || 0) - (b.position || 0)));
+                  setModuleTitle('');
+                  setNotice?.('Module created.');
+                } catch (err) {
+                  setError(err.message);
+                }
+              }}
+            >
+              Save module
+            </button>
+          </div>
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+              <p className="text-sm font-semibold text-slate-900">Create LMS assignment</p>
+              <input className="input mt-3" placeholder="Assignment title" value={lmsAssignmentTitle} onChange={(e) => setLmsAssignmentTitle(e.target.value)} />
+              <input className="input mt-2" type="datetime-local" value={lmsAssignmentDueAt} onChange={(e) => setLmsAssignmentDueAt(e.target.value)} />
+              <button
+                type="button"
+                className="btn-primary mt-3"
+                disabled={!selectedCourseId}
+                onClick={async () => {
+                  if (!selectedCourseId || !lmsAssignmentTitle.trim()) return;
+                  try {
+                    const data = await apiFetch('/api/assignments', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        userId: teacherId,
+                        courseId: selectedCourseId,
+                        title: lmsAssignmentTitle,
+                        dueAt: lmsAssignmentDueAt ? new Date(lmsAssignmentDueAt).toISOString() : null,
+                      }),
+                    });
+                    setLmsAssignments((prev) => [data.assignment, ...prev]);
+                    setLmsAssignmentTitle('');
+                    setLmsAssignmentDueAt('');
+                    setNotice?.('LMS assignment created.');
+                  } catch (err) {
+                    setError(err.message);
+                  }
+                }}
+              >
+                Save assignment
+              </button>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+              <p className="text-sm font-semibold text-slate-900">Create LMS quiz</p>
+              <input className="input mt-3" placeholder="Quiz title" value={lmsQuizTitle} onChange={(e) => setLmsQuizTitle(e.target.value)} />
+              <select className="input mt-2" value={lmsQuizDifficulty} onChange={(e) => setLmsQuizDifficulty(e.target.value)}>
+                <option value="easy">Easy</option>
+                <option value="medium">Medium</option>
+                <option value="hard">Hard</option>
+              </select>
+              <button
+                type="button"
+                className="btn-primary mt-3"
+                disabled={!selectedCourseId}
+                onClick={async () => {
+                  if (!selectedCourseId || !lmsQuizTitle.trim()) return;
+                  try {
+                    const data = await apiFetch('/api/quizzes', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        userId: teacherId,
+                        courseId: selectedCourseId,
+                        title: lmsQuizTitle,
+                        difficulty: lmsQuizDifficulty,
+                        questionCount: 10,
+                        payload: {},
+                      }),
+                    });
+                    setLmsQuizzes((prev) => [data.quiz, ...prev]);
+                    setLmsQuizTitle('');
+                    setNotice?.('LMS quiz created.');
+                  } catch (err) {
+                    setError(err.message);
+                  }
+                }}
+              >
+                Save quiz
+              </button>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <p className="mb-2 text-sm font-semibold text-slate-900">Assignments</p>
+              <ul className="space-y-2 text-sm">
+                {lmsAssignments.length ? lmsAssignments.slice(0, 8).map((a) => (
+                  <li key={a.id} className="rounded border border-slate-200 bg-slate-50 px-2 py-1.5">
+                    {a.title}
+                  </li>
+                )) : <li className="text-slate-500">No LMS assignments yet.</li>}
+              </ul>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <p className="mb-2 text-sm font-semibold text-slate-900">Quizzes</p>
+              <ul className="space-y-2 text-sm">
+                {lmsQuizzes.length ? lmsQuizzes.slice(0, 8).map((q) => (
+                  <li key={q.id} className="rounded border border-slate-200 bg-slate-50 px-2 py-1.5">
+                    {q.title} <span className="text-xs text-slate-500">({q.difficulty})</span>
+                  </li>
+                )) : <li className="text-slate-500">No LMS quizzes yet.</li>}
+              </ul>
+            </div>
+          </div>
+          <ul className="space-y-2">
+            {lmsModules.length ? lmsModules.map((m) => (
+              <li key={m.id} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
+                <strong>{m.title}</strong>
+                <p className="text-xs text-slate-500">{(m.items || []).length} items</p>
+              </li>
+            )) : <li className="text-sm text-slate-500">No modules yet.</li>}
+          </ul>
+        </div>
+      ) : null}
+
+      {activePane === 'lms-discussions' ? (
+        <div className="space-y-4">
+          <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+            <p className="text-sm font-semibold text-slate-900">Start discussion</p>
+            <input className="input mt-3" placeholder="Discussion title" value={discussionTitle} onChange={(e) => setDiscussionTitle(e.target.value)} />
+            <textarea className="input mt-2 min-h-20" placeholder="Discussion prompt" value={discussionBody} onChange={(e) => setDiscussionBody(e.target.value)} />
+            <button
+              type="button"
+              className="btn-primary mt-3"
+              disabled={!selectedCourseId}
+              onClick={async () => {
+                if (!selectedCourseId || !discussionTitle.trim()) return;
+                try {
+                  const data = await apiFetch('/api/discussions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      userId: teacherId,
+                      courseId: selectedCourseId,
+                      title: discussionTitle,
+                      body: discussionBody,
+                    }),
+                  });
+                  setLmsDiscussions((prev) => [{ ...data.discussion, replies: [] }, ...prev]);
+                  setDiscussionTitle('');
+                  setDiscussionBody('');
+                  setNotice?.('Discussion posted.');
+                } catch (err) {
+                  setError(err.message);
+                }
+              }}
+            >
+              Post discussion
+            </button>
+          </div>
+          <ul className="space-y-2">
+            {lmsDiscussions.length ? lmsDiscussions.map((d) => (
+              <li key={d.id} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
+                <strong>{d.title}</strong>
+                <p className="text-xs text-slate-500">{(d.replies || []).length} replies</p>
+              </li>
+            )) : <li className="text-sm text-slate-500">No discussions yet.</li>}
+          </ul>
+        </div>
+      ) : null}
+
+      {activePane === 'lms-calendar' ? (
+        <div className="space-y-4">
+          <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+            <p className="text-sm font-semibold text-slate-900">Add calendar event</p>
+            <input className="input mt-3" placeholder="Event title" value={calendarTitle} onChange={(e) => setCalendarTitle(e.target.value)} />
+            <input className="input mt-2" type="datetime-local" value={calendarStartAt} onChange={(e) => setCalendarStartAt(e.target.value)} />
+            <button
+              type="button"
+              className="btn-primary mt-3"
+              disabled={!selectedCourseId}
+              onClick={async () => {
+                if (!selectedCourseId || !calendarTitle.trim() || !calendarStartAt) return;
+                try {
+                  const data = await apiFetch('/api/calendar', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      userId: teacherId,
+                      courseId: selectedCourseId,
+                      title: calendarTitle,
+                      startAt: new Date(calendarStartAt).toISOString(),
+                      eventType: 'event',
+                    }),
+                  });
+                  setLmsEvents((prev) => [...prev, data.event].sort((a, b) => new Date(a.start_at).getTime() - new Date(b.start_at).getTime()));
+                  setCalendarTitle('');
+                  setCalendarStartAt('');
+                  setNotice?.('Calendar event added.');
+                } catch (err) {
+                  setError(err.message);
+                }
+              }}
+            >
+              Save event
+            </button>
+          </div>
+          <ul className="space-y-2">
+            {lmsEvents.length ? lmsEvents.map((e) => (
+              <li key={e.id} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
+                <strong>{e.title}</strong>
+                <p className="text-xs text-slate-500">{new Date(e.start_at).toLocaleString()}</p>
+              </li>
+            )) : <li className="text-sm text-slate-500">No events yet.</li>}
+          </ul>
+        </div>
+      ) : null}
+
+      {activePane === 'lms-analytics' ? (
+        <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+          <p className="text-sm font-semibold text-slate-900">LMS event analytics</p>
+          <ul className="mt-3 space-y-2 text-sm">
+            {Object.keys(lmsAnalytics).length ? Object.entries(lmsAnalytics).map(([name, count]) => (
+              <li key={name} className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                <span>{name}</span>
+                <strong>{count}</strong>
+              </li>
+            )) : <li className="text-slate-500">No analytics events yet.</li>}
+          </ul>
         </div>
       ) : null}
 
@@ -339,6 +700,7 @@ export default function TeacherWorkspace() {
                   }),
                 });
                 setLatestQuiz(data.quiz);
+                setTeacherQuizzes((prev) => [data.quiz, ...prev]);
                 setNotice?.('Teacher quiz generated.');
               } catch (err) {
                 setError(err.message);
@@ -349,12 +711,19 @@ export default function TeacherWorkspace() {
             Generate quiz
           </button>
           {latestQuiz ? (
-            <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
+            <div className="mt-4 rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-900">
               <p>
                 <strong>{latestQuiz.title}</strong> ({latestQuiz.difficulty}, {latestQuiz.question_count} questions)
               </p>
             </div>
           ) : null}
+          <ul className="mt-3 space-y-2">
+            {teacherQuizzes.length ? teacherQuizzes.map((q) => (
+              <li key={q.id} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                <strong>{q.title}</strong> · {q.difficulty} · {q.question_count} questions
+              </li>
+            )) : <li className="text-xs text-slate-500">No saved quizzes yet.</li>}
+          </ul>
         </div>
       ) : null}
 
@@ -383,6 +752,12 @@ export default function TeacherWorkspace() {
                     }),
                   });
                   setAssignments((prev) => [data.assignment, ...prev]);
+                  setDashboard((prev) => ({
+                    classes: prev?.classes || 0,
+                    assignments: (prev?.assignments || 0) + 1,
+                    announcements: prev?.announcements || 0,
+                    submissions: prev?.submissions || 0,
+                  }));
                   setAssignmentTitle('');
                   setAssignmentDescription('');
                   setAssignmentDueAt('');
@@ -455,6 +830,12 @@ export default function TeacherWorkspace() {
                     }),
                   });
                   setAnnouncements((prev) => [data.announcement, ...prev]);
+                  setDashboard((prev) => ({
+                    classes: prev?.classes || 0,
+                    assignments: prev?.assignments || 0,
+                    announcements: (prev?.announcements || 0) + 1,
+                    submissions: prev?.submissions || 0,
+                  }));
                   setAnnouncementTitle('');
                   setAnnouncementMessage('');
                   setNotice?.('Announcement published.');

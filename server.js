@@ -43,6 +43,19 @@ const supabase = (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
 
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
+app.use((req, res, next) => {
+  const reqId = crypto.randomUUID();
+  const started = Date.now();
+  req.requestId = reqId;
+  res.setHeader('x-request-id', reqId);
+  res.on('finish', () => {
+    const elapsed = Date.now() - started;
+    if (req.path.startsWith('/api/')) {
+      console.log(`[api] ${reqId} ${req.method} ${req.path} -> ${res.statusCode} (${elapsed}ms)`);
+    }
+  });
+  next();
+});
 
 /** Values safe for the browser (anon key + project URL). Used by /api/client-env and /api/env.js. */
 function browserSupabasePublicEnv() {
@@ -104,8 +117,9 @@ async function ensureProfile(studentId, name = 'Student') {
   // Keep legacy student profile row in sync for compatibility.
   const { error: legacyStudentErr } = await supabase
     .from('students')
-    .upsert({ id: studentId, name }, { onConflict: 'id' });
-  if (legacyStudentErr) throw legacyStudentErr;
+    .insert({ id: studentId, name });
+  // Legacy table may not exist yet in some deployments; keep core flow working.
+  if (legacyStudentErr && !['42P01', '23505'].includes(String(legacyStudentErr.code || ''))) throw legacyStudentErr;
 }
 
 async function createDefaultNotebookSession(studentId) {
@@ -126,6 +140,64 @@ async function createDefaultNotebookSession(studentId) {
   return data.id;
 }
 
+async function getOrCreateOwnerChatRoom(ownerId, roomName = 'global') {
+  const normalizedName = String(roomName || 'global').trim().toLowerCase() || 'global';
+  const roomType = normalizedName === 'private' ? 'private' : normalizedName === 'class-group' ? 'class' : 'global';
+  const { data: existing, error: existingErr } = await supabase
+    .from('chat_rooms')
+    .select('id,name,room_type')
+    .eq('owner_id', ownerId)
+    .eq('name', normalizedName)
+    .limit(1);
+  if (existingErr) throw existingErr;
+  if (existing?.[0]?.id) return existing[0];
+  const { data: created, error: createErr } = await supabase
+    .from('chat_rooms')
+    .insert({ owner_id: ownerId, name: normalizedName, room_type: roomType })
+    .select('id,name,room_type')
+    .single();
+  if (createErr) throw createErr;
+  const { error: memberErr } = await supabase
+    .from('chat_members')
+    .upsert({ room_id: created.id, user_id: ownerId, role: 'owner' }, { onConflict: 'room_id,user_id' });
+  if (memberErr) throw memberErr;
+  return created;
+}
+
+async function getOrCreateTutorConversation(ownerId) {
+  const { data: existing, error: existingErr } = await supabase
+    .from('tutor_conversations')
+    .select('id,title')
+    .eq('owner_id', ownerId)
+    .order('created_at', { ascending: false })
+    .limit(1);
+  if (existingErr) throw existingErr;
+  if (existing?.[0]?.id) return existing[0].id;
+  const { data: created, error: createErr } = await supabase
+    .from('tutor_conversations')
+    .insert({ owner_id: ownerId, title: 'AI Tutor' })
+    .select('id')
+    .single();
+  if (createErr) throw createErr;
+  return created.id;
+}
+
+async function resolveSourceIdByName(studentId, sourceName) {
+  const title = String(sourceName || '').trim();
+  if (!title) return null;
+  const { data, error } = await supabase
+    .from('sources')
+    .select('id')
+    .eq('owner_id', studentId)
+    .eq('title', title)
+    .eq('source_type', 'pdf')
+    .is('deleted_at', null)
+    .order('created_at', { ascending: false })
+    .limit(1);
+  if (error) throw error;
+  return data?.[0]?.id || null;
+}
+
 async function ensureTeacherOwnsClass(teacherId, classId) {
   const { data, error } = await supabase
     .from('teacher_classes')
@@ -138,6 +210,59 @@ async function ensureTeacherOwnsClass(teacherId, classId) {
     throw new Error('Class not found or not owned by this teacher.');
   }
   return data[0];
+}
+
+async function ensureCourseOwner(userId, courseId) {
+  const { data, error } = await supabase
+    .from('lms_courses')
+    .select('id,title,owner_teacher_id')
+    .eq('id', courseId)
+    .eq('owner_teacher_id', userId)
+    .limit(1);
+  if (error) throw error;
+  if (!data?.[0]) throw new Error('Course not found or not owned by this teacher.');
+  return data[0];
+}
+
+async function ensureCourseMember(userId, courseId) {
+  const { data: owned, error: ownErr } = await supabase
+    .from('lms_courses')
+    .select('id,title')
+    .eq('id', courseId)
+    .eq('owner_teacher_id', userId)
+    .limit(1);
+  if (ownErr) throw ownErr;
+  if (owned?.[0]) return { role: 'teacher', course: owned[0] };
+
+  const { data: enrollments, error: enrErr } = await supabase
+    .from('lms_enrollments')
+    .select('id,role,status,lms_courses!lms_enrollments_course_id_fkey(id,title)')
+    .eq('course_id', courseId)
+    .eq('user_id', userId)
+    .eq('status', 'active')
+    .limit(1);
+  if (enrErr) throw enrErr;
+  const row = enrollments?.[0];
+  if (!row) throw new Error('Course not found or access denied.');
+  return {
+    role: row.role,
+    course: Array.isArray(row.lms_courses) ? row.lms_courses[0] : row.lms_courses,
+  };
+}
+
+async function logLmsAudit({ actorId, action, entityType, entityId = null, payload = {} }) {
+  if (!actorId) return;
+  try {
+    await supabase.from('lms_audit_events').insert({
+      actor_id: actorId,
+      action,
+      entity_type: entityType,
+      entity_id: entityId,
+      payload,
+    });
+  } catch {
+    // non-blocking audit logging
+  }
 }
 
 function ollamaBasesToTry() {
@@ -271,7 +396,25 @@ app.get('/api/library', async (req, res) => {
   if (!studentId) return res.status(400).json({ error: 'Missing studentId.' });
   if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
   try {
-    const [{ data: sources, error: srcErr }, { data: maps, error: mapsErr }, { data: notebook, error: notebookErr }] = await Promise.all([
+    const [
+      { data: sources, error: srcErr },
+      { data: maps, error: mapsErr },
+      { data: notebook, error: notebookErr },
+      { data: flashcardSets, error: flashcardSetsErr },
+      { data: flashcardsRows, error: flashcardsErr },
+      { data: quizRows, error: quizErr },
+      { data: quizQuestionRows, error: quizQuestionsErr },
+      { data: presentationsRows, error: presentationsErr },
+      { data: presentationSlidesRows, error: presentationSlidesErr },
+      { data: presentationRefsRows, error: presentationRefsErr },
+      { data: gradesRows, error: gradesErr },
+      { data: simRows, error: simErr },
+      { data: chatRoomsRows, error: chatRoomsErr },
+      { data: chatMessagesRows, error: chatMessagesErr },
+      { data: tutorConversationsRows, error: tutorConversationsErr },
+      { data: tutorMessagesRows, error: tutorMessagesErr },
+      { data: sectionsRows, error: sectionsErr },
+    ] = await Promise.all([
       supabase
         .from('sources')
         .select('id,title,created_at,source_contents(cleaned_text)')
@@ -292,8 +435,97 @@ app.get('/api/library', async (req, res) => {
         .eq('owner_id', studentId)
         .order('created_at', { ascending: false })
         .limit(40),
+      supabase
+        .from('flashcard_sets')
+        .select('id,name,source_id,created_at')
+        .eq('owner_id', studentId)
+        .is('deleted_at', null)
+        .order('created_at', { ascending: false })
+        .limit(40),
+      supabase
+        .from('flashcards')
+        .select('id,set_id,question,answer,created_at')
+        .order('created_at', { ascending: false })
+        .limit(2000),
+      supabase
+        .from('quizzes')
+        .select('id,mode,difficulty,question_count,created_at')
+        .eq('owner_id', studentId)
+        .is('deleted_at', null)
+        .order('created_at', { ascending: false })
+        .limit(40),
+      supabase
+        .from('quiz_questions')
+        .select('id,quiz_id,question,options,correct_answer')
+        .limit(3000),
+      supabase
+        .from('presentations')
+        .select('id,title,created_at')
+        .eq('owner_id', studentId)
+        .is('deleted_at', null)
+        .order('created_at', { ascending: false })
+        .limit(40),
+      supabase
+        .from('presentation_slides')
+        .select('id,presentation_id,slide_index,title,bullets,notes,image_suggestion,graph_suggestion')
+        .order('slide_index', { ascending: true })
+        .limit(3000),
+      supabase
+        .from('presentation_references')
+        .select('id,presentation_id,ref_text,url')
+        .limit(3000),
+      supabase
+        .from('grades')
+        .select('id,subject,score,weight,recorded_at')
+        .eq('owner_id', studentId)
+        .order('recorded_at', { ascending: false })
+        .limit(200),
+      supabase
+        .from('grade_simulations')
+        .select('id,target,required_final,created_at')
+        .eq('owner_id', studentId)
+        .order('created_at', { ascending: false })
+        .limit(100),
+      supabase
+        .from('chat_rooms')
+        .select('id,name')
+        .eq('owner_id', studentId)
+        .order('created_at', { ascending: false })
+        .limit(20),
+      supabase
+        .from('chat_messages')
+        .select('id,room_id,sender_id,content,created_at')
+        .eq('sender_id', studentId)
+        .order('created_at', { ascending: false })
+        .limit(500),
+      supabase
+        .from('tutor_conversations')
+        .select('id')
+        .eq('owner_id', studentId)
+        .order('created_at', { ascending: false })
+        .limit(20),
+      supabase
+        .from('tutor_messages')
+        .select('id,conversation_id,role,content,created_at')
+        .order('created_at', { ascending: false })
+        .limit(1000),
+      supabase
+        .from('sections')
+        .select('id,name,description,progress_percent,status,source_id,created_at,sources(title)')
+        .order('created_at', { ascending: false })
+        .limit(300),
     ]);
-    if (srcErr || mapsErr || notebookErr) throw (srcErr || mapsErr || notebookErr);
+    if (
+      srcErr || mapsErr || notebookErr || flashcardSetsErr || flashcardsErr || quizErr || quizQuestionsErr ||
+      presentationsErr || presentationSlidesErr || presentationRefsErr || gradesErr || simErr || chatRoomsErr ||
+      chatMessagesErr || tutorConversationsErr || tutorMessagesErr || sectionsErr
+    ) {
+      throw (
+        srcErr || mapsErr || notebookErr || flashcardSetsErr || flashcardsErr || quizErr || quizQuestionsErr ||
+        presentationsErr || presentationSlidesErr || presentationRefsErr || gradesErr || simErr || chatRoomsErr ||
+        chatMessagesErr || tutorConversationsErr || tutorMessagesErr || sectionsErr
+      );
+    }
     const sourcePdfs = (sources || []).map((s) => {
         const sc = s.source_contents;
         const text = Array.isArray(sc) ? sc[0]?.cleaned_text : sc?.cleaned_text;
@@ -320,6 +552,107 @@ app.get('/api/library', async (req, res) => {
         createdAt: p.created_at,
       }));
     }
+    const flashcardSetIds = new Set((flashcardSets || []).map((s) => s.id));
+    const flashcards = (flashcardsRows || [])
+      .filter((c) => flashcardSetIds.has(c.set_id))
+      .map((c) => ({
+        id: c.id,
+        setId: c.set_id,
+        question: c.question,
+        answer: c.answer,
+      }));
+
+    const quizIds = new Set((quizRows || []).map((q) => q.id));
+    const groupedQuizQuestions = new Map();
+    for (const row of quizQuestionRows || []) {
+      if (!quizIds.has(row.quiz_id)) continue;
+      if (!groupedQuizQuestions.has(row.quiz_id)) groupedQuizQuestions.set(row.quiz_id, []);
+      const options = Array.isArray(row.options) ? row.options : [];
+      const correctAnswer = String(row.correct_answer || '');
+      let correctIndex = options.findIndex((o) => String(o) === correctAnswer);
+      if (correctIndex < 0) correctIndex = 0;
+      groupedQuizQuestions.get(row.quiz_id).push({
+        id: row.id,
+        prompt: row.question,
+        choices: options.map((o) => String(o)),
+        correctIndex,
+      });
+    }
+    const quizzes = (quizRows || []).map((q) => ({
+      id: q.id,
+      topic: `${String(q.mode || 'quiz').toUpperCase()} Quiz`,
+      total: Number(q.question_count || 0),
+      correct: 0,
+      sec: Math.max(120, Number(q.question_count || 0) * 45),
+      difficulty: q.difficulty || 'medium',
+      questions: groupedQuizQuestions.get(q.id) || [],
+    }));
+
+    const presentationIds = new Set((presentationsRows || []).map((p) => p.id));
+    const groupedSlides = new Map();
+    for (const slide of presentationSlidesRows || []) {
+      if (!presentationIds.has(slide.presentation_id)) continue;
+      if (!groupedSlides.has(slide.presentation_id)) groupedSlides.set(slide.presentation_id, []);
+      groupedSlides.get(slide.presentation_id).push({
+        title: slide.title,
+        bullets: Array.isArray(slide.bullets) ? slide.bullets.map((b) => String(b)) : [],
+        notes: slide.notes || '',
+        imageSuggestion: slide.image_suggestion || '',
+        graphSuggestion: slide.graph_suggestion || '',
+      });
+    }
+    const groupedRefs = new Map();
+    for (const ref of presentationRefsRows || []) {
+      if (!presentationIds.has(ref.presentation_id)) continue;
+      if (!groupedRefs.has(ref.presentation_id)) groupedRefs.set(ref.presentation_id, []);
+      groupedRefs.get(ref.presentation_id).push({ text: ref.ref_text, url: ref.url || '' });
+    }
+    const presentations = (presentationsRows || []).map((p) => ({
+      id: p.id,
+      title: p.title,
+      slides: groupedSlides.get(p.id) || [],
+      references: groupedRefs.get(p.id) || [],
+    }));
+
+    const chatRoomNameById = new Map((chatRoomsRows || []).map((r) => [r.id, r.name || 'global']));
+    const chatMessages = (chatMessagesRows || [])
+      .filter((m) => chatRoomNameById.has(m.room_id))
+      .map((m) => ({
+        id: m.id,
+        room: chatRoomNameById.get(m.room_id),
+        text: m.content || '',
+        sender: 'You',
+      }))
+      .reverse();
+
+    const tutorConversationIds = new Set((tutorConversationsRows || []).map((c) => c.id));
+    const tutorRows = (tutorMessagesRows || [])
+      .filter((m) => tutorConversationIds.has(m.conversation_id))
+      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+    const tutorMessages = [];
+    let pendingUser = null;
+    for (const row of tutorRows) {
+      if (row.role === 'user') {
+        pendingUser = { id: row.id, you: row.content };
+      } else if (row.role === 'assistant' && pendingUser) {
+        tutorMessages.push({ id: `${pendingUser.id}-${row.id}`, you: pendingUser.you, tutor: row.content || '' });
+        pendingUser = null;
+      }
+    }
+
+    const sections = (sectionsRows || []).map((s) => ({
+      id: s.id,
+      nombre: s.name,
+      descripcion: s.description || '',
+      porcentaje: Number(s.progress_percent || 0),
+      estado: String(s.status || 'pending')
+        .replace('pending', 'pendiente')
+        .replace('in_progress', 'en_progreso')
+        .replace('completed', 'completado'),
+      fechas_trabajo: [],
+      sourceName: Array.isArray(s.sources) ? s.sources[0]?.title : s.sources?.title || null,
+    }));
+
     return res.json({
       pdfs,
       maps: (maps || []).map((m) => ({
@@ -346,6 +679,33 @@ app.get('/api/library', async (req, res) => {
         createdAt: n.created_at,
         output: n.payload || {},
       })),
+      flashcards: {
+        sets: (flashcardSets || []).map((s) => ({ id: s.id, name: s.name, sourceId: s.source_id || null })),
+        cards: flashcards,
+      },
+      quizzes,
+      presentations,
+      academics: {
+        grades: (gradesRows || []).map((g) => ({
+          id: g.id,
+          subject: g.subject,
+          score: Number(g.score || 0),
+          weight: Number(g.weight || 0),
+        })),
+        simulations: (simRows || []).map((s) => ({
+          id: s.id,
+          req: Number(s.required_final || 0),
+          target: Number(s.target || 0),
+        })),
+      },
+      chat: {
+        rooms: (chatRoomsRows || []).map((r) => r.name || 'global'),
+        messages: chatMessages,
+      },
+      tutor: {
+        messages: tutorMessages,
+      },
+      sections,
     });
   } catch (error) {
     return res.status(500).json(formatSupabaseError(error, 'Could not load library.'));
@@ -523,6 +883,1184 @@ app.post('/api/library/notebook', async (req, res) => {
   }
 });
 
+app.post('/api/library/flashcards', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const studentId = String(req.body?.studentId || '').trim();
+  const sourceName = String(req.body?.sourceName || '').trim();
+  const cards = Array.isArray(req.body?.cards) ? req.body.cards : [];
+  if (!studentId || !cards.length) return res.status(400).json({ error: 'Missing studentId/cards.' });
+  if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
+  try {
+    await ensureProfile(studentId);
+    const sourceId = await resolveSourceIdByName(studentId, sourceName);
+    const setName = `${sourceName || 'Study Set'} - ${new Date().toLocaleDateString()}`;
+    const { data: setData, error: setErr } = await supabase
+      .from('flashcard_sets')
+      .insert({
+        owner_id: studentId,
+        source_id: sourceId,
+        name: setName,
+        generation_mode: 'ai',
+      })
+      .select('id')
+      .single();
+    if (setErr) throw setErr;
+    const rows = cards
+      .slice(0, 300)
+      .map((c) => ({
+        set_id: setData.id,
+        question: String(c?.question || '').trim(),
+        answer: String(c?.answer || '').trim(),
+        evidence: String(c?.evidence || '').trim(),
+      }))
+      .filter((r) => r.question && r.answer);
+    if (rows.length) {
+      const { error: cardsErr } = await supabase.from('flashcards').insert(rows);
+      if (cardsErr) throw cardsErr;
+    }
+    return res.json({ ok: true, setId: setData.id, count: rows.length });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not save flashcards.'));
+  }
+});
+
+app.post('/api/library/sections', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const studentId = String(req.body?.studentId || '').trim();
+  const sourceName = String(req.body?.sourceName || '').trim();
+  const sections = Array.isArray(req.body?.sections) ? req.body.sections : [];
+  if (!studentId || !sourceName || !sections.length) return res.status(400).json({ error: 'Missing studentId/sourceName/sections.' });
+  if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
+  try {
+    await ensureProfile(studentId);
+    let sourceId = await resolveSourceIdByName(studentId, sourceName);
+    if (!sourceId) {
+      const { data: source, error: srcErr } = await supabase
+        .from('sources')
+        .insert({ owner_id: studentId, title: sourceName, source_type: 'pdf', status: 'ready' })
+        .select('id')
+        .single();
+      if (srcErr) throw srcErr;
+      sourceId = source.id;
+    }
+    const { error: delErr } = await supabase.from('sections').delete().eq('source_id', sourceId);
+    if (delErr) throw delErr;
+    const rows = sections
+      .slice(0, 60)
+      .map((s, i) => {
+        const estado = String(s?.estado || 'pendiente').toLowerCase();
+        return {
+          source_id: sourceId,
+          name: String(s?.nombre || '').trim() || `Section ${i + 1}`,
+          description: String(s?.descripcion || '').trim(),
+          order_index: i,
+          progress_percent: Math.max(0, Math.min(100, Number(s?.porcentaje || 0))),
+          status: estado === 'completado' ? 'completed' : estado === 'en_progreso' ? 'in_progress' : 'pending',
+        };
+      });
+    const { error: insErr } = await supabase.from('sections').insert(rows);
+    if (insErr) throw insErr;
+    return res.json({ ok: true, count: rows.length });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not save sections.'));
+  }
+});
+
+app.post('/api/library/quiz', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const studentId = String(req.body?.studentId || '').trim();
+  const modeRaw = String(req.body?.mode || 'quiz').trim().toLowerCase();
+  const mode = modeRaw === 'exam' ? 'exam' : 'quiz';
+  const difficulty = String(req.body?.difficulty || 'medium').trim().toLowerCase();
+  const sourceName = String(req.body?.sourceName || '').trim();
+  const result = req.body?.result;
+  const questions = Array.isArray(result?.questions) ? result.questions : [];
+  if (!studentId || !questions.length) return res.status(400).json({ error: 'Missing studentId/quiz questions.' });
+  if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
+  try {
+    await ensureProfile(studentId);
+    const sourceId = await resolveSourceIdByName(studentId, sourceName);
+    const safeDifficulty = ['easy', 'medium', 'hard'].includes(difficulty) ? difficulty : 'medium';
+    const { data: quizData, error: quizErr } = await supabase
+      .from('quizzes')
+      .insert({
+        owner_id: studentId,
+        source_id: sourceId,
+        mode,
+        difficulty: safeDifficulty,
+        question_count: Math.max(1, questions.length),
+      })
+      .select('id')
+      .single();
+    if (quizErr) throw quizErr;
+    const questionRows = questions
+      .slice(0, 100)
+      .map((q) => {
+        const options = Array.isArray(q?.choices) ? q.choices.map((c) => String(c)) : [];
+        const correctIndex = Number(q?.correctIndex || 0);
+        return {
+          quiz_id: quizData.id,
+          question: String(q?.prompt || '').trim(),
+          options,
+          correct_answer: options[correctIndex] || options[0] || '',
+          explanation: '',
+        };
+      })
+      .filter((q) => q.question && Array.isArray(q.options) && q.options.length >= 2);
+    if (questionRows.length) {
+      const { error: questionsErr } = await supabase.from('quiz_questions').insert(questionRows);
+      if (questionsErr) throw questionsErr;
+    }
+    return res.json({ ok: true, quizId: quizData.id, count: questionRows.length });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not save quiz.'));
+  }
+});
+
+app.post('/api/library/presentation', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const studentId = String(req.body?.studentId || '').trim();
+  const title = String(req.body?.title || 'Presentation').trim();
+  const sourceNames = Array.isArray(req.body?.sourceNames) ? req.body.sourceNames : [];
+  const slides = Array.isArray(req.body?.slides) ? req.body.slides : [];
+  const references = Array.isArray(req.body?.references) ? req.body.references : [];
+  if (!studentId || !slides.length) return res.status(400).json({ error: 'Missing studentId/slides.' });
+  if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
+  try {
+    await ensureProfile(studentId);
+    const { data: presData, error: presErr } = await supabase
+      .from('presentations')
+      .insert({ owner_id: studentId, title, prompt_text: '' })
+      .select('id')
+      .single();
+    if (presErr) throw presErr;
+
+    const slideRows = slides.slice(0, 60).map((s, idx) => ({
+      presentation_id: presData.id,
+      slide_index: idx,
+      title: String(s?.title || `Slide ${idx + 1}`).trim(),
+      bullets: Array.isArray(s?.bullets) ? s.bullets.map((b) => String(b)) : [],
+      notes: String(s?.notes || '').trim(),
+      image_suggestion: String(s?.imageSuggestion || '').trim(),
+      graph_suggestion: String(s?.graphSuggestion || '').trim(),
+    }));
+    const refRows = references
+      .slice(0, 100)
+      .map((r) => ({
+        presentation_id: presData.id,
+        ref_text: String(r?.text || '').trim(),
+        url: String(r?.url || '').trim(),
+      }))
+      .filter((r) => r.ref_text);
+    if (slideRows.length) {
+      const { error: slidesErr } = await supabase.from('presentation_slides').insert(slideRows);
+      if (slidesErr) throw slidesErr;
+    }
+    if (refRows.length) {
+      const { error: refsErr } = await supabase.from('presentation_references').insert(refRows);
+      if (refsErr) throw refsErr;
+    }
+
+    for (const sourceName of sourceNames.slice(0, 10)) {
+      const sourceId = await resolveSourceIdByName(studentId, sourceName);
+      if (!sourceId) continue;
+      const { error: linkErr } = await supabase
+        .from('presentation_sources')
+        .upsert({ presentation_id: presData.id, source_id: sourceId }, { onConflict: 'presentation_id,source_id' });
+      if (linkErr) throw linkErr;
+    }
+
+    return res.json({ ok: true, presentationId: presData.id });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not save presentation.'));
+  }
+});
+
+app.post('/api/library/grade', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const studentId = String(req.body?.studentId || '').trim();
+  const subject = String(req.body?.subject || '').trim();
+  const score = Number(req.body?.score);
+  const weight = Number(req.body?.weight);
+  if (!studentId || !subject || Number.isNaN(score) || Number.isNaN(weight)) {
+    return res.status(400).json({ error: 'Missing studentId/subject/score/weight.' });
+  }
+  if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
+  try {
+    await ensureProfile(studentId);
+    const { data, error } = await supabase
+      .from('grades')
+      .insert({ owner_id: studentId, subject, score, weight })
+      .select('id,subject,score,weight')
+      .single();
+    if (error) throw error;
+    return res.json({ ok: true, grade: data });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not save grade.'));
+  }
+});
+
+app.post('/api/library/simulation', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const studentId = String(req.body?.studentId || '').trim();
+  const target = Number(req.body?.target);
+  const reqFinal = Number(req.body?.requiredFinal);
+  const finalWeight = Number(req.body?.finalWeight);
+  if (!studentId || Number.isNaN(target) || Number.isNaN(reqFinal) || Number.isNaN(finalWeight)) {
+    return res.status(400).json({ error: 'Missing studentId/target/requiredFinal/finalWeight.' });
+  }
+  if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
+  try {
+    await ensureProfile(studentId);
+    const { data, error } = await supabase
+      .from('grade_simulations')
+      .insert({ owner_id: studentId, target, required_final: reqFinal, final_weight: finalWeight })
+      .select('id,target,required_final')
+      .single();
+    if (error) throw error;
+    return res.json({ ok: true, simulation: data });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not save grade simulation.'));
+  }
+});
+
+app.post('/api/library/academic-ai', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const studentId = String(req.body?.studentId || '').trim();
+  const outputTypeRaw = String(req.body?.outputType || '').trim().toLowerCase();
+  const outputType = outputTypeRaw === 'estimate' ? 'estimate' : 'advice';
+  const payload = req.body?.payload || {};
+  if (!studentId) return res.status(400).json({ error: 'Missing studentId.' });
+  if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
+  try {
+    await ensureProfile(studentId);
+    const { data, error } = await supabase
+      .from('academic_ai_outputs')
+      .insert({ owner_id: studentId, output_type: outputType, payload })
+      .select('id')
+      .single();
+    if (error) throw error;
+    return res.json({ ok: true, id: data.id });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not save academic AI output.'));
+  }
+});
+
+app.post('/api/library/chat-message', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const studentId = String(req.body?.studentId || '').trim();
+  const room = String(req.body?.room || 'global').trim().toLowerCase() || 'global';
+  const content = String(req.body?.content || '').trim();
+  if (!studentId || !content) return res.status(400).json({ error: 'Missing studentId/content.' });
+  if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
+  try {
+    await ensureProfile(studentId);
+    const chatRoom = await getOrCreateOwnerChatRoom(studentId, room);
+    const { data, error } = await supabase
+      .from('chat_messages')
+      .insert({ room_id: chatRoom.id, sender_id: studentId, content })
+      .select('id,content,created_at')
+      .single();
+    if (error) throw error;
+    return res.json({
+      ok: true,
+      message: {
+        id: data.id,
+        room: chatRoom.name,
+        text: data.content,
+        sender: 'You',
+      },
+    });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not save chat message.'));
+  }
+});
+
+app.post('/api/library/tutor-message', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const studentId = String(req.body?.studentId || '').trim();
+  const prompt = String(req.body?.prompt || '').trim();
+  const reply = String(req.body?.reply || '').trim();
+  if (!studentId || !prompt || !reply) return res.status(400).json({ error: 'Missing studentId/prompt/reply.' });
+  if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
+  try {
+    await ensureProfile(studentId);
+    const conversationId = await getOrCreateTutorConversation(studentId);
+    const { error: userErr } = await supabase
+      .from('tutor_messages')
+      .insert({ conversation_id: conversationId, role: 'user', content: prompt, citations: [] });
+    if (userErr) throw userErr;
+    const { data, error: assistantErr } = await supabase
+      .from('tutor_messages')
+      .insert({ conversation_id: conversationId, role: 'assistant', content: reply, citations: [] })
+      .select('id')
+      .single();
+    if (assistantErr) throw assistantErr;
+    return res.json({ ok: true, id: data.id });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not save tutor messages.'));
+  }
+});
+
+app.get('/api/courses', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const userId = String(req.query?.userId || '').trim();
+  if (!userId) return res.status(400).json({ error: 'Missing userId.' });
+  if (!isUuid(userId)) return res.status(400).json({ error: 'userId must be a valid UUID.' });
+  try {
+    const [{ data: owned, error: ownedErr }, { data: enrolled, error: enrErr }] = await Promise.all([
+      supabase
+        .from('lms_courses')
+        .select('id,title,code,description,published,created_at,owner_teacher_id')
+        .eq('owner_teacher_id', userId)
+        .order('created_at', { ascending: false }),
+      supabase
+        .from('lms_enrollments')
+        .select('role,status,lms_courses!lms_enrollments_course_id_fkey(id,title,code,description,published,created_at,owner_teacher_id)')
+        .eq('user_id', userId)
+        .eq('status', 'active'),
+    ]);
+    if (ownedErr || enrErr) throw (ownedErr || enrErr);
+    const byId = new Map();
+    for (const c of owned || []) byId.set(c.id, { ...c, membershipRole: 'teacher' });
+    for (const e of enrolled || []) {
+      const course = Array.isArray(e.lms_courses) ? e.lms_courses[0] : e.lms_courses;
+      if (!course?.id) continue;
+      if (!byId.has(course.id)) byId.set(course.id, { ...course, membershipRole: e.role || 'student' });
+    }
+    const courses = [...byId.values()].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    return res.json({ courses });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not load courses.'));
+  }
+});
+
+app.post('/api/courses', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const ownerId = String(req.body?.ownerId || '').trim();
+  const title = String(req.body?.title || '').trim();
+  const description = String(req.body?.description || '').trim();
+  const termId = req.body?.termId ? String(req.body.termId).trim() : null;
+  const published = !!req.body?.published;
+  if (!ownerId || !title) return res.status(400).json({ error: 'Missing ownerId/title.' });
+  if (!isUuid(ownerId) || (termId && !isUuid(termId))) return res.status(400).json({ error: 'ownerId/termId must be valid UUIDs.' });
+  try {
+    await ensureProfile(ownerId, 'Teacher');
+    const code = `CRS-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    const { data, error } = await supabase
+      .from('lms_courses')
+      .insert({
+        owner_teacher_id: ownerId,
+        title,
+        code,
+        description,
+        term_id: termId,
+        published,
+      })
+      .select('id,title,code,description,published,created_at')
+      .single();
+    if (error) throw error;
+    await supabase.from('lms_enrollments').upsert(
+      {
+        course_id: data.id,
+        user_id: ownerId,
+        role: 'teacher',
+        status: 'active',
+      },
+      { onConflict: 'course_id,user_id' },
+    );
+    await logLmsAudit({ actorId: ownerId, action: 'course.create', entityType: 'lms_course', entityId: data.id, payload: { title } });
+    return res.json({ ok: true, course: data });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not create course.'));
+  }
+});
+
+app.get('/api/modules', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const userId = String(req.query?.userId || '').trim();
+  const courseId = String(req.query?.courseId || '').trim();
+  if (!userId || !courseId) return res.status(400).json({ error: 'Missing userId/courseId.' });
+  if (!isUuid(userId) || !isUuid(courseId)) return res.status(400).json({ error: 'userId/courseId must be valid UUIDs.' });
+  try {
+    await ensureCourseMember(userId, courseId);
+    const [{ data: modules, error: modErr }, { data: pages, error: pageErr }] = await Promise.all([
+      supabase.from('lms_modules').select('id,title,description,position,published,created_at').eq('course_id', courseId).order('position', { ascending: true }),
+      supabase.from('lms_pages').select('id,title,published,updated_at').eq('course_id', courseId).order('updated_at', { ascending: false }).limit(40),
+    ]);
+    if (modErr || pageErr) throw (modErr || pageErr);
+    const moduleIds = (modules || []).map((m) => m.id);
+    let items = [];
+    if (moduleIds.length) {
+      const { data: itemRows, error: itemsErr } = await supabase
+        .from('lms_module_items')
+        .select('id,module_id,item_type,ref_id,title,position,published,url')
+        .in('module_id', moduleIds)
+        .order('position', { ascending: true });
+      if (itemsErr) throw itemsErr;
+      items = itemRows || [];
+    }
+    const itemsByModule = new Map();
+    for (const row of items || []) {
+      if (!itemsByModule.has(row.module_id)) itemsByModule.set(row.module_id, []);
+      itemsByModule.get(row.module_id).push(row);
+    }
+    return res.json({
+      modules: (modules || []).map((m) => ({ ...m, items: itemsByModule.get(m.id) || [] })),
+      pages: pages || [],
+    });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not load modules.'));
+  }
+});
+
+app.post('/api/modules', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const userId = String(req.body?.userId || '').trim();
+  const courseId = String(req.body?.courseId || '').trim();
+  const title = String(req.body?.title || '').trim();
+  const description = String(req.body?.description || '').trim();
+  const position = Number(req.body?.position ?? 0);
+  const published = !!req.body?.published;
+  if (!userId || !courseId || !title) return res.status(400).json({ error: 'Missing userId/courseId/title.' });
+  if (!isUuid(userId) || !isUuid(courseId)) return res.status(400).json({ error: 'userId/courseId must be valid UUIDs.' });
+  try {
+    await ensureCourseOwner(userId, courseId);
+    const { data, error } = await supabase
+      .from('lms_modules')
+      .insert({
+        course_id: courseId,
+        title,
+        description,
+        position: Number.isFinite(position) ? position : 0,
+        published,
+        created_by: userId,
+      })
+      .select('id,title,description,position,published,created_at')
+      .single();
+    if (error) throw error;
+    await logLmsAudit({ actorId: userId, action: 'module.create', entityType: 'lms_module', entityId: data.id, payload: { courseId, title } });
+    return res.json({ ok: true, module: data });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not create module.'));
+  }
+});
+
+app.get('/api/assignments', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const userId = String(req.query?.userId || '').trim();
+  const courseId = String(req.query?.courseId || '').trim();
+  if (!userId || !courseId) return res.status(400).json({ error: 'Missing userId/courseId.' });
+  if (!isUuid(userId) || !isUuid(courseId)) return res.status(400).json({ error: 'userId/courseId must be valid UUIDs.' });
+  try {
+    await ensureCourseMember(userId, courseId);
+    const { data, error } = await supabase
+      .from('lms_assignments')
+      .select('id,title,description,due_at,points,status,created_at,created_by')
+      .eq('course_id', courseId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    return res.json({ assignments: data || [] });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not load assignments.'));
+  }
+});
+
+app.post('/api/assignments', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const userId = String(req.body?.userId || '').trim();
+  const courseId = String(req.body?.courseId || '').trim();
+  const title = String(req.body?.title || '').trim();
+  const description = String(req.body?.description || '').trim();
+  const dueAt = req.body?.dueAt || null;
+  const points = Number(req.body?.points ?? 100);
+  const status = String(req.body?.status || 'published').trim().toLowerCase();
+  const safeStatus = ['draft', 'published', 'closed'].includes(status) ? status : 'published';
+  if (!userId || !courseId || !title) return res.status(400).json({ error: 'Missing userId/courseId/title.' });
+  if (!isUuid(userId) || !isUuid(courseId)) return res.status(400).json({ error: 'userId/courseId must be valid UUIDs.' });
+  try {
+    await ensureCourseOwner(userId, courseId);
+    const { data, error } = await supabase
+      .from('lms_assignments')
+      .insert({
+        course_id: courseId,
+        title,
+        description,
+        due_at: dueAt,
+        points: Number.isFinite(points) ? points : 100,
+        status: safeStatus,
+        created_by: userId,
+      })
+      .select('id,title,description,due_at,points,status,created_at')
+      .single();
+    if (error) throw error;
+    try {
+      const { data: enrolled } = await supabase
+        .from('lms_enrollments')
+        .select('user_id')
+        .eq('course_id', courseId)
+        .eq('status', 'active');
+      const notices = (enrolled || [])
+        .map((e) => e.user_id)
+        .filter((uid) => uid && uid !== userId)
+        .map((uid) => ({
+          user_id: uid,
+          kind: 'assignment',
+          title: `New assignment: ${title}`,
+          body: `A new assignment was posted in your course.`,
+          meta: { courseId, assignmentId: data.id },
+        }));
+      if (notices.length) await supabase.from('lms_notifications').insert(notices);
+    } catch {
+      // non-blocking notifications
+    }
+    await logLmsAudit({ actorId: userId, action: 'assignment.create', entityType: 'lms_assignment', entityId: data.id, payload: { courseId, title } });
+    return res.json({ ok: true, assignment: data });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not create assignment.'));
+  }
+});
+
+app.get('/api/quizzes', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const userId = String(req.query?.userId || '').trim();
+  const courseId = String(req.query?.courseId || '').trim();
+  if (!userId || !courseId) return res.status(400).json({ error: 'Missing userId/courseId.' });
+  if (!isUuid(userId) || !isUuid(courseId)) return res.status(400).json({ error: 'userId/courseId must be valid UUIDs.' });
+  try {
+    await ensureCourseMember(userId, courseId);
+    const { data, error } = await supabase
+      .from('lms_quizzes')
+      .select('id,title,difficulty,question_count,payload,status,created_at,created_by')
+      .eq('course_id', courseId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    return res.json({ quizzes: data || [] });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not load quizzes.'));
+  }
+});
+
+app.post('/api/quizzes', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const userId = String(req.body?.userId || '').trim();
+  const courseId = String(req.body?.courseId || '').trim();
+  const title = String(req.body?.title || 'Course Quiz').trim();
+  const difficultyRaw = String(req.body?.difficulty || 'medium').trim().toLowerCase();
+  const difficulty = ['easy', 'medium', 'hard'].includes(difficultyRaw) ? difficultyRaw : 'medium';
+  const questionCount = Math.max(1, Math.min(100, Number(req.body?.questionCount || 10)));
+  const payload = req.body?.payload && typeof req.body.payload === 'object' ? req.body.payload : {};
+  const statusRaw = String(req.body?.status || 'published').trim().toLowerCase();
+  const status = ['draft', 'published', 'closed'].includes(statusRaw) ? statusRaw : 'published';
+  const action = String(req.body?.action || 'create').trim().toLowerCase();
+  if (!userId || !courseId) return res.status(400).json({ error: 'Missing userId/courseId.' });
+  if (!isUuid(userId) || !isUuid(courseId)) return res.status(400).json({ error: 'userId/courseId must be valid UUIDs.' });
+  try {
+    const member = await ensureCourseMember(userId, courseId);
+    if (action === 'attempt') {
+      if (member.role !== 'student' && member.role !== 'observer') {
+        return res.status(403).json({ error: 'Only students/observers can record attempts.' });
+      }
+      const quizId = String(req.body?.quizId || '').trim();
+      const score = req.body?.score === undefined ? null : Number(req.body?.score);
+      const answers = Array.isArray(req.body?.answers) ? req.body.answers : [];
+      if (!quizId || !isUuid(quizId)) return res.status(400).json({ error: 'Missing valid quizId.' });
+      const { data, error } = await supabase
+        .from('lms_quiz_attempts')
+        .insert({
+          quiz_id: quizId,
+          student_id: userId,
+          score: Number.isFinite(score) ? score : null,
+          answers,
+          completed_at: new Date().toISOString(),
+        })
+        .select('id,quiz_id,student_id,score,answers,started_at,completed_at')
+        .single();
+      if (error) throw error;
+      await logLmsAudit({ actorId: userId, action: 'quiz.attempt', entityType: 'lms_quiz_attempt', entityId: data.id, payload: { quizId, score } });
+      return res.json({ ok: true, attempt: data });
+    }
+    if (member.role !== 'teacher' && member.role !== 'ta') {
+      return res.status(403).json({ error: 'Only teacher/TA can create quizzes.' });
+    }
+    const { data, error } = await supabase
+      .from('lms_quizzes')
+      .insert({
+        course_id: courseId,
+        title,
+        difficulty,
+        question_count: questionCount,
+        payload,
+        status,
+        created_by: userId,
+      })
+      .select('id,title,difficulty,question_count,payload,status,created_at,created_by')
+      .single();
+    if (error) throw error;
+    await logLmsAudit({ actorId: userId, action: 'quiz.create', entityType: 'lms_quiz', entityId: data.id, payload: { courseId, title } });
+    return res.json({ ok: true, quiz: data });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not save quiz.'));
+  }
+});
+
+app.get('/api/submissions', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const userId = String(req.query?.userId || '').trim();
+  const assignmentId = String(req.query?.assignmentId || '').trim();
+  if (!userId || !assignmentId) return res.status(400).json({ error: 'Missing userId/assignmentId.' });
+  if (!isUuid(userId) || !isUuid(assignmentId)) return res.status(400).json({ error: 'userId/assignmentId must be valid UUIDs.' });
+  try {
+    const { data: assignmentRows, error: assErr } = await supabase
+      .from('lms_assignments')
+      .select('id,course_id,created_by')
+      .eq('id', assignmentId)
+      .limit(1);
+    if (assErr) throw assErr;
+    const assignment = assignmentRows?.[0];
+    if (!assignment) return res.status(404).json({ error: 'Assignment not found.' });
+    const membership = await ensureCourseMember(userId, assignment.course_id);
+    let query = supabase
+      .from('lms_submissions')
+      .select('id,assignment_id,student_id,attempt_no,submission_text,file_url,submitted_at,status,grade,feedback,graded_by,graded_at,created_at')
+      .eq('assignment_id', assignmentId)
+      .order('created_at', { ascending: false });
+    if (membership.role === 'student' || membership.role === 'observer') {
+      query = query.eq('student_id', userId);
+    }
+    const { data, error } = await query;
+    if (error) throw error;
+    return res.json({ submissions: data || [] });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not load submissions.'));
+  }
+});
+
+app.post('/api/submissions', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const userId = String(req.body?.userId || '').trim();
+  const assignmentId = String(req.body?.assignmentId || '').trim();
+  const submissionText = String(req.body?.submissionText || '').trim();
+  const fileUrl = String(req.body?.fileUrl || '').trim();
+  const grade = req.body?.grade === undefined ? null : Number(req.body?.grade);
+  const feedback = String(req.body?.feedback || '').trim();
+  if (!userId || !assignmentId) return res.status(400).json({ error: 'Missing userId/assignmentId.' });
+  if (!isUuid(userId) || !isUuid(assignmentId)) return res.status(400).json({ error: 'userId/assignmentId must be valid UUIDs.' });
+  try {
+    const { data: assignmentRows, error: assErr } = await supabase
+      .from('lms_assignments')
+      .select('id,course_id,created_by')
+      .eq('id', assignmentId)
+      .limit(1);
+    if (assErr) throw assErr;
+    const assignment = assignmentRows?.[0];
+    if (!assignment) return res.status(404).json({ error: 'Assignment not found.' });
+    const membership = await ensureCourseMember(userId, assignment.course_id);
+    if (grade !== null && membership.role !== 'teacher' && membership.role !== 'ta') {
+      return res.status(403).json({ error: 'Only teacher/TA can grade submissions.' });
+    }
+    if (grade !== null) {
+      const targetSubmissionId = String(req.body?.submissionId || '').trim();
+      if (!targetSubmissionId || !isUuid(targetSubmissionId)) return res.status(400).json({ error: 'Missing valid submissionId for grading.' });
+      const { data, error } = await supabase
+        .from('lms_submissions')
+        .update({
+          grade,
+          feedback,
+          status: 'graded',
+          graded_by: userId,
+          graded_at: new Date().toISOString(),
+        })
+        .eq('id', targetSubmissionId)
+        .select('id,assignment_id,student_id,attempt_no,status,grade,feedback,graded_by,graded_at,created_at')
+        .single();
+      if (error) throw error;
+      await logLmsAudit({ actorId: userId, action: 'submission.grade', entityType: 'lms_submission', entityId: data.id, payload: { grade } });
+      return res.json({ ok: true, submission: data });
+    }
+    const { data: previousRows, error: prevErr } = await supabase
+      .from('lms_submissions')
+      .select('attempt_no')
+      .eq('assignment_id', assignmentId)
+      .eq('student_id', userId)
+      .order('attempt_no', { ascending: false })
+      .limit(1);
+    if (prevErr) throw prevErr;
+    const attemptNo = Number(previousRows?.[0]?.attempt_no || 0) + 1;
+    const { data, error } = await supabase
+      .from('lms_submissions')
+      .insert({
+        assignment_id: assignmentId,
+        student_id: userId,
+        attempt_no: attemptNo,
+        submission_text: submissionText,
+        file_url: fileUrl || null,
+        submitted_at: new Date().toISOString(),
+        status: 'submitted',
+      })
+      .select('id,assignment_id,student_id,attempt_no,submission_text,file_url,submitted_at,status,created_at')
+      .single();
+    if (error) throw error;
+    try {
+      const { data: courseRows } = await supabase
+        .from('lms_assignments')
+        .select('course_id,lms_courses!lms_assignments_course_id_fkey(owner_teacher_id)')
+        .eq('id', assignmentId)
+        .limit(1);
+      const course = courseRows?.[0];
+      const owner = Array.isArray(course?.lms_courses) ? course.lms_courses[0]?.owner_teacher_id : course?.lms_courses?.owner_teacher_id;
+      if (owner) {
+        await supabase.from('lms_notifications').insert({
+          user_id: owner,
+          kind: 'submission',
+          title: 'New student submission',
+          body: 'A student submitted an assignment.',
+          meta: { assignmentId, submissionId: data.id },
+        });
+      }
+    } catch {
+      // non-blocking notifications
+    }
+    await logLmsAudit({ actorId: userId, action: 'submission.create', entityType: 'lms_submission', entityId: data.id, payload: { assignmentId, attemptNo } });
+    return res.json({ ok: true, submission: data });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not save submission.'));
+  }
+});
+
+app.get('/api/discussions', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const userId = String(req.query?.userId || '').trim();
+  const courseId = String(req.query?.courseId || '').trim();
+  if (!userId || !courseId) return res.status(400).json({ error: 'Missing userId/courseId.' });
+  if (!isUuid(userId) || !isUuid(courseId)) return res.status(400).json({ error: 'userId/courseId must be valid UUIDs.' });
+  try {
+    await ensureCourseMember(userId, courseId);
+    const { data: discussions, error: dErr } = await supabase
+      .from('lms_discussions')
+      .select('id,title,body,created_by,locked,created_at')
+      .eq('course_id', courseId)
+      .order('created_at', { ascending: false });
+    if (dErr) throw dErr;
+    const discussionIds = (discussions || []).map((d) => d.id);
+    let replies = [];
+    if (discussionIds.length) {
+      const { data: repRows, error: repErr } = await supabase
+        .from('lms_discussion_replies')
+        .select('id,discussion_id,parent_reply_id,author_id,body,created_at')
+        .in('discussion_id', discussionIds)
+        .order('created_at', { ascending: true });
+      if (repErr) throw repErr;
+      replies = repRows || [];
+    }
+    const grouped = new Map();
+    for (const r of replies) {
+      if (!grouped.has(r.discussion_id)) grouped.set(r.discussion_id, []);
+      grouped.get(r.discussion_id).push(r);
+    }
+    return res.json({
+      discussions: (discussions || []).map((d) => ({ ...d, replies: grouped.get(d.id) || [] })),
+    });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not load discussions.'));
+  }
+});
+
+app.post('/api/discussions', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const userId = String(req.body?.userId || '').trim();
+  const courseId = String(req.body?.courseId || '').trim();
+  const title = String(req.body?.title || '').trim();
+  const body = String(req.body?.body || '').trim();
+  const discussionId = req.body?.discussionId ? String(req.body.discussionId).trim() : '';
+  const parentReplyId = req.body?.parentReplyId ? String(req.body.parentReplyId).trim() : null;
+  if (!userId || !courseId) return res.status(400).json({ error: 'Missing userId/courseId.' });
+  if (!isUuid(userId) || !isUuid(courseId) || (discussionId && !isUuid(discussionId)) || (parentReplyId && !isUuid(parentReplyId))) {
+    return res.status(400).json({ error: 'Invalid UUID payload.' });
+  }
+  try {
+    await ensureCourseMember(userId, courseId);
+    if (discussionId) {
+      const { data, error } = await supabase
+        .from('lms_discussion_replies')
+        .insert({
+          discussion_id: discussionId,
+          parent_reply_id: parentReplyId,
+          author_id: userId,
+          body,
+        })
+        .select('id,discussion_id,parent_reply_id,author_id,body,created_at')
+        .single();
+      if (error) throw error;
+      await logLmsAudit({ actorId: userId, action: 'discussion.reply', entityType: 'lms_discussion_reply', entityId: data.id, payload: { discussionId } });
+      return res.json({ ok: true, reply: data });
+    }
+    if (!title) return res.status(400).json({ error: 'Missing title for new discussion.' });
+    const { data, error } = await supabase
+      .from('lms_discussions')
+      .insert({
+        course_id: courseId,
+        title,
+        body,
+        created_by: userId,
+      })
+      .select('id,title,body,created_by,locked,created_at')
+      .single();
+    if (error) throw error;
+    await logLmsAudit({ actorId: userId, action: 'discussion.create', entityType: 'lms_discussion', entityId: data.id, payload: { courseId, title } });
+    return res.json({ ok: true, discussion: data });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not save discussion data.'));
+  }
+});
+
+app.get('/api/messages', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const userId = String(req.query?.userId || '').trim();
+  const threadId = req.query?.threadId ? String(req.query.threadId).trim() : '';
+  if (!userId) return res.status(400).json({ error: 'Missing userId.' });
+  if (!isUuid(userId) || (threadId && !isUuid(threadId))) return res.status(400).json({ error: 'Invalid UUID payload.' });
+  try {
+    const { data: participantRows, error: pErr } = await supabase
+      .from('lms_inbox_participants')
+      .select('thread_id')
+      .eq('user_id', userId);
+    if (pErr) throw pErr;
+    const threadIds = (participantRows || []).map((r) => r.thread_id);
+    if (!threadIds.length) return res.json({ threads: [], messages: [] });
+    const [{ data: threads, error: tErr }, { data: messages, error: mErr }] = await Promise.all([
+      supabase
+        .from('lms_inbox_threads')
+        .select('id,course_id,subject,created_by,created_at,updated_at')
+        .in('id', threadId ? [threadId] : threadIds)
+        .order('updated_at', { ascending: false }),
+      supabase
+        .from('lms_inbox_messages')
+        .select('id,thread_id,sender_id,body,created_at')
+        .in('thread_id', threadId ? [threadId] : threadIds)
+        .order('created_at', { ascending: true }),
+    ]);
+    if (tErr || mErr) throw (tErr || mErr);
+    return res.json({ threads: threads || [], messages: messages || [] });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not load messages.'));
+  }
+});
+
+app.post('/api/messages', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const userId = String(req.body?.userId || '').trim();
+  const threadId = req.body?.threadId ? String(req.body.threadId).trim() : '';
+  const courseId = req.body?.courseId ? String(req.body.courseId).trim() : null;
+  const subject = String(req.body?.subject || '').trim();
+  const body = String(req.body?.body || '').trim();
+  const recipientIds = Array.isArray(req.body?.recipientIds) ? req.body.recipientIds.map((id) => String(id || '').trim()).filter(Boolean) : [];
+  if (!userId || !body) return res.status(400).json({ error: 'Missing userId/body.' });
+  if (!isUuid(userId) || (threadId && !isUuid(threadId)) || (courseId && !isUuid(courseId)) || recipientIds.some((id) => !isUuid(id))) {
+    return res.status(400).json({ error: 'Invalid UUID payload.' });
+  }
+  try {
+    let effectiveThreadId = threadId;
+    if (!effectiveThreadId) {
+      const { data: thread, error: threadErr } = await supabase
+        .from('lms_inbox_threads')
+        .insert({
+          course_id: courseId,
+          subject: subject || 'Course message',
+          created_by: userId,
+        })
+        .select('id')
+        .single();
+      if (threadErr) throw threadErr;
+      effectiveThreadId = thread.id;
+      const participantRows = [{ thread_id: effectiveThreadId, user_id: userId }, ...recipientIds.map((rid) => ({ thread_id: effectiveThreadId, user_id: rid }))];
+      const { error: partErr } = await supabase.from('lms_inbox_participants').upsert(participantRows, { onConflict: 'thread_id,user_id' });
+      if (partErr) throw partErr;
+    }
+    const { data, error } = await supabase
+      .from('lms_inbox_messages')
+      .insert({ thread_id: effectiveThreadId, sender_id: userId, body })
+      .select('id,thread_id,sender_id,body,created_at')
+      .single();
+    if (error) throw error;
+    await supabase.from('lms_inbox_threads').update({ updated_at: new Date().toISOString() }).eq('id', effectiveThreadId);
+    try {
+      const { data: recipients } = await supabase
+        .from('lms_inbox_participants')
+        .select('user_id')
+        .eq('thread_id', effectiveThreadId);
+      const notices = (recipients || [])
+        .map((r) => r.user_id)
+        .filter((uid) => uid && uid !== userId)
+        .map((uid) => ({
+          user_id: uid,
+          kind: 'message',
+          title: 'New inbox message',
+          body: 'You have a new message in LMS inbox.',
+          meta: { threadId: effectiveThreadId, messageId: data.id },
+        }));
+      if (notices.length) await supabase.from('lms_notifications').insert(notices);
+    } catch {
+      // non-blocking notifications
+    }
+    await logLmsAudit({ actorId: userId, action: 'message.send', entityType: 'lms_inbox_message', entityId: data.id, payload: { threadId: effectiveThreadId } });
+    return res.json({ ok: true, message: data, threadId: effectiveThreadId });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not send message.'));
+  }
+});
+
+app.get('/api/calendar', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const userId = String(req.query?.userId || '').trim();
+  const courseId = req.query?.courseId ? String(req.query.courseId).trim() : null;
+  if (!userId) return res.status(400).json({ error: 'Missing userId.' });
+  if (!isUuid(userId) || (courseId && !isUuid(courseId))) return res.status(400).json({ error: 'Invalid UUID payload.' });
+  try {
+    let query = supabase
+      .from('lms_calendar_events')
+      .select('id,owner_id,course_id,title,description,event_type,start_at,end_at,created_at')
+      .eq('owner_id', userId)
+      .order('start_at', { ascending: true });
+    if (courseId) query = query.eq('course_id', courseId);
+    const { data, error } = await query;
+    if (error) throw error;
+    return res.json({ events: data || [] });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not load calendar events.'));
+  }
+});
+
+app.post('/api/calendar', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const userId = String(req.body?.userId || '').trim();
+  const courseId = req.body?.courseId ? String(req.body.courseId).trim() : null;
+  const title = String(req.body?.title || '').trim();
+  const description = String(req.body?.description || '').trim();
+  const eventType = String(req.body?.eventType || 'event').trim().toLowerCase();
+  const startAt = req.body?.startAt;
+  const endAt = req.body?.endAt || null;
+  const safeType = ['event', 'deadline', 'meeting', 'reminder'].includes(eventType) ? eventType : 'event';
+  if (!userId || !title || !startAt) return res.status(400).json({ error: 'Missing userId/title/startAt.' });
+  if (!isUuid(userId) || (courseId && !isUuid(courseId))) return res.status(400).json({ error: 'Invalid UUID payload.' });
+  try {
+    const { data, error } = await supabase
+      .from('lms_calendar_events')
+      .insert({
+        owner_id: userId,
+        course_id: courseId,
+        title,
+        description,
+        event_type: safeType,
+        start_at: startAt,
+        end_at: endAt,
+      })
+      .select('id,owner_id,course_id,title,description,event_type,start_at,end_at,created_at')
+      .single();
+    if (error) throw error;
+    await logLmsAudit({ actorId: userId, action: 'calendar.create', entityType: 'lms_calendar_event', entityId: data.id, payload: { title, eventType: safeType } });
+    return res.json({ ok: true, event: data });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not save calendar event.'));
+  }
+});
+
+app.get('/api/notifications', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const userId = String(req.query?.userId || '').trim();
+  if (!userId) return res.status(400).json({ error: 'Missing userId.' });
+  if (!isUuid(userId)) return res.status(400).json({ error: 'userId must be valid UUID.' });
+  try {
+    const { data, error } = await supabase
+      .from('lms_notifications')
+      .select('id,kind,title,body,meta,read_at,created_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(200);
+    if (error) throw error;
+    return res.json({ notifications: data || [] });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not load notifications.'));
+  }
+});
+
+app.post('/api/notifications', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const userId = String(req.body?.userId || '').trim();
+  const kind = String(req.body?.kind || 'info').trim();
+  const title = String(req.body?.title || '').trim();
+  const body = String(req.body?.body || '').trim();
+  const meta = req.body?.meta && typeof req.body.meta === 'object' ? req.body.meta : {};
+  const read = !!req.body?.read;
+  if (!userId || !title) return res.status(400).json({ error: 'Missing userId/title.' });
+  if (!isUuid(userId)) return res.status(400).json({ error: 'userId must be valid UUID.' });
+  try {
+    const { data, error } = await supabase
+      .from('lms_notifications')
+      .insert({
+        user_id: userId,
+        kind,
+        title,
+        body,
+        meta,
+        read_at: read ? new Date().toISOString() : null,
+      })
+      .select('id,kind,title,body,meta,read_at,created_at')
+      .single();
+    if (error) throw error;
+    return res.json({ ok: true, notification: data });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not save notification.'));
+  }
+});
+
+app.get('/api/analytics', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const userId = String(req.query?.userId || '').trim();
+  const courseId = req.query?.courseId ? String(req.query.courseId).trim() : '';
+  if (!userId) return res.status(400).json({ error: 'Missing userId.' });
+  if (!isUuid(userId) || (courseId && !isUuid(courseId))) return res.status(400).json({ error: 'Invalid UUID payload.' });
+  try {
+    const limit = Math.max(10, Math.min(500, Number(req.query?.limit || 200)));
+    let eventsQuery = supabase
+      .from('lms_analytics_events')
+      .select('id,user_id,course_id,event_name,payload,created_at')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (courseId) {
+      await ensureCourseMember(userId, courseId);
+      eventsQuery = eventsQuery.eq('course_id', courseId);
+    } else {
+      eventsQuery = eventsQuery.eq('user_id', userId);
+    }
+    const { data: events, error } = await eventsQuery;
+    if (error) throw error;
+    const aggregates = {};
+    for (const e of events || []) {
+      aggregates[e.event_name] = (aggregates[e.event_name] || 0) + 1;
+    }
+    return res.json({ events: events || [], aggregates });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not load analytics.'));
+  }
+});
+
+app.post('/api/analytics', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const userId = String(req.body?.userId || '').trim();
+  const courseId = req.body?.courseId ? String(req.body.courseId).trim() : null;
+  const eventName = String(req.body?.eventName || '').trim();
+  const payload = req.body?.payload && typeof req.body.payload === 'object' ? req.body.payload : {};
+  if (!userId || !eventName) return res.status(400).json({ error: 'Missing userId/eventName.' });
+  if (!isUuid(userId) || (courseId && !isUuid(courseId))) return res.status(400).json({ error: 'Invalid UUID payload.' });
+  try {
+    if (courseId) await ensureCourseMember(userId, courseId);
+    const { data, error } = await supabase
+      .from('lms_analytics_events')
+      .insert({
+        user_id: userId,
+        course_id: courseId,
+        event_name: eventName,
+        payload,
+      })
+      .select('id,user_id,course_id,event_name,payload,created_at')
+      .single();
+    if (error) throw error;
+    return res.json({ ok: true, event: data });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not save analytics event.'));
+  }
+});
+
+app.get('/api/grades', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const userId = String(req.query?.userId || '').trim();
+  const courseId = String(req.query?.courseId || '').trim();
+  if (!userId || !courseId) return res.status(400).json({ error: 'Missing userId/courseId.' });
+  if (!isUuid(userId) || !isUuid(courseId)) return res.status(400).json({ error: 'Invalid UUID payload.' });
+  try {
+    const member = await ensureCourseMember(userId, courseId);
+    const { data: assignments, error: assErr } = await supabase
+      .from('lms_assignments')
+      .select('id,title,points,due_at')
+      .eq('course_id', courseId);
+    if (assErr) throw assErr;
+    const assignmentIds = (assignments || []).map((a) => a.id);
+    let submissions = [];
+    if (assignmentIds.length) {
+      let q = supabase
+        .from('lms_submissions')
+        .select('id,assignment_id,student_id,attempt_no,grade,status,feedback,graded_at,submitted_at')
+        .in('assignment_id', assignmentIds);
+      if (member.role === 'student' || member.role === 'observer') q = q.eq('student_id', userId);
+      const { data: subRows, error: subErr } = await q;
+      if (subErr) throw subErr;
+      submissions = subRows || [];
+    }
+    return res.json({ assignments: assignments || [], submissions });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not load grades.'));
+  }
+});
+
+app.post('/api/grades', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const graderId = String(req.body?.graderId || '').trim();
+  const submissionId = String(req.body?.submissionId || '').trim();
+  const grade = Number(req.body?.grade);
+  const feedback = String(req.body?.feedback || '').trim();
+  if (!graderId || !submissionId || Number.isNaN(grade)) return res.status(400).json({ error: 'Missing graderId/submissionId/grade.' });
+  if (!isUuid(graderId) || !isUuid(submissionId)) return res.status(400).json({ error: 'Invalid UUID payload.' });
+  try {
+    const { data: subRows, error: subErr } = await supabase
+      .from('lms_submissions')
+      .select('id,assignment_id')
+      .eq('id', submissionId)
+      .limit(1);
+    if (subErr) throw subErr;
+    const submission = subRows?.[0];
+    if (!submission) return res.status(404).json({ error: 'Submission not found.' });
+    const { data: assRows, error: assErr } = await supabase
+      .from('lms_assignments')
+      .select('course_id')
+      .eq('id', submission.assignment_id)
+      .limit(1);
+    if (assErr) throw assErr;
+    const courseId = assRows?.[0]?.course_id;
+    if (!courseId) return res.status(404).json({ error: 'Assignment not found.' });
+    const member = await ensureCourseMember(graderId, courseId);
+    if (member.role !== 'teacher' && member.role !== 'ta') return res.status(403).json({ error: 'Only teacher/TA can grade.' });
+    const { data, error } = await supabase
+      .from('lms_submissions')
+      .update({
+        grade,
+        feedback,
+        status: 'graded',
+        graded_by: graderId,
+        graded_at: new Date().toISOString(),
+      })
+      .eq('id', submissionId)
+      .select('id,assignment_id,student_id,attempt_no,grade,status,feedback,graded_by,graded_at')
+      .single();
+    if (error) throw error;
+    try {
+      await supabase.from('lms_notifications').insert({
+        user_id: data.student_id,
+        kind: 'grade',
+        title: 'New grade posted',
+        body: 'A submission grade has been updated.',
+        meta: { submissionId, grade },
+      });
+    } catch {
+      // non-blocking notifications
+    }
+    await logLmsAudit({ actorId: graderId, action: 'grade.update', entityType: 'lms_submission', entityId: data.id, payload: { grade } });
+    return res.json({ ok: true, submission: data });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not save grade.'));
+  }
+});
+
 app.get('/api/teacher/dashboard', async (req, res) => {
   if (!requireSupabase(res)) return;
   const teacherId = String(req.query?.teacherId || '').trim();
@@ -545,14 +2083,20 @@ app.get('/api/teacher/dashboard', async (req, res) => {
 
     let submissionCount = 0;
     if (classIds.length) {
-      const { count, error } = await supabase
-        .from('assignment_submissions')
-        .select('*', { count: 'exact', head: true })
-        .in('assignment_id', (
-          (await supabase.from('teacher_assignments').select('id').in('class_id', classIds)).data || []
-        ).map((a) => a.id));
-      if (error) throw error;
-      submissionCount = count || 0;
+      const { data: teacherAssignments, error: taErr } = await supabase
+        .from('teacher_assignments')
+        .select('id')
+        .in('class_id', classIds);
+      if (taErr) throw taErr;
+      const assignmentIds = (teacherAssignments || []).map((a) => a.id).filter(Boolean);
+      if (assignmentIds.length) {
+        const { count, error } = await supabase
+          .from('assignment_submissions')
+          .select('*', { count: 'exact', head: true })
+          .in('assignment_id', assignmentIds);
+        if (error) throw error;
+        submissionCount = count || 0;
+      }
     }
 
     return res.json({
@@ -604,7 +2148,76 @@ app.post('/api/teacher/classes', async (req, res) => {
     if (error) throw error;
     return res.json({ ok: true, class: data });
   } catch (error) {
+    console.error('[teacher/classes] create failed', {
+      teacherId,
+      name,
+      code: error?.code || null,
+      message: error?.message || String(error),
+      details: error?.details || null,
+      hint: error?.hint || null,
+    });
     return res.status(500).json(formatSupabaseError(error, 'Could not create class.'));
+  }
+});
+
+app.get('/api/teacher/enrollments', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const teacherId = String(req.query?.teacherId || '').trim();
+  const classId = String(req.query?.classId || '').trim();
+  if (!teacherId || !classId) return res.status(400).json({ error: 'Missing teacherId/classId.' });
+  if (!isUuid(teacherId) || !isUuid(classId)) return res.status(400).json({ error: 'teacherId/classId must be valid UUIDs.' });
+  try {
+    await ensureTeacherOwnsClass(teacherId, classId);
+    const { data, error } = await supabase
+      .from('class_enrollments')
+      .select('student_id,status,created_at,profiles!class_enrollments_student_id_fkey(id,display_name)')
+      .eq('class_id', classId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    return res.json({
+      enrollments: (data || []).map((r) => ({
+        studentId: r.student_id,
+        status: r.status,
+        createdAt: r.created_at,
+        name: Array.isArray(r.profiles) ? r.profiles[0]?.display_name : r.profiles?.display_name || 'Student',
+      })),
+    });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not load enrollments.'));
+  }
+});
+
+app.post('/api/teacher/enrollments', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const teacherId = String(req.body?.teacherId || '').trim();
+  const classId = String(req.body?.classId || '').trim();
+  const studentId = String(req.body?.studentId || '').trim();
+  const studentName = String(req.body?.studentName || 'Student').trim();
+  const status = String(req.body?.status || 'active').trim().toLowerCase();
+  const safeStatus = ['active', 'invited', 'removed'].includes(status) ? status : 'active';
+  if (!teacherId || !classId || !studentId) return res.status(400).json({ error: 'Missing teacherId/classId/studentId.' });
+  if (!isUuid(teacherId) || !isUuid(classId) || !isUuid(studentId)) {
+    return res.status(400).json({ error: 'teacherId/classId/studentId must be valid UUIDs.' });
+  }
+  try {
+    await ensureTeacherOwnsClass(teacherId, classId);
+    await ensureProfile(studentId, studentName);
+    const { data, error } = await supabase
+      .from('class_enrollments')
+      .upsert(
+        {
+          class_id: classId,
+          student_id: studentId,
+          status: safeStatus,
+        },
+        { onConflict: 'class_id,student_id' },
+      )
+      .select('class_id,student_id,status,created_at')
+      .single();
+    if (error) throw error;
+    return res.json({ ok: true, enrollment: data });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not save enrollment.'));
   }
 });
 
@@ -790,12 +2403,21 @@ app.get('/api/teacher/progress', async (req, res) => {
   if (!isUuid(teacherId) || !isUuid(classId)) return res.status(400).json({ error: 'teacherId/classId must be valid UUIDs.' });
   try {
     await ensureTeacherOwnsClass(teacherId, classId);
-    const [{ count: enrolled, error: enrErr }, { data: gradeRows, error: gradeErr }, { count: assignmentCount, error: assErr }] = await Promise.all([
+    const [
+      { count: enrolled, error: enrErr },
+      { data: enrollmentRows, error: enrRowsErr },
+      { data: gradeRows, error: gradeErr },
+      { count: assignmentCount, error: assErr },
+    ] = await Promise.all([
       supabase.from('class_enrollments').select('*', { count: 'exact', head: true }).eq('class_id', classId).eq('status', 'active'),
+      supabase
+        .from('class_enrollments')
+        .select('student_id,status,profiles!class_enrollments_student_id_fkey(id,display_name)')
+        .eq('class_id', classId),
       supabase.from('teacher_grades').select('student_id,score').eq('class_id', classId),
       supabase.from('teacher_assignments').select('*', { count: 'exact', head: true }).eq('class_id', classId),
     ]);
-    if (enrErr || gradeErr || assErr) throw (enrErr || gradeErr || assErr);
+    if (enrErr || enrRowsErr || gradeErr || assErr) throw (enrErr || enrRowsErr || gradeErr || assErr);
     const avgScore = (gradeRows && gradeRows.length)
       ? gradeRows.reduce((sum, r) => sum + Number(r.score || 0), 0) / gradeRows.length
       : 0;
@@ -805,6 +2427,11 @@ app.get('/api/teacher/progress', async (req, res) => {
         assignments: assignmentCount || 0,
         gradedEntries: gradeRows?.length || 0,
         averageScore: Number(avgScore.toFixed(2)),
+        students: (enrollmentRows || []).map((r) => ({
+          studentId: r.student_id,
+          status: r.status,
+          name: Array.isArray(r.profiles) ? r.profiles[0]?.display_name : r.profiles?.display_name || 'Student',
+        })),
       },
     });
   } catch (error) {
@@ -877,6 +2504,27 @@ ${JSON.stringify(teacherPassages)}
     return res.json({ ok: true, quiz: data });
   } catch (error) {
     return res.status(500).json(formatSupabaseError(error, 'Could not generate teacher quiz.'));
+  }
+});
+
+app.get('/api/teacher/quizzes', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const teacherId = String(req.query?.teacherId || '').trim();
+  const classId = String(req.query?.classId || '').trim();
+  if (!teacherId || !classId) return res.status(400).json({ error: 'Missing teacherId/classId.' });
+  if (!isUuid(teacherId) || !isUuid(classId)) return res.status(400).json({ error: 'teacherId/classId must be valid UUIDs.' });
+  try {
+    await ensureTeacherOwnsClass(teacherId, classId);
+    const { data, error } = await supabase
+      .from('teacher_generated_quizzes')
+      .select('id,title,difficulty,question_count,created_at,payload')
+      .eq('class_id', classId)
+      .eq('teacher_id', teacherId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    return res.json({ quizzes: data || [] });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not load teacher quizzes.'));
   }
 });
 

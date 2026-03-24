@@ -34,7 +34,7 @@ try {
   console.warn('[Student Assistant] PDF.js worker URL could not be set:', e);
 }
 
-const tabs = ['Ingest', 'Flashcards', 'Notebook', 'Concept Map', 'Tasks', 'Quizzes', 'Chat', 'Presentations', 'Academics', 'AI Tutor'];
+const tabs = ['Ingest', 'LMS', 'Flashcards', 'Notebook', 'Concept Map', 'Tasks', 'Quizzes', 'Chat', 'Presentations', 'Academics', 'AI Tutor'];
 
 /** Local-only PDF backup (before sign-in). Cleared after successful sync to Supabase. */
 const LOCAL_PDFS_KEY = 'sa_account_pdfs_v1';
@@ -300,6 +300,93 @@ async function saveNotebookOutputToLibrary({ studentId, sourceNames, outputType,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ studentId, sourceNames, outputType, output }),
   }, 20000);
+}
+
+async function saveFlashcardsToLibrary({ studentId, sourceName, cards }) {
+  if (!studentId || !Array.isArray(cards) || !cards.length) return;
+  await fetchWithTimeout('/api/library/flashcards', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ studentId, sourceName, cards }),
+  }, 25000);
+}
+
+async function saveSectionsToLibrary({ studentId, sourceName, sections }) {
+  if (!studentId || !sourceName || !Array.isArray(sections) || !sections.length) return;
+  await fetchWithTimeout('/api/library/sections', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ studentId, sourceName, sections }),
+  }, 25000);
+}
+
+async function saveQuizToLibrary({ studentId, sourceName, mode, difficulty, result }) {
+  if (!studentId || !result?.questions?.length) return;
+  await fetchWithTimeout('/api/library/quiz', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ studentId, sourceName, mode, difficulty, result }),
+  }, 25000);
+}
+
+async function savePresentationToLibrary({ studentId, title, slides, references, sourceNames }) {
+  if (!studentId || !Array.isArray(slides) || !slides.length) return;
+  await fetchWithTimeout('/api/library/presentation', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ studentId, title, slides, references, sourceNames }),
+  }, 25000);
+}
+
+async function saveGradeToLibrary({ studentId, subject, score, weight }) {
+  if (!studentId) return null;
+  const resp = await fetchWithTimeout('/api/library/grade', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ studentId, subject, score, weight }),
+  }, 15000);
+  if (!resp.ok) throw new Error('Could not save grade.');
+  return await resp.json();
+}
+
+async function saveSimulationToLibrary({ studentId, target, requiredFinal, finalWeight }) {
+  if (!studentId) return null;
+  const resp = await fetchWithTimeout('/api/library/simulation', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ studentId, target, requiredFinal, finalWeight }),
+  }, 15000);
+  if (!resp.ok) throw new Error('Could not save simulation.');
+  return await resp.json();
+}
+
+async function saveAcademicAiOutputToLibrary({ studentId, outputType, payload }) {
+  if (!studentId) return;
+  await fetchWithTimeout('/api/library/academic-ai', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ studentId, outputType, payload }),
+  }, 15000);
+}
+
+async function saveChatMessageToLibrary({ studentId, room, content }) {
+  if (!studentId || !content?.trim()) return null;
+  const resp = await fetchWithTimeout('/api/library/chat-message', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ studentId, room, content }),
+  }, 15000);
+  if (!resp.ok) throw new Error('Could not save chat message.');
+  return await resp.json();
+}
+
+async function saveTutorPairToLibrary({ studentId, prompt, reply }) {
+  if (!studentId || !prompt?.trim() || !reply?.trim()) return;
+  await fetchWithTimeout('/api/library/tutor-message', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ studentId, prompt, reply }),
+  }, 15000);
 }
 
 async function loadLibrary(studentId) {
@@ -591,6 +678,25 @@ export function StudentApp() {
         if (!mounted) return;
         const dbChunks = Array.isArray(data?.pdfs) ? data.pdfs.map(mapLibraryPdfToChunk) : [];
         setChunks(dbChunks);
+        const dbSections = Array.isArray(data?.sections)
+          ? data.sections.map((s) => ({
+              ...s,
+              estado: s.estado === 'completed' ? 'completado' : s.estado === 'in_progress' ? 'en_progreso' : s.estado || 'pendiente',
+            }))
+          : [];
+        if (dbSections.length) setApartados(dbSections);
+        const dbMaps = Array.isArray(data?.maps) ? data.maps : [];
+        if (dbMaps[0]?.map) setConceptMapData(dbMaps[0].map);
+        const dbFlashcards = Array.isArray(data?.flashcards?.cards) ? data.flashcards.cards : [];
+        if (dbFlashcards.length) {
+          setCards(normalizeStudyCards(dbFlashcards.map((c) => ({ question: c.question, answer: c.answer, id: c.id }))));
+        }
+        if (Array.isArray(data?.quizzes) && data.quizzes.length) setQuizResults(data.quizzes);
+        if (Array.isArray(data?.presentations) && data.presentations.length) setPresentations(data.presentations);
+        if (Array.isArray(data?.academics?.grades)) setGrades(data.academics.grades);
+        if (Array.isArray(data?.academics?.simulations)) setSimulations(data.academics.simulations);
+        if (Array.isArray(data?.chat?.messages)) setMessages(data.chat.messages);
+        if (Array.isArray(data?.tutor?.messages)) setTutorMessages(data.tutor.messages);
       } catch {
         // Keep app usable even if DB bootstrap fails.
       }
@@ -652,6 +758,14 @@ export function StudentApp() {
     }
   }, [chunks, studentId, setNotice]);
 
+  useEffect(() => {
+    if (!studentId || !apartados.length || !chunks[0]?.name) return undefined;
+    const id = setTimeout(() => {
+      saveSectionsToLibrary({ studentId, sourceName: chunks[0].name, sections: apartados }).catch(() => {});
+    }, 900);
+    return () => clearTimeout(id);
+  }, [apartados, studentId, chunks]);
+
   const avg = useMemo(() => {
     const w = grades.reduce((s, g) => s + g.weight, 0);
     if (!w) return 0;
@@ -686,6 +800,17 @@ export function StudentApp() {
       if (aiCards.length) {
         const normalized = normalizeStudyCards(aiCards);
         setCards((prev) => (append ? [...prev, ...normalized] : normalized));
+        if (studentId) {
+          try {
+            await saveFlashcardsToLibrary({
+              studentId,
+              sourceName: chunk.name,
+              cards: normalized.map((c) => ({ question: c.question, answer: c.answer, evidence: c.evidence || '' })),
+            });
+          } catch {
+            // Non-blocking persistence.
+          }
+        }
         setLatestBatchAt(new Date().toLocaleTimeString());
         setShowAnswer(false);
         setGenerationIndeterminate(false);
@@ -701,6 +826,17 @@ export function StudentApp() {
       const fallback = fallbackCardsFromText(chunk.content);
       const normalizedFallback = normalizeStudyCards(fallback);
       setCards((prev) => (append ? [...prev, ...normalizedFallback] : normalizedFallback));
+      if (studentId) {
+        try {
+          await saveFlashcardsToLibrary({
+            studentId,
+            sourceName: chunk.name,
+            cards: normalizedFallback.map((c) => ({ question: c.question, answer: c.answer })),
+          });
+        } catch {
+          // Non-blocking persistence.
+        }
+      }
       setLatestBatchAt(new Date().toLocaleTimeString());
       setGenerationIndeterminate(false);
       setGenerationProgress(100);
@@ -716,6 +852,17 @@ export function StudentApp() {
       const fallback = fallbackCardsFromText(chunk.content);
       const normalizedFallback = normalizeStudyCards(fallback);
       setCards((prev) => (append ? [...prev, ...normalizedFallback] : normalizedFallback));
+      if (studentId) {
+        try {
+          await saveFlashcardsToLibrary({
+            studentId,
+            sourceName: chunk.name,
+            cards: normalizedFallback.map((c) => ({ question: c.question, answer: c.answer })),
+          });
+        } catch {
+          // Non-blocking persistence.
+        }
+      }
       setLatestBatchAt(new Date().toLocaleTimeString());
       setGenerationIndeterminate(false);
       setGenerationProgress(100);
@@ -817,6 +964,17 @@ export function StudentApp() {
         fechas_trabajo: [],
       }));
       setApartados(normalized);
+      if (studentId) {
+        try {
+          await saveSectionsToLibrary({
+            studentId,
+            sourceName: chunk.name,
+            sections: normalized,
+          });
+        } catch {
+          // Non-blocking persistence.
+        }
+      }
       setNotice(`Extracted ${normalized.length} main sections.`);
     } catch (error) {
       const fallback = chunk.content
@@ -833,6 +991,17 @@ export function StudentApp() {
           fechas_trabajo: [],
         }));
       setApartados(fallback);
+      if (studentId && fallback.length) {
+        try {
+          await saveSectionsToLibrary({
+            studentId,
+            sourceName: chunk.name,
+            sections: fallback,
+          });
+        } catch {
+          // Non-blocking persistence.
+        }
+      }
       setNotice(`${error?.message || 'AI unavailable'}. Built ${fallback.length} backup sections.`);
     } finally {
       setIsAnalyzingSections(false);
@@ -860,16 +1029,58 @@ export function StudentApp() {
         slides: 8,
       });
       if (generated.slides.length) {
-        setPresentations((prev) => [{ id: Date.now(), ...generated }, ...prev]);
+        const presentation = { id: Date.now(), ...generated };
+        setPresentations((prev) => [presentation, ...prev]);
+        if (studentId) {
+          try {
+            await savePresentationToLibrary({
+              studentId,
+              title: presentation.title,
+              slides: presentation.slides,
+              references: presentation.references || [],
+              sourceNames: sourceChunks.map((c) => c.name),
+            });
+          } catch {
+            // Non-blocking persistence.
+          }
+        }
         setNotice(`Presentation generated: ${slideCountLabel(generated.slides.length)}.`);
         return;
       }
       const fallback = buildFallbackPresentation(resolvedTopic, promptText, sourceChunks.map((c) => c.name));
-      setPresentations((prev) => [{ id: Date.now(), ...fallback }, ...prev]);
+      const fallbackPresentation = { id: Date.now(), ...fallback };
+      setPresentations((prev) => [fallbackPresentation, ...prev]);
+      if (studentId) {
+        try {
+          await savePresentationToLibrary({
+            studentId,
+            title: fallbackPresentation.title,
+            slides: fallbackPresentation.slides,
+            references: fallbackPresentation.references || [],
+            sourceNames: sourceChunks.map((c) => c.name),
+          });
+        } catch {
+          // Non-blocking persistence.
+        }
+      }
       setNotice(`AI returned no slides. Created backup outline (${slideCountLabel(fallback.slides.length)}).`);
     } catch (error) {
       const fallback = buildFallbackPresentation(resolvedTopic, promptText, sourceChunks.map((c) => c.name));
-      setPresentations((prev) => [{ id: Date.now(), ...fallback }, ...prev]);
+      const fallbackPresentation = { id: Date.now(), ...fallback };
+      setPresentations((prev) => [fallbackPresentation, ...prev]);
+      if (studentId) {
+        try {
+          await savePresentationToLibrary({
+            studentId,
+            title: fallbackPresentation.title,
+            slides: fallbackPresentation.slides,
+            references: fallbackPresentation.references || [],
+            sourceNames: sourceChunks.map((c) => c.name),
+          });
+        } catch {
+          // Non-blocking persistence.
+        }
+      }
       setNotice(`${error?.message || 'AI model offline'} — generated backup outline (${slideCountLabel(fallback.slides.length)}).`);
     } finally {
       setIsGeneratingPresentation(false);
@@ -959,6 +1170,19 @@ export function StudentApp() {
         sources,
       });
       setQuizResults((prev) => [result, ...prev]);
+      if (studentId) {
+        try {
+          await saveQuizToLibrary({
+            studentId,
+            sourceName: chunks[0]?.name || '',
+            mode: quizConfig.mode,
+            difficulty: quizConfig.difficulty,
+            result,
+          });
+        } catch {
+          // Non-blocking persistence.
+        }
+      }
       setNotice('Powered by Ollama: quiz generated.');
     } catch (error) {
       setNotice(`${error?.message || 'Quiz generation failed'}.`);
@@ -1138,6 +1362,9 @@ export function StudentApp() {
           }
         />
       ) : null}
+      {tab === 'LMS' ? (
+        <LmsWorkspace studentId={studentId} setNotice={setNotice} />
+      ) : null}
 
       {tab === 'Tasks' ? (
         <TasksCalendar tasks={tasks} setTasks={setTasks} studentId={studentId} session={session} setNotice={setNotice} />
@@ -1151,7 +1378,16 @@ export function StudentApp() {
           isGenerating={isGeneratingQuiz}
         />
       ) : null}
-      {tab === 'Chat' ? <Chat room={room} setRoom={setRoom} messages={messages} setMessages={setMessages} /> : null}
+      {tab === 'Chat' ? (
+        <Chat
+          room={room}
+          setRoom={setRoom}
+          messages={messages}
+          setMessages={setMessages}
+          studentId={studentId}
+          setNotice={setNotice}
+        />
+      ) : null}
       {tab === 'Presentations' ? (
         <Presentations
           presentations={presentations}
@@ -1188,6 +1424,13 @@ export function StudentApp() {
               setNotice('Powered by Ollama: generating academic recommendations...');
               try {
                 const data = await academicsAdviceWithOllama({ grades, target, finalWeight, avg });
+                if (studentId && data) {
+                  try {
+                    await saveAcademicAiOutputToLibrary({ studentId, outputType: 'advice', payload: data });
+                  } catch {
+                    // Non-blocking persistence.
+                  }
+                }
                 setNotice('Powered by Ollama: recommendations ready.');
                 return data;
               } catch (error) {
@@ -1202,6 +1445,13 @@ export function StudentApp() {
               setNotice('Powered by Ollama: estimating required final...');
               try {
                 const data = await academicsEstimateWithOllama({ target, finalWeight, avg });
+                if (studentId && data) {
+                  try {
+                    await saveAcademicAiOutputToLibrary({ studentId, outputType: 'estimate', payload: data });
+                  } catch {
+                    // Non-blocking persistence.
+                  }
+                }
                 setNotice('Powered by Ollama: estimate ready.');
                 return data;
               } catch (error) {
@@ -1210,6 +1460,14 @@ export function StudentApp() {
               } finally {
                 setIsAcademicsAiBusy(false);
               }
+            }}
+            onPersistGrade={async (grade) => {
+              if (!studentId) return null;
+              return await saveGradeToLibrary({ studentId, ...grade });
+            }}
+            onPersistSimulation={async (simulation) => {
+              if (!studentId) return null;
+              return await saveSimulationToLibrary({ studentId, ...simulation });
             }}
           />
           <Suspense fallback={<section className="panel mt-4 text-sm text-muted">Loading charts...</section>}>
@@ -1222,6 +1480,7 @@ export function StudentApp() {
           tutorMessages={tutorMessages}
           setTutorMessages={setTutorMessages}
           chunks={chunks}
+          studentId={studentId}
           isBusy={isTutorBusy}
           onNotify={setNotice}
           onAsk={async (prompt) => {
@@ -1249,6 +1508,353 @@ export function StudentApp() {
       onSelect={(item) => item.action?.()}
     />
     </>
+  );
+}
+
+function LmsWorkspace({ studentId, setNotice }) {
+  const [courses, setCourses] = useState([]);
+  const [selectedCourseId, setSelectedCourseId] = useState('');
+  const [modules, setModules] = useState([]);
+  const [assignments, setAssignments] = useState([]);
+  const [courseQuizzes, setCourseQuizzes] = useState([]);
+  const [discussions, setDiscussions] = useState([]);
+  const [threads, setThreads] = useState([]);
+  const [messages, setMessages] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [notifications, setNotifications] = useState([]);
+  const [submissionText, setSubmissionText] = useState('');
+  const [messageText, setMessageText] = useState('');
+  const [discussionText, setDiscussionText] = useState('');
+  const [newEventTitle, setNewEventTitle] = useState('');
+  const [newEventDate, setNewEventDate] = useState('');
+  const [activeAssignmentId, setActiveAssignmentId] = useState('');
+  const [activeQuizId, setActiveQuizId] = useState('');
+  const [quizScore, setQuizScore] = useState('');
+  const [activeThreadId, setActiveThreadId] = useState('');
+  const [gradeRows, setGradeRows] = useState([]);
+
+  useEffect(() => {
+    if (!studentId) return;
+    const boot = async () => {
+      try {
+        const [coursesResp, notifResp, calendarResp] = await Promise.all([
+          fetchWithTimeout(`/api/courses?userId=${encodeURIComponent(studentId)}`),
+          fetchWithTimeout(`/api/notifications?userId=${encodeURIComponent(studentId)}`),
+          fetchWithTimeout(`/api/calendar?userId=${encodeURIComponent(studentId)}`),
+        ]);
+        const coursesData = await coursesResp.json();
+        const notifData = await notifResp.json();
+        const calendarData = await calendarResp.json();
+        setCourses(coursesData.courses || []);
+        setNotifications(notifData.notifications || []);
+        setEvents(calendarData.events || []);
+        if (!selectedCourseId && coursesData?.courses?.[0]?.id) setSelectedCourseId(coursesData.courses[0].id);
+      } catch (e) {
+        setNotice?.(e?.message || 'Could not load LMS data.');
+      }
+    };
+    boot();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [studentId]);
+
+  useEffect(() => {
+    if (!studentId || !selectedCourseId) return;
+    const loadCourseData = async () => {
+      try {
+        const [modulesResp, assignmentsResp, discussionsResp, quizzesResp, gradesResp] = await Promise.all([
+          fetchWithTimeout(`/api/modules?userId=${encodeURIComponent(studentId)}&courseId=${encodeURIComponent(selectedCourseId)}`),
+          fetchWithTimeout(`/api/assignments?userId=${encodeURIComponent(studentId)}&courseId=${encodeURIComponent(selectedCourseId)}`),
+          fetchWithTimeout(`/api/discussions?userId=${encodeURIComponent(studentId)}&courseId=${encodeURIComponent(selectedCourseId)}`),
+          fetchWithTimeout(`/api/quizzes?userId=${encodeURIComponent(studentId)}&courseId=${encodeURIComponent(selectedCourseId)}`),
+          fetchWithTimeout(`/api/grades?userId=${encodeURIComponent(studentId)}&courseId=${encodeURIComponent(selectedCourseId)}`),
+        ]);
+        const modulesData = await modulesResp.json();
+        const assignmentsData = await assignmentsResp.json();
+        const discussionsData = await discussionsResp.json();
+        const quizzesData = await quizzesResp.json();
+        const gradesData = await gradesResp.json();
+        setModules(modulesData.modules || []);
+        setAssignments(assignmentsData.assignments || []);
+        setDiscussions(discussionsData.discussions || []);
+        setCourseQuizzes(quizzesData.quizzes || []);
+        setGradeRows(gradesData.submissions || []);
+      } catch (e) {
+        setNotice?.(e?.message || 'Could not load selected course.');
+      }
+    };
+    loadCourseData();
+  }, [studentId, selectedCourseId, setNotice]);
+
+  useEffect(() => {
+    if (!studentId) return;
+    const loadMessages = async () => {
+      try {
+        const resp = await fetchWithTimeout(`/api/messages?userId=${encodeURIComponent(studentId)}`);
+        const data = await resp.json();
+        setThreads(data.threads || []);
+        setMessages(data.messages || []);
+        if (!activeThreadId && data?.threads?.[0]?.id) setActiveThreadId(data.threads[0].id);
+      } catch {
+        // Non-blocking for LMS view.
+      }
+    };
+    loadMessages();
+  }, [studentId, activeThreadId]);
+
+  if (!studentId) {
+    return <section className="panel text-sm text-muted">Sign in to use LMS workflows.</section>;
+  }
+
+  const threadMessages = messages.filter((m) => m.thread_id === activeThreadId);
+
+  return (
+    <section className="panel">
+      <h3 className="mb-3 text-lg font-semibold">LMS Workspace (Canvas-style)</h3>
+      <div className="mb-3 grid grid-cols-1 gap-2 md:grid-cols-2">
+        <select className="input" value={selectedCourseId} onChange={(e) => setSelectedCourseId(e.target.value)}>
+          <option value="">Select course</option>
+          {courses.map((c) => (
+            <option key={c.id} value={c.id}>{c.title} ({c.code})</option>
+          ))}
+        </select>
+        <input
+          className="input"
+          placeholder="Quick discussion reply"
+          value={discussionText}
+          onChange={(e) => setDiscussionText(e.target.value)}
+        />
+      </div>
+
+      <div className="mb-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <div className="rounded-xl border border-border bg-white p-3">
+          <p className="mb-2 text-sm font-semibold">Modules</p>
+          <ul className="space-y-2 text-sm">
+            {modules.length ? modules.map((m) => (
+              <li key={m.id} className="rounded border border-border bg-slate-50 px-2 py-1.5">
+                <strong>{m.title}</strong> <span className="text-xs text-muted">({(m.items || []).length} items)</span>
+              </li>
+            )) : <li className="text-muted">No modules yet.</li>}
+          </ul>
+        </div>
+        <div className="rounded-xl border border-border bg-white p-3">
+          <p className="mb-2 text-sm font-semibold">Assignments</p>
+          <select className="input mb-2" value={activeAssignmentId} onChange={(e) => setActiveAssignmentId(e.target.value)}>
+            <option value="">Select assignment to submit</option>
+            {assignments.map((a) => <option key={a.id} value={a.id}>{a.title}</option>)}
+          </select>
+          <textarea className="input min-h-20" value={submissionText} onChange={(e) => setSubmissionText(e.target.value)} placeholder="Submission text..." />
+          <button
+            className="btn-primary mt-2"
+            disabled={!activeAssignmentId || !submissionText.trim()}
+            onClick={async () => {
+              try {
+                const resp = await fetchWithTimeout('/api/submissions', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    userId: studentId,
+                    assignmentId: activeAssignmentId,
+                    submissionText,
+                  }),
+                });
+                if (!resp.ok) throw new Error('Submission failed.');
+                setSubmissionText('');
+                setNotice?.('Assignment submitted.');
+              } catch (e) {
+                setNotice?.(e?.message || 'Could not submit assignment.');
+              }
+            }}
+          >
+            Submit assignment
+          </button>
+        </div>
+      </div>
+
+      <div className="mb-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <div className="rounded-xl border border-border bg-white p-3">
+          <p className="mb-2 text-sm font-semibold">Quizzes</p>
+          <select className="input mb-2" value={activeQuizId} onChange={(e) => setActiveQuizId(e.target.value)}>
+            <option value="">Select quiz</option>
+            {courseQuizzes.map((q) => <option key={q.id} value={q.id}>{q.title}</option>)}
+          </select>
+          <input className="input mb-2" placeholder="Score (0-100)" value={quizScore} onChange={(e) => setQuizScore(e.target.value)} />
+          <button
+            className="btn-primary"
+            disabled={!activeQuizId || quizScore === ''}
+            onClick={async () => {
+              try {
+                const resp = await fetchWithTimeout('/api/quizzes', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    action: 'attempt',
+                    userId: studentId,
+                    courseId: selectedCourseId,
+                    quizId: activeQuizId,
+                    score: Number(quizScore),
+                    answers: [],
+                  }),
+                });
+                if (!resp.ok) throw new Error('Could not submit quiz attempt.');
+                setQuizScore('');
+                setNotice?.('Quiz attempt saved.');
+              } catch (e) {
+                setNotice?.(e?.message || 'Could not save quiz attempt.');
+              }
+            }}
+          >
+            Save quiz attempt
+          </button>
+          <ul className="mt-2 space-y-1 text-xs">
+            {courseQuizzes.slice(0, 8).map((q) => (
+              <li key={q.id} className="rounded border border-border bg-slate-50 px-2 py-1">
+                {q.title} ({q.difficulty})
+              </li>
+            ))}
+          </ul>
+        </div>
+        <div className="rounded-xl border border-border bg-white p-3">
+          <p className="mb-2 text-sm font-semibold">Gradebook</p>
+          <ul className="space-y-1 text-xs">
+            {gradeRows.length ? gradeRows.slice(0, 12).map((g) => (
+              <li key={g.id} className="rounded border border-border bg-slate-50 px-2 py-1">
+                Assignment: {g.assignment_id?.slice(0, 8)} - Grade: {g.grade ?? '—'} - Status: {g.status}
+              </li>
+            )) : <li className="text-muted">No grades yet.</li>}
+          </ul>
+        </div>
+      </div>
+
+      <div className="mb-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <div className="rounded-xl border border-border bg-white p-3">
+          <p className="mb-2 text-sm font-semibold">Discussions</p>
+          <ul className="space-y-2 text-sm">
+            {discussions.length ? discussions.map((d) => (
+              <li key={d.id} className="rounded border border-border bg-slate-50 px-2 py-1.5">
+                <strong>{d.title}</strong>
+                <div className="mt-1 text-xs text-muted">{(d.replies || []).length} replies</div>
+                <button
+                  className="btn-ghost mt-1"
+                  onClick={async () => {
+                    if (!discussionText.trim()) return;
+                    try {
+                      const resp = await fetchWithTimeout('/api/discussions', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          userId: studentId,
+                          courseId: selectedCourseId,
+                          discussionId: d.id,
+                          body: discussionText,
+                        }),
+                      });
+                      if (!resp.ok) throw new Error('Reply failed.');
+                      setDiscussionText('');
+                      setNotice?.('Reply posted.');
+                    } catch (e) {
+                      setNotice?.(e?.message || 'Could not post discussion reply.');
+                    }
+                  }}
+                >
+                  Reply
+                </button>
+              </li>
+            )) : <li className="text-muted">No discussions yet.</li>}
+          </ul>
+        </div>
+        <div className="rounded-xl border border-border bg-white p-3">
+          <p className="mb-2 text-sm font-semibold">Inbox</p>
+          <select className="input mb-2" value={activeThreadId} onChange={(e) => setActiveThreadId(e.target.value)}>
+            <option value="">Select thread</option>
+            {threads.map((t) => <option key={t.id} value={t.id}>{t.subject}</option>)}
+          </select>
+          <div className="max-h-36 space-y-1 overflow-auto rounded border border-border bg-slate-50 p-2 text-xs">
+            {threadMessages.length ? threadMessages.map((m) => (
+              <p key={m.id}><strong>{m.sender_id === studentId ? 'You' : 'Other'}:</strong> {m.body}</p>
+            )) : <p className="text-muted">No messages.</p>}
+          </div>
+          <input className="input mt-2" value={messageText} onChange={(e) => setMessageText(e.target.value)} placeholder="Type message..." />
+          <button
+            className="btn-primary mt-2"
+            disabled={!activeThreadId || !messageText.trim()}
+            onClick={async () => {
+              try {
+                const resp = await fetchWithTimeout('/api/messages', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    userId: studentId,
+                    threadId: activeThreadId,
+                    body: messageText,
+                  }),
+                });
+                if (!resp.ok) throw new Error('Could not send message.');
+                const data = await resp.json();
+                setMessages((prev) => [...prev, data.message]);
+                setMessageText('');
+              } catch (e) {
+                setNotice?.(e?.message || 'Could not send message.');
+              }
+            }}
+          >
+            Send
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <div className="rounded-xl border border-border bg-white p-3">
+          <p className="mb-2 text-sm font-semibold">Calendar</p>
+          <input className="input mb-2" placeholder="Event title" value={newEventTitle} onChange={(e) => setNewEventTitle(e.target.value)} />
+          <input className="input" type="datetime-local" value={newEventDate} onChange={(e) => setNewEventDate(e.target.value)} />
+          <button
+            className="btn-primary mt-2"
+            disabled={!newEventTitle.trim() || !newEventDate}
+            onClick={async () => {
+              try {
+                const resp = await fetchWithTimeout('/api/calendar', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    userId: studentId,
+                    courseId: selectedCourseId || null,
+                    title: newEventTitle,
+                    startAt: new Date(newEventDate).toISOString(),
+                    eventType: 'deadline',
+                  }),
+                });
+                if (!resp.ok) throw new Error('Could not save event.');
+                const data = await resp.json();
+                setEvents((prev) => [...prev, data.event].sort((a, b) => new Date(a.start_at).getTime() - new Date(b.start_at).getTime()));
+                setNewEventTitle('');
+                setNewEventDate('');
+              } catch (e) {
+                setNotice?.(e?.message || 'Could not save event.');
+              }
+            }}
+          >
+            Add event
+          </button>
+          <ul className="mt-2 space-y-1 text-xs">
+            {events.slice(0, 8).map((e) => (
+              <li key={e.id} className="rounded border border-border bg-slate-50 px-2 py-1">
+                {e.title} - {new Date(e.start_at).toLocaleString()}
+              </li>
+            ))}
+          </ul>
+        </div>
+        <div className="rounded-xl border border-border bg-white p-3">
+          <p className="mb-2 text-sm font-semibold">Notifications</p>
+          <ul className="space-y-1 text-xs">
+            {notifications.length ? notifications.slice(0, 12).map((n) => (
+              <li key={n.id} className="rounded border border-border bg-slate-50 px-2 py-1">
+                <strong>{n.title}</strong> - {n.kind}
+              </li>
+            )) : <li className="text-muted">No notifications.</li>}
+          </ul>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -1364,7 +1970,7 @@ function Quizzes({ config, setConfig, onGenerate, results, isGenerating }) {
   );
 }
 
-function Chat({ room, setRoom, messages, setMessages }) {
+function Chat({ room, setRoom, messages, setMessages, studentId, setNotice }) {
   const [text, setText] = useState('');
   const rooms = ['global', 'private', 'class-group'];
   const roomMessages = messages.filter((m) => m.room === room);
@@ -1374,7 +1980,30 @@ function Chat({ room, setRoom, messages, setMessages }) {
       <div className="mb-3 flex flex-wrap gap-2">
         <select className="input" value={room} onChange={(e) => setRoom(e.target.value)}>{rooms.map((r) => <option key={r}>{r}</option>)}</select>
         <input className="input" value={text} onChange={(e) => setText(e.target.value)} placeholder="Type message..." />
-        <button className="btn-primary" onClick={() => { if (!text.trim()) return; setMessages((p) => [...p, { id: Date.now(), room, text, sender: 'You' }]); setText(''); }}>Send</button>
+        <button
+          className="btn-primary"
+          onClick={async () => {
+            const trimmed = text.trim();
+            if (!trimmed) return;
+            const localMessage = { id: Date.now(), room, text: trimmed, sender: 'You' };
+            setMessages((p) => [...p, localMessage]);
+            setText('');
+            if (studentId) {
+              try {
+                const data = await saveChatMessageToLibrary({ studentId, room, content: trimmed });
+                if (data?.message?.id) {
+                  setMessages((prev) =>
+                    prev.map((m) => (m.id === localMessage.id ? { ...m, id: data.message.id } : m)),
+                  );
+                }
+              } catch {
+                setNotice?.('Message sent locally, but failed to persist chat history.');
+              }
+            }
+          }}
+        >
+          Send
+        </button>
       </div>
       <ul className="space-y-2">{roomMessages.map((m) => <li key={m.id} className="rounded-lg border border-border bg-white px-3 py-2 text-sm"><b>{m.sender}:</b> {m.text}</li>)}</ul>
     </section>
@@ -1734,6 +2363,8 @@ function Academics({
   onAiAdvice,
   onAiEstimate,
   isBusy,
+  onPersistGrade,
+  onPersistSimulation,
 }) {
   const [subject, setSubject] = useState('Math');
   const [score, setScore] = useState(85);
@@ -1742,10 +2373,42 @@ function Academics({
   const [finalWeight, setFinalWeight] = useState(0.5);
   const [projectedFinal, setProjectedFinal] = useState(75);
   const [advice, setAdvice] = useState(null);
-  const add = () => setGrades([{ id: Date.now(), subject, score: Number(score), weight: Number(weight) }, ...grades]);
-  const simulate = () => {
+  const add = async () => {
+    const newGrade = { id: Date.now(), subject, score: Number(score), weight: Number(weight) };
+    setGrades([newGrade, ...grades]);
+    if (onPersistGrade) {
+      try {
+        const data = await onPersistGrade({
+          subject: newGrade.subject,
+          score: newGrade.score,
+          weight: newGrade.weight,
+        });
+        if (data?.grade?.id) {
+          setGrades((prev) => prev.map((g) => (g.id === newGrade.id ? { ...g, id: data.grade.id } : g)));
+        }
+      } catch {
+        // Keep local state if network persistence fails.
+      }
+    }
+  };
+  const simulate = async () => {
     const req = finalWeight <= 0 ? 0 : Math.max(0, Math.min(100, (target - avg * (1 - finalWeight)) / finalWeight));
-    setSimulations([{ id: Date.now(), req, target }, ...simulations]);
+    const row = { id: Date.now(), req, target };
+    setSimulations([row, ...simulations]);
+    if (onPersistSimulation) {
+      try {
+        const data = await onPersistSimulation({
+          target: row.target,
+          requiredFinal: row.req,
+          finalWeight: Number(finalWeight || 0),
+        });
+        if (data?.simulation?.id) {
+          setSimulations((prev) => prev.map((s) => (s.id === row.id ? { ...s, id: data.simulation.id } : s)));
+        }
+      } catch {
+        // Keep local state if network persistence fails.
+      }
+    }
   };
   const projectedAverage = avg * (1 - finalWeight) + Number(projectedFinal || 0) * finalWeight;
   return (
@@ -1777,7 +2440,22 @@ function Academics({
           onClick={async () => {
             const data = await onAiEstimate({ target, finalWeight });
             if (data?.requiredFinal !== undefined) {
-              setSimulations((prev) => [{ id: Date.now(), req: Number(data.requiredFinal), target }, ...prev]);
+              const row = { id: Date.now(), req: Number(data.requiredFinal), target };
+              setSimulations((prev) => [row, ...prev]);
+              if (onPersistSimulation) {
+                try {
+                  const saved = await onPersistSimulation({
+                    target: row.target,
+                    requiredFinal: row.req,
+                    finalWeight: Number(finalWeight || 0),
+                  });
+                  if (saved?.simulation?.id) {
+                    setSimulations((prev) => prev.map((s) => (s.id === row.id ? { ...s, id: saved.simulation.id } : s)));
+                  }
+                } catch {
+                  // Keep local state if network persistence fails.
+                }
+              }
             }
           }}
         >
@@ -1813,7 +2491,7 @@ function Academics({
   );
 }
 
-function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, chunks = [], onNotify }) {
+function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, chunks = [], onNotify, studentId }) {
   const [prompt, setPrompt] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [voiceHint, setVoiceHint] = useState('');
@@ -1886,7 +2564,15 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, chunks = [], 
             const you = prompt;
             setPrompt('');
             const tutor = await onAsk(you);
-            setTutorMessages((prev) => [...prev, { id: Date.now(), you, tutor }]);
+            const localPair = { id: Date.now(), you, tutor };
+            setTutorMessages((prev) => [...prev, localPair]);
+            if (studentId) {
+              try {
+                await saveTutorPairToLibrary({ studentId, prompt: you, reply: tutor });
+              } catch {
+                onNotify?.('Tutor answer saved locally, but cloud persistence failed.');
+              }
+            }
             speakText(tutor);
           }}
         >
