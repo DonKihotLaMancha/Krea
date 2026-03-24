@@ -65,6 +65,8 @@ export default defineConfig(({ mode }) => {
     react(),
     VitePWA({
       registerType: 'autoUpdate',
+      // Default false → plugin throws on Workbox "file exceeds 2 MiB" warnings even if workbox.maximumFileSizeToCacheInBytes is set (some CI merges differ). Set true to warn only, not fail.
+      showMaximumFileSizeToCacheInBytesWarning: true,
       includeAssets: ['favicon.ico'],
       manifest: {
         name: 'Student Assistant',
@@ -76,8 +78,10 @@ export default defineConfig(({ mode }) => {
         icons: [],
       },
       workbox: {
-        // pdf.worker ~2.2 MiB — default Workbox precache limit is 2 MiB (build fails on Vercel without this).
+        // pdf.worker ~2.2 MiB — Workbox default precache cap is 2 MiB (explicit number for all CI runners).
         maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+        // Skip huge pdf.js worker from precache (optional); avoids size warnings and keeps SW smaller — worker still loads at runtime.
+        globIgnores: ['**/pdf.worker*.mjs', '**/pdf.worker*.js'],
         // Do not precache index.html — avoids a stale SW serving old HTML without window.__SA_ENV__ after redeploy.
         globPatterns: ['**/*.{js,mjs,css,woff2,svg,png,ico,webmanifest}'],
         cleanupOutdatedCaches: true,
