@@ -53,6 +53,8 @@ function mapLibraryPdfToChunk(p) {
     name: p.name,
     content: p.content || '',
     createdAt: p.createdAt || null,
+    storagePath: p.storagePath ?? null,
+    sizeBytes: p.sizeBytes != null ? Number(p.sizeBytes) : null,
   };
 }
 
@@ -332,21 +334,32 @@ async function saveNotebookOutputToLibrary({ studentId, sourceNames, outputType,
   }, 20000);
 }
 
-async function saveFlashcardsToLibrary({ studentId, sourceName, cards }) {
+async function saveFlashcardsToLibrary({ studentId, sourceName, sourceId, cards }) {
   if (!studentId || !Array.isArray(cards) || !cards.length) return;
   await fetchWithTimeout('/api/library/flashcards', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ studentId, sourceName, cards }),
+    body: JSON.stringify({
+      studentId,
+      sourceName,
+      ...(sourceId ? { sourceId } : {}),
+      cards,
+    }),
   }, 25000);
 }
 
-async function saveSectionsToLibrary({ studentId, sourceName, sections }) {
-  if (!studentId || !sourceName || !Array.isArray(sections) || !sections.length) return;
+async function saveSectionsToLibrary({ studentId, sourceName, sourceId, sections }) {
+  if (!studentId || !Array.isArray(sections) || !sections.length) return;
+  if (!sourceName?.trim() && !sourceId) return;
   await fetchWithTimeout('/api/library/sections', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ studentId, sourceName, sections }),
+    body: JSON.stringify({
+      studentId,
+      sourceName,
+      ...(sourceId ? { sourceId } : {}),
+      sections,
+    }),
   }, 25000);
 }
 
@@ -797,9 +810,15 @@ export function StudentApp() {
   }, [chunks, studentId, setNotice]);
 
   useEffect(() => {
-    if (!studentId || !apartados.length || !chunks[0]?.name) return undefined;
+    const head = chunks[0];
+    if (!studentId || !apartados.length || (!head?.name && !head?.sourceId)) return undefined;
     const id = setTimeout(() => {
-      saveSectionsToLibrary({ studentId, sourceName: chunks[0].name, sections: apartados }).catch(() => {});
+      saveSectionsToLibrary({
+        studentId,
+        sourceName: head.name,
+        sourceId: head.sourceId,
+        sections: apartados,
+      }).catch(() => {});
     }, 900);
     return () => clearTimeout(id);
   }, [apartados, studentId, chunks]);
@@ -843,6 +862,7 @@ export function StudentApp() {
             await saveFlashcardsToLibrary({
               studentId,
               sourceName: chunk.name,
+              sourceId: chunk.sourceId,
               cards: normalized.map((c) => ({ question: c.question, answer: c.answer, evidence: c.evidence || '' })),
             });
           } catch {
@@ -869,6 +889,7 @@ export function StudentApp() {
           await saveFlashcardsToLibrary({
             studentId,
             sourceName: chunk.name,
+            sourceId: chunk.sourceId,
             cards: normalizedFallback.map((c) => ({ question: c.question, answer: c.answer })),
           });
         } catch {
@@ -895,6 +916,7 @@ export function StudentApp() {
           await saveFlashcardsToLibrary({
             studentId,
             sourceName: chunk.name,
+            sourceId: chunk.sourceId,
             cards: normalizedFallback.map((c) => ({ question: c.question, answer: c.answer })),
           });
         } catch {
@@ -946,11 +968,12 @@ export function StudentApp() {
         return;
       }
       const chunk = { id: `${Date.now()}`, name: file.name, content: cleaned };
+      let chunkForGen = chunk;
       setChunks((prev) => [chunk, ...prev]);
       if (studentId) {
         try {
           let pdfBase64;
-          if (file.name.toLowerCase().endsWith('.pdf') && file.size <= 12_000_000) {
+          if (file.name.toLowerCase().endsWith('.pdf') && file.size <= 18_000_000) {
             try {
               pdfBase64 = await fileToBase64DataOnly(file);
             } catch {
@@ -964,18 +987,18 @@ export function StudentApp() {
             pdfBase64,
           });
           if (saved?.id) {
+            chunkForGen = {
+              ...chunk,
+              id: `db-pdf-${saved.id}`,
+              sourceId: saved.id,
+              createdAt: new Date().toISOString(),
+            };
             setChunks((prev) =>
-              prev.map((c) =>
-                c.id === chunk.id
-                  ? {
-                      ...c,
-                      id: `db-pdf-${saved.id}`,
-                      sourceId: saved.id,
-                      createdAt: new Date().toISOString(),
-                    }
-                  : c,
-              ),
+              prev.map((c) => (c.id === chunk.id ? chunkForGen : c)),
             );
+          }
+          if (saved?.storageWarning) {
+            setNotice(`Library saved. ${saved.storageWarning}`);
           }
         } catch (e) {
           setNotice(`PDF read OK, but not saved to your account: ${e?.message || 'API error'}`);
@@ -983,7 +1006,7 @@ export function StudentApp() {
       } else {
         setNotice('Saved in this browser only — sign in to keep PDFs in your account across devices.');
       }
-      await generateForChunk(chunk);
+      await generateForChunk(chunkForGen);
     } catch (error) {
       setNotice(`Upload failed: ${error?.message || 'Unknown error.'}`);
       setGenerationProgress(0);
@@ -1029,6 +1052,7 @@ export function StudentApp() {
           await saveSectionsToLibrary({
             studentId,
             sourceName: chunk.name,
+            sourceId: chunk.sourceId,
             sections: normalized,
           });
         } catch {
@@ -1056,6 +1080,7 @@ export function StudentApp() {
           await saveSectionsToLibrary({
             studentId,
             sourceName: chunk.name,
+            sourceId: chunk.sourceId,
             sections: fallback,
           });
         } catch {

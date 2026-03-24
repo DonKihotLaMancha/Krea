@@ -240,6 +240,24 @@ async function resolveSourceIdByName(studentId, sourceName) {
   return data?.[0]?.id || null;
 }
 
+/** Prefer explicit source UUID when client saved a PDF; fall back to title match. */
+async function resolveSourceIdForLibrary(studentId, sourceIdMaybe, sourceName) {
+  const raw = String(sourceIdMaybe || '').trim();
+  if (raw && isUuid(raw)) {
+    const { data, error } = await supabase
+      .from('sources')
+      .select('id')
+      .eq('id', raw)
+      .eq('owner_id', studentId)
+      .eq('source_type', 'pdf')
+      .is('deleted_at', null)
+      .limit(1);
+    if (error) throw error;
+    if (data?.[0]?.id) return data[0].id;
+  }
+  return resolveSourceIdByName(studentId, sourceName);
+}
+
 async function ensureTeacherOwnsClass(teacherId, classId) {
   const { data, error } = await supabase
     .from('teacher_classes')
@@ -733,7 +751,7 @@ app.get('/api/library', async (req, res) => {
     ] = await Promise.all([
       supabase
         .from('sources')
-        .select('id,title,created_at,source_contents(cleaned_text)')
+        .select('id,title,created_at,storage_path,size_bytes,source_contents(cleaned_text)')
         .eq('owner_id', studentId)
         .eq('source_type', 'pdf')
         .is('deleted_at', null)
@@ -757,12 +775,8 @@ app.get('/api/library', async (req, res) => {
         .eq('owner_id', studentId)
         .is('deleted_at', null)
         .order('created_at', { ascending: false })
-        .limit(40),
-      supabase
-        .from('flashcards')
-        .select('id,set_id,question,answer,created_at')
-        .order('created_at', { ascending: false })
         .limit(2000),
+      Promise.resolve({ data: [], error: null }),
       supabase
         .from('quizzes')
         .select('id,mode,difficulty,question_count,created_at')
@@ -832,12 +846,12 @@ app.get('/api/library', async (req, res) => {
         .limit(300),
     ]);
     if (
-      srcErr || mapsErr || notebookErr || flashcardSetsErr || flashcardsErr || quizErr || quizQuestionsErr ||
+      srcErr || mapsErr || notebookErr || flashcardSetsErr || quizErr || quizQuestionsErr ||
       presentationsErr || presentationSlidesErr || presentationRefsErr || gradesErr || simErr || chatRoomsErr ||
       chatMessagesErr || tutorConversationsErr || tutorMessagesErr || sectionsErr
     ) {
       throw (
-        srcErr || mapsErr || notebookErr || flashcardSetsErr || flashcardsErr || quizErr || quizQuestionsErr ||
+        srcErr || mapsErr || notebookErr || flashcardSetsErr || quizErr || quizQuestionsErr ||
         presentationsErr || presentationSlidesErr || presentationRefsErr || gradesErr || simErr || chatRoomsErr ||
         chatMessagesErr || tutorConversationsErr || tutorMessagesErr || sectionsErr
       );
@@ -850,6 +864,8 @@ app.get('/api/library', async (req, res) => {
           name: s.title,
           content: text || '',
           createdAt: s.created_at,
+          storagePath: s.storage_path || null,
+          sizeBytes: s.size_bytes != null ? Number(s.size_bytes) : null,
         };
       });
     let pdfs = sourcePdfs;
@@ -868,15 +884,26 @@ app.get('/api/library', async (req, res) => {
         createdAt: p.created_at,
       }));
     }
-    const flashcardSetIds = new Set((flashcardSets || []).map((s) => s.id));
-    const flashcards = (flashcardsRows || [])
-      .filter((c) => flashcardSetIds.has(c.set_id))
-      .map((c) => ({
-        id: c.id,
-        setId: c.set_id,
-        question: c.question,
-        answer: c.answer,
-      }));
+    const setIds = (flashcardSets || []).map((s) => s.id).filter(Boolean);
+    const scopedFlashcardRows = [];
+    if (setIds.length) {
+      const chunkSize = 80;
+      for (let i = 0; i < setIds.length; i += chunkSize) {
+        const chunk = setIds.slice(i, i + chunkSize);
+        const { data: batch, error: batchErr } = await supabase
+          .from('flashcards')
+          .select('id,set_id,question,answer,created_at')
+          .in('set_id', chunk);
+        if (batchErr) throw batchErr;
+        if (batch?.length) scopedFlashcardRows.push(...batch);
+      }
+    }
+    const flashcards = scopedFlashcardRows.map((c) => ({
+      id: c.id,
+      setId: c.set_id,
+      question: c.question,
+      answer: c.answer,
+    }));
 
     const quizIds = new Set((quizRows || []).map((q) => q.id));
     const groupedQuizQuestions = new Map();
@@ -1046,16 +1073,21 @@ app.post('/api/library/pdf', async (req, res) => {
       .single();
     if (sourceError) throw sourceError;
 
+    let storageUploaded = false;
+    let storageWarning = '';
     if (pdfBase64) {
       try {
         const buf = Buffer.from(pdfBase64, 'base64');
-        if (buf.length && buf.length <= 18 * 1024 * 1024) {
+        if (buf.length > 18 * 1024 * 1024) {
+          storageWarning = 'PDF exceeds 18 MB; text was saved but the file was not stored in Supabase Storage.';
+        } else if (buf.length) {
           const storagePath = `${studentId}/${source.id}.pdf`;
           const { error: upErr } = await supabase.storage.from('sources-private').upload(storagePath, buf, {
             contentType: 'application/pdf',
             upsert: true,
           });
           if (!upErr) {
+            storageUploaded = true;
             await supabase
               .from('sources')
               .update({
@@ -1065,10 +1097,12 @@ app.post('/api/library/pdf', async (req, res) => {
               })
               .eq('id', source.id);
           } else {
+            storageWarning = upErr.message || 'Storage upload failed (check bucket sources-private and policies).';
             console.warn('[library/pdf] storage upload:', upErr.message);
           }
         }
       } catch (e) {
+        storageWarning = e?.message || String(e);
         console.warn('[library/pdf] storage:', e?.message || e);
       }
     }
@@ -1112,8 +1146,15 @@ app.post('/api/library/pdf', async (req, res) => {
     const { error: legacyErr } = await supabase
       .from('student_pdfs')
       .insert({ student_id: studentId, name, content });
-    if (legacyErr) throw legacyErr;
-    return res.json({ ok: true, id: source?.id || null });
+    if (legacyErr) {
+      console.warn('[library/pdf] legacy student_pdfs (optional):', legacyErr.message);
+    }
+    return res.json({
+      ok: true,
+      id: source?.id || null,
+      storageUploaded,
+      storageWarning: storageWarning || undefined,
+    });
   } catch (error) {
     return res.status(500).json(formatSupabaseError(error, 'Could not save PDF.'));
   }
@@ -1262,12 +1303,15 @@ app.post('/api/library/flashcards', async (req, res) => {
   if (!requireSupabase(res)) return;
   const studentId = String(req.body?.studentId || '').trim();
   const sourceName = String(req.body?.sourceName || '').trim();
+  const sourceIdBody = req.body?.sourceId;
   const cards = Array.isArray(req.body?.cards) ? req.body.cards : [];
   if (!studentId || !cards.length) return res.status(400).json({ error: 'Missing studentId/cards.' });
   if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
+  const hasFcSource = String(sourceName || '').trim() || (String(sourceIdBody || '').trim() && isUuid(String(sourceIdBody).trim()));
+  if (!hasFcSource) return res.status(400).json({ error: 'Missing sourceId or sourceName.' });
   try {
     await ensureProfile(studentId);
-    const sourceId = await resolveSourceIdByName(studentId, sourceName);
+    const sourceId = await resolveSourceIdForLibrary(studentId, sourceIdBody, sourceName);
     const setName = `${sourceName || 'Study Set'} - ${new Date().toLocaleDateString()}`;
     const { data: setData, error: setErr } = await supabase
       .from('flashcard_sets')
@@ -1303,12 +1347,15 @@ app.post('/api/library/sections', async (req, res) => {
   if (!requireSupabase(res)) return;
   const studentId = String(req.body?.studentId || '').trim();
   const sourceName = String(req.body?.sourceName || '').trim();
+  const sourceIdBody = req.body?.sourceId;
   const sections = Array.isArray(req.body?.sections) ? req.body.sections : [];
-  if (!studentId || !sourceName || !sections.length) return res.status(400).json({ error: 'Missing studentId/sourceName/sections.' });
+  if (!studentId || !sections.length) return res.status(400).json({ error: 'Missing studentId/sections.' });
   if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
+  const hasSource = String(sourceName || '').trim() || (String(sourceIdBody || '').trim() && isUuid(String(sourceIdBody).trim()));
+  if (!hasSource) return res.status(400).json({ error: 'Missing sourceId or sourceName.' });
   try {
     await ensureProfile(studentId);
-    let sourceId = await resolveSourceIdByName(studentId, sourceName);
+    let sourceId = await resolveSourceIdForLibrary(studentId, sourceIdBody, sourceName);
     if (!sourceId) {
       const { data: source, error: srcErr } = await supabase
         .from('sources')
