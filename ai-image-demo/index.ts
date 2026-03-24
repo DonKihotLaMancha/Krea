@@ -10,17 +10,8 @@ async function main() {
 
   const imageData = result.images[0];
   if (imageData) {
-    const buf = imageData.base64
-      ? Buffer.from(imageData.base64, 'base64')
-      : imageData.uint8Array
-        ? Buffer.from(imageData.uint8Array)
-        : null;
-    if (buf) {
-      fs.writeFileSync('output.png', buf);
-      console.log('Image saved to output.png');
-    } else {
-      console.error('No image bytes in response (expected base64 or uint8Array).');
-    }
+    fs.writeFileSync('output.png', Buffer.from(imageData.base64, 'base64'));
+    console.log('Image saved to output.png');
   }
 }
 
