@@ -8,7 +8,13 @@ const API_BASE = String(raw).replace(/\/$/, '');
  */
 export function apiUrl(path) {
   const p = path.startsWith('/') ? path : `/${path}`;
-  return API_BASE ? `${API_BASE}${p}` : p;
+  if (API_BASE) return `${API_BASE}${p}`;
+  // Local fallback: call Node on :3001 directly so API routes work in dev, preview, or static localhost runs.
+  if (typeof window !== 'undefined' && /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname)) {
+    const port = import.meta.env.VITE_API_PORT || '3001';
+    return `${window.location.protocol}//${window.location.hostname}:${port}${p}`;
+  }
+  return p;
 }
 
 /**

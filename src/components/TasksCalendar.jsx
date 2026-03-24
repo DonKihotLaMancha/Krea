@@ -33,6 +33,11 @@ function mapRow(row) {
   };
 }
 
+function isMissingKindColumnError(error) {
+  const msg = String(error?.message || '').toLowerCase();
+  return msg.includes("could not find the 'kind' column of 'tasks'") || (msg.includes('schema cache') && msg.includes('kind') && msg.includes('tasks'));
+}
+
 function loadLocalTasks() {
   try {
     const raw = localStorage.getItem(LOCAL_KEY);
@@ -78,16 +83,20 @@ export default function TasksCalendar({ tasks, setTasks, studentId, session, set
 
   const refreshFromCloud = useCallback(async () => {
     if (!studentId || !supabase) return;
-    const { data, error } = await supabase
-      .from('tasks')
-      .select('*')
-      .eq('owner_id', studentId)
-      .order('due_at', { ascending: true, nullsFirst: false });
-    if (error) {
-      setNotice?.(`Could not load tasks: ${error.message}`);
+    let result = await supabase.from('tasks').select('*').eq('owner_id', studentId).order('due_at', { ascending: true, nullsFirst: false });
+    if (result.error && isMissingKindColumnError(result.error)) {
+      // Backward compatibility: older DBs may not have tasks.kind yet.
+      result = await supabase
+        .from('tasks')
+        .select('id,title,priority,done,due_at')
+        .eq('owner_id', studentId)
+        .order('due_at', { ascending: true, nullsFirst: false });
+    }
+    if (result.error) {
+      setNotice?.(`Could not load tasks: ${result.error.message}`);
       return;
     }
-    setTasks((data || []).map(mapRow));
+    setTasks((result.data || []).map(mapRow));
   }, [studentId, setTasks, setNotice]);
 
   useEffect(() => {
@@ -228,7 +237,7 @@ export default function TasksCalendar({ tasks, setTasks, studentId, session, set
       try {
         if (editingId && isUuid(editingId)) {
           const existing = tasks.find((x) => x.id === editingId);
-          const { error } = await supabase
+          let result = await supabase
             .from('tasks')
             .update({
               title: row.title,
@@ -241,10 +250,28 @@ export default function TasksCalendar({ tasks, setTasks, studentId, session, set
             })
             .eq('id', editingId)
             .eq('owner_id', studentId);
-          if (error) throw error;
+          if (result.error && isMissingKindColumnError(result.error)) {
+            result = await supabase
+              .from('tasks')
+              .update({
+                title: row.title,
+                priority: row.priority,
+                due_at: row.due_at,
+                reminder_1h_sent: false,
+                reminder_10m_sent: false,
+                done: existing?.done ?? false,
+              })
+              .eq('id', editingId)
+              .eq('owner_id', studentId);
+          }
+          if (result.error) throw result.error;
         } else {
-          const { error } = await supabase.from('tasks').insert(row);
-          if (error) throw error;
+          let result = await supabase.from('tasks').insert(row);
+          if (result.error && isMissingKindColumnError(result.error)) {
+            const { kind: _dropKind, ...rowWithoutKind } = row;
+            result = await supabase.from('tasks').insert(rowWithoutKind);
+          }
+          if (result.error) throw result.error;
         }
         await refreshFromCloud();
       } catch (e) {

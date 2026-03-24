@@ -1,4 +1,4 @@
-import { CircleCheck, CircleX, Sparkles } from 'lucide-react';
+import { CircleCheck, CircleX, Info, Sparkles } from 'lucide-react';
 
 export default function TopbarStatus({
   title,
@@ -35,10 +35,34 @@ export default function TopbarStatus({
           <span className="inline-flex items-center gap-1 text-emerald-600">
             <CircleCheck size={14} /> AI connected
           </span>
+        ) : modelStatus.healthHint === 'missing_ollama_api_key' ? (
+          <span
+            className="inline-flex max-w-[260px] cursor-help items-center gap-1 text-amber-800 md:max-w-none"
+            title={modelStatus.healthDetail || 'Create a key at ollama.com/settings/keys and set OLLAMA_API_KEY on Render (Environment), then redeploy.'}
+          >
+            <Info size={14} /> Add OLLAMA_API_KEY on Render
+          </span>
+        ) : modelStatus.healthHint === 'render_needs_ollama_url' ? (
+          <span
+            className="inline-flex max-w-[260px] cursor-help items-center gap-1 text-amber-800 md:max-w-none"
+            title={modelStatus.healthDetail || 'Set OLLAMA_URL=https://ollama.com (or your Ollama server) in Render → Environment.'}
+          >
+            <Info size={14} /> Set OLLAMA_URL on Render
+          </span>
+        ) : modelStatus.deployHost === 'render' && !modelStatus.healthHint ? (
+          <span
+            className="inline-flex max-w-[220px] cursor-help items-center gap-1 text-amber-800 md:max-w-none"
+            title="Render does not run Ollama locally. Point OLLAMA_URL to Ollama Cloud or another reachable server, or use the app on your PC with local Ollama."
+          >
+            <Info size={14} /> No Ollama on this host
+          </span>
         ) : (
           <span
-            className="inline-flex cursor-help items-center gap-1 text-rose-600"
-            title="Start Ollama locally, pull the model (e.g. ollama pull qwen2.5:7b), and run npm run server or npm run dev:full so /api/health can reach the AI."
+            className="inline-flex max-w-[min(100%,280px)] cursor-help items-center gap-1 text-rose-600 md:max-w-none"
+            title={
+              modelStatus.healthDetail ||
+              'The UI talks to Ollama only through the Node API. Run npm run dev:full (or npm run server + npm run dev). Ollama must be running (ollama serve) on port 11434.'
+            }
           >
             <CircleX size={14} /> AI offline
           </span>

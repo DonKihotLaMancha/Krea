@@ -20,7 +20,7 @@ import SubirArchivoPanel from './components/SubirArchivoPanel';
 import TablaApartados from './components/TablaApartados';
 import NotebookWorkspace from './components/NotebookWorkspace';
 import { supabase as supabaseBrowser } from './lib/supabaseClient';
-import { enhanceFetchError } from './lib/apiBase';
+import { apiUrl, enhanceFetchError } from './lib/apiBase';
 import CommandPalette from './components/CommandPalette';
 import TasksCalendar from './components/TasksCalendar';
 const GraficasProgreso = lazy(() => import('./components/GraficasProgreso'));
@@ -244,10 +244,11 @@ async function academicsEstimateWithOllama({ target, finalWeight, avg }) {
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
+  const resolved = typeof url === 'string' && url.startsWith('/') ? apiUrl(url) : url;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    return await fetch(resolved, { ...options, signal: controller.signal });
   } catch (error) {
     if (error?.name === 'AbortError') throw new Error('Request timed out.');
     throw enhanceFetchError(error);
@@ -479,7 +480,13 @@ export function StudentApp() {
   const [conceptMapData, setConceptMapData] = useState(null);
   const [isGeneratingConceptMap, setIsGeneratingConceptMap] = useState(false);
   const [isNotebookBusy, setIsNotebookBusy] = useState(false);
-  const [modelStatus, setModelStatus] = useState({ ok: false, model: 'qwen2.5:7b' });
+  const [modelStatus, setModelStatus] = useState({
+    ok: false,
+    model: 'qwen2.5:7b',
+    deployHost: null,
+    healthHint: null,
+    healthDetail: null,
+  });
   const [quizConfig, setQuizConfig] = useState({ mode: 'quiz', difficulty: 'medium', count: 10 });
   const [isGeneratingQuiz, setIsGeneratingQuiz] = useState(false);
   const [isTutorBusy, setIsTutorBusy] = useState(false);
@@ -522,11 +529,27 @@ export function StudentApp() {
     let mounted = true;
     const ping = async () => {
       try {
-        const resp = await fetch('/api/health');
-        const data = await resp.json();
-        if (mounted) setModelStatus({ ok: !!data.ok, model: data.model || 'qwen2.5:7b' });
+        const resp = await fetchWithTimeout('/api/health', {}, 60000);
+        const data = await resp.json().catch(() => ({}));
+        if (mounted) {
+          setModelStatus({
+            ok: !!data.ok,
+            model: data.model || 'qwen2.5:7b',
+            deployHost: data.deployHost || null,
+            healthHint: data.hint || null,
+            healthDetail: data.detail || null,
+          });
+        }
       } catch {
-        if (mounted) setModelStatus({ ok: false, model: 'qwen2.5:7b' });
+        if (mounted) {
+          setModelStatus({
+            ok: false,
+            model: 'qwen2.5:7b',
+            deployHost: null,
+            healthHint: null,
+            healthDetail: null,
+          });
+        }
       }
     };
     ping();

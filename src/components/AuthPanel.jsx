@@ -10,12 +10,15 @@ export default function AuthPanel({ supabase, session, loading, onAuthChange }) 
 
   if (!supabase) {
     return (
-      <div className="max-w-[280px] rounded-xl border border-amber-200 bg-amber-50/90 px-3 py-2 text-xs leading-snug text-amber-900">
-        <span className="font-medium">Supabase not configured.</span> Add{' '}
-        <code className="rounded bg-amber-100/80 px-0.5">VITE_SUPABASE_URL</code> and{' '}
+      <div className="max-w-[300px] rounded-xl border border-amber-200 bg-amber-50/90 px-3 py-2 text-xs leading-snug text-amber-900">
+        <span className="font-medium">Supabase not configured.</span> Local: add{' '}
+        <code className="rounded bg-amber-100/80 px-0.5">VITE_SUPABASE_URL</code> +{' '}
         <code className="rounded bg-amber-100/80 px-0.5">VITE_SUPABASE_ANON_KEY</code> to{' '}
-        <code className="rounded bg-amber-100/80 px-0.5">.env</code> (see <code className="rounded bg-amber-100/80 px-0.5">.env.example</code>
-        ), then restart the dev server. On Render, set these for the <strong>build</strong> and redeploy.
+        <code className="rounded bg-amber-100/80 px-0.5">.env</code> and restart{' '}
+        <code className="rounded bg-amber-100/80 px-0.5">npm run dev</code>. Render: in the Web Service →{' '}
+        <strong>Environment</strong>, set <code className="rounded bg-amber-100/80 px-0.5">SUPABASE_URL</code>,{' '}
+        <code className="rounded bg-amber-100/80 px-0.5">VITE_SUPABASE_ANON_KEY</code> (anon key), and{' '}
+        <code className="rounded bg-amber-100/80 px-0.5">SUPABASE_SERVICE_ROLE_KEY</code>, then redeploy.
       </div>
     );
   }

@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light" />
     <title>Student Assistant</title>
+    <!--SA_ENV_INJECT-->
   </head>
   <body>
     <div id="root">
@@ -20,8 +21,6 @@
         Loading Student Assistant…
       </div>
     </div>
-    <!-- Loads before the app; Node server sets window.__SA_ENV__ (see /api/env.js). -->
-    <script src="/api/env.js"></script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

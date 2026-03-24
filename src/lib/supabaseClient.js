@@ -1,10 +1,12 @@
 import { createClient } from '@supabase/supabase-js';
+import { apiUrl } from './apiBase';
 
 function fromBuildEnv() {
   const url = import.meta.env.VITE_SUPABASE_URL || import.meta.env.NEXT_PUBLIC_SUPABASE_URL || '';
   const anonKey =
     import.meta.env.VITE_SUPABASE_ANON_KEY ||
     import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+    import.meta.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
     import.meta.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY ||
     import.meta.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
     '';
@@ -35,13 +37,13 @@ export async function initSupabaseClient() {
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
-    let { url, anonKey } = fromBuildEnv();
-    if (!url || !anonKey) {
-      ({ url, anonKey } = fromWindowEnv());
-    }
+    const b = fromBuildEnv();
+    const w = fromWindowEnv();
+    let url = b.url || w.url;
+    let anonKey = b.anonKey || w.anonKey;
     if (!url || !anonKey) {
       try {
-        const r = await fetch('/api/client-env');
+        const r = await fetch(apiUrl('/api/client-env'));
         if (r.ok) {
           const j = await r.json();
           url = j.supabaseUrl || url;

@@ -13,9 +13,28 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-const OLLAMA_URL = process.env.OLLAMA_URL || 'http://127.0.0.1:11434';
+const OLLAMA_URL_RAW = String(process.env.OLLAMA_URL || '').trim();
+const OLLAMA_URL = OLLAMA_URL_RAW || 'http://127.0.0.1:11434';
+const OLLAMA_API_KEY = String(process.env.OLLAMA_API_KEY || '').trim();
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen2.5:7b';
 const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 45000);
+const OLLAMA_HEALTH_TIMEOUT_MS = Number(process.env.OLLAMA_HEALTH_TIMEOUT_MS || 20000);
+
+function ollamaHeadersJson() {
+  const h = { 'Content-Type': 'application/json' };
+  if (OLLAMA_API_KEY) h.Authorization = `Bearer ${OLLAMA_API_KEY}`;
+  return h;
+}
+
+/** GET /api/tags — avoid Content-Type on GET (some hosts are picky). */
+function ollamaHeadersForGet() {
+  if (!OLLAMA_API_KEY) return {};
+  return { Authorization: `Bearer ${OLLAMA_API_KEY}` };
+}
+
+function isOllamaCloudUrl(url) {
+  return String(url || '').toLowerCase().includes('ollama.com');
+}
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 const supabase = (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
@@ -37,6 +56,7 @@ function browserSupabasePublicEnv() {
     process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
     process.env.SUPABASE_ANON_KEY ||
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY ||
     '';
   return {
@@ -115,14 +135,89 @@ async function ensureTeacherOwnsClass(teacherId, classId) {
   return data[0];
 }
 
-app.get('/api/health', async (_req, res) => {
-  try {
-    const resp = await fetch(`${OLLAMA_URL}/api/tags`);
-    if (!resp.ok) throw new Error('Ollama unavailable');
-    return res.json({ ok: true, model: OLLAMA_MODEL });
-  } catch {
-    return res.status(503).json({ ok: false, error: 'Ollama is not running.' });
+function ollamaBasesToTry() {
+  const raw = [OLLAMA_URL];
+  // On Render, localhost has no Ollama — only try the configured URL.
+  if (!process.env.RENDER) {
+    raw.push('http://127.0.0.1:11434', 'http://localhost:11434');
   }
+  const seen = new Set();
+  const out = [];
+  for (const u of raw) {
+    const s = String(u || '').trim().replace(/\/$/, '');
+    if (!s || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+async function fetchOllamaTags(base, timeoutMs = OLLAMA_HEALTH_TIMEOUT_MS) {
+  const url = `${base}/api/tags`;
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, { signal: c.signal, headers: ollamaHeadersForGet() });
+    return { ok: resp.ok, status: resp.status };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+app.get('/api/health', async (_req, res) => {
+  const deployHost = process.env.RENDER ? 'render' : undefined;
+
+  if (process.env.RENDER && !OLLAMA_URL_RAW) {
+    return res.status(503).json({
+      ok: false,
+      error: 'OLLAMA_URL is not set on this host.',
+      detail: 'Add OLLAMA_URL (e.g. https://ollama.com) in Render → Environment and redeploy.',
+      hint: 'render_needs_ollama_url',
+      deployHost,
+      model: OLLAMA_MODEL,
+    });
+  }
+
+  if (isOllamaCloudUrl(OLLAMA_URL_RAW || OLLAMA_URL) && !OLLAMA_API_KEY) {
+    return res.status(503).json({
+      ok: false,
+      error: 'Ollama Cloud requires an API key.',
+      detail: 'Set OLLAMA_API_KEY in Render (secret) from https://ollama.com/settings/keys',
+      hint: 'missing_ollama_api_key',
+      deployHost,
+      model: OLLAMA_MODEL,
+    });
+  }
+
+  let lastErr = '';
+  for (const base of ollamaBasesToTry()) {
+    try {
+      const { ok, status } = await fetchOllamaTags(base);
+      if (ok) {
+        return res.json({
+          ok: true,
+          model: OLLAMA_MODEL,
+          ollamaBase: base,
+          deployHost,
+        });
+      }
+      lastErr = `HTTP ${status} from ${base}`;
+      if (status === 401 || status === 403) {
+        lastErr += ' — check OLLAMA_API_KEY and model access on ollama.com';
+      }
+    } catch (e) {
+      lastErr = e?.name === 'AbortError' ? `timeout ${base}` : `${base}: ${e?.message || e}`;
+    }
+  }
+  console.warn('[api/health] Ollama unreachable — is Ollama running? Is the API server running (npm run server)?', lastErr);
+  return res.status(503).json({
+    ok: false,
+    error: 'Ollama is not reachable from the API server.',
+    detail: lastErr,
+    hint: 'ollama_unreachable',
+    deployHost,
+    model: OLLAMA_MODEL,
+  });
 });
 
 /** JSON for fetch-based bootstrapping. */
@@ -1369,7 +1464,7 @@ async function callOllama(prompt) {
   try {
     const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: ollamaHeadersJson(),
       body: JSON.stringify({
         model: OLLAMA_MODEL,
         prompt,
@@ -1910,22 +2005,40 @@ setInterval(() => {
 /** Production: serve Vite build from dist/ so one process hosts API + SPA (e.g. Render free tier). */
 const distDir = path.join(__dirname, 'dist');
 if (fs.existsSync(distDir)) {
-  app.use(express.static(distDir));
+  const { supabaseUrl: _pubUrl, supabaseAnonKey: _pubKey } = browserSupabasePublicEnv();
+  if (!_pubUrl || !_pubKey) {
+    console.warn(
+      '[Supabase] Browser needs SUPABASE_URL (or VITE_SUPABASE_URL) and VITE_SUPABASE_ANON_KEY or SUPABASE_ANON_KEY on this service.',
+    );
+  }
+  // index: false so GET / does not bypass SPA handler — we must inject window.__SA_ENV__ into index.html.
+  app.use(express.static(distDir, { index: false }));
   console.log(`[static] Serving SPA from ${distDir}`);
+  const indexPath = path.join(distDir, 'index.html');
   app.use((req, res, next) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();
     if (req.path.startsWith('/api')) {
       res.status(404).json({ error: 'Not found' });
       return;
     }
-    res.sendFile(path.join(distDir, 'index.html'), (err) => {
-      if (err) next(err);
+    fs.readFile(indexPath, 'utf8', (err, html) => {
+      if (err) return next(err);
+      const { supabaseUrl, supabaseAnonKey } = browserSupabasePublicEnv();
+      const script = `<script>window.__SA_ENV__=${JSON.stringify({ supabaseUrl, supabaseAnonKey })};</script>`;
+      const out = html.includes('<!--SA_ENV_INJECT-->')
+        ? html.replace('<!--SA_ENV_INJECT-->', script)
+        : html.replace('</head>', `${script}</head>`);
+      res.type('html');
+      res.send(out);
     });
   });
 }
 
 app.listen(PORT, () => {
   console.log(`API listening on http://localhost:${PORT}`);
+  console.log(
+    `[Ollama] OLLAMA_URL=${OLLAMA_URL} model=${OLLAMA_MODEL}${OLLAMA_API_KEY ? ' (API key set)' : ''}`,
+  );
   if (SMTP_CONFIGURED) console.log('[task-email] SMTP reminders enabled (checks every 60s).');
   else console.log('[task-email] SMTP not configured — set SMTP_HOST, SMTP_USER, SMTP_PASS for email reminders.');
   processTaskEmailReminders().catch(() => {});

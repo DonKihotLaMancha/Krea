@@ -1,4 +1,9 @@
 # Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# Ollama Cloud (below). Add OLLAMA_API_KEY in Render → Environment:
+# https://ollama.com/settings/keys
+# For qwen2.5:7b, use a self-hosted Ollama URL (Render cannot run Ollama); set OLLAMA_URL + model there.
+#
 services:
   - type: web
     name: studentassistant
@@ -9,3 +14,7 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "20"
+      - key: OLLAMA_URL
+        value: https://ollama.com
+      - key: OLLAMA_MODEL
+        value: gpt-oss:120b
