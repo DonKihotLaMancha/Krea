@@ -25,6 +25,26 @@ const supabase = (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
 app.use(cors());
 app.use(express.json({ limit: '4mb' }));
 
+/** Values safe for the browser (anon key + project URL). Used by /api/client-env and /api/env.js. */
+function browserSupabasePublicEnv() {
+  const supabaseUrl =
+    process.env.VITE_SUPABASE_URL ||
+    process.env.SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    '';
+  const supabaseAnonKey =
+    process.env.VITE_SUPABASE_ANON_KEY ||
+    process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY ||
+    '';
+  return {
+    supabaseUrl: String(supabaseUrl).trim(),
+    supabaseAnonKey: String(supabaseAnonKey).trim(),
+  };
+}
+
 function requireSupabase(res) {
   if (supabase) return true;
   res.status(500).json({
@@ -105,16 +125,22 @@ app.get('/api/health', async (_req, res) => {
   }
 });
 
-/** Public anon config for the browser when Vite build had no VITE_* (e.g. Render env added after build). */
+/** JSON for fetch-based bootstrapping. */
 app.get('/api/client-env', (_req, res) => {
-  const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
-  const supabaseAnonKey =
-    process.env.VITE_SUPABASE_ANON_KEY ||
-    process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
-    process.env.SUPABASE_ANON_KEY ||
-    '';
+  const { supabaseUrl, supabaseAnonKey } = browserSupabasePublicEnv();
   res.setHeader('Cache-Control', 'no-store');
   res.json({ supabaseUrl, supabaseAnonKey });
+});
+
+/**
+ * Sync script for index.html — runs before the Vite bundle so Supabase is configured without relying on fetch
+ * (avoids SW / timing issues on hosts like Render).
+ */
+app.get('/api/env.js', (_req, res) => {
+  const { supabaseUrl, supabaseAnonKey } = browserSupabasePublicEnv();
+  res.type('application/javascript');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.send(`window.__SA_ENV__=${JSON.stringify({ supabaseUrl, supabaseAnonKey })};`);
 });
 
 app.post('/api/student', async (req, res) => {

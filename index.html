@@ -20,6 +20,8 @@
         Loading Student Assistant…
       </div>
     </div>
+    <!-- Loads before the app; Node server sets window.__SA_ENV__ (see /api/env.js). -->
+    <script src="/api/env.js"></script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
