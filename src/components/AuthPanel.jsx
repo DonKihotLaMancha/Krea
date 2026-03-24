@@ -1,12 +1,29 @@
-import { useState } from 'react';
-import { LogIn, LogOut, UserRound, UserPlus } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { ChevronDown, LogOut, UserRound } from 'lucide-react';
 
 export default function AuthPanel({ supabase, session, loading, onAuthChange }) {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState('');
-  const [open, setOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const rootRef = useRef(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointerDown = (e) => {
+      if (rootRef.current && !rootRef.current.contains(e.target)) {
+        setMenuOpen(false);
+      }
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [menuOpen]);
 
   if (!supabase) {
     return (
@@ -35,120 +52,61 @@ export default function AuthPanel({ supabase, session, loading, onAuthChange }) 
   }
 
   const user = session?.user;
-  const label = user?.email || user?.user_metadata?.full_name || user?.id?.slice(0, 8) || 'Account';
+  if (!user) {
+    return null;
+  }
+
+  const label = user.email || user.user_metadata?.full_name || user.id?.slice(0, 8) || 'Account';
+
   return (
-    <div className="relative">
+    <div className="relative" ref={rootRef}>
       <button
         type="button"
-        className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs shadow-sm ${user ? 'border-emerald-200 bg-emerald-50 text-emerald-900' : 'border-border bg-white text-text'}`}
-        onClick={() => setOpen((v) => !v)}
+        data-sa-auth="account-menu-trigger"
+        aria-expanded={menuOpen}
+        aria-haspopup="true"
+        className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs text-emerald-900 shadow-sm"
+        onClick={() => setMenuOpen((v) => !v)}
       >
-        <UserRound className="h-4 w-4" />
-        <span className="max-w-[180px] truncate">{user ? label : 'Sign in'}</span>
+        <UserRound className="h-4 w-4 shrink-0" />
+        <span className="max-w-[180px] truncate">{label}</span>
+        <ChevronDown
+          className={`h-4 w-4 shrink-0 opacity-70 transition-transform duration-200 ${menuOpen ? 'rotate-180' : ''}`}
+          aria-hidden
+        />
       </button>
-      {open ? (
-        <div className="absolute right-0 z-20 mt-2 w-[320px] rounded-xl border border-border bg-white p-3 shadow-soft">
-          {user ? (
-            <div className="space-y-2">
-              <p className="text-xs text-muted">Signed in as</p>
-              <p className="text-sm font-medium">{label}</p>
-              <button
-                type="button"
-                className="btn-ghost inline-flex w-full items-center justify-center gap-1"
-                disabled={busy}
-                onClick={async () => {
-                  setBusy(true);
-                  setLocalError('');
-                  try {
-                    await supabase.auth.signOut();
-                    onAuthChange?.(null);
-                    setOpen(false);
-                  } catch (e) {
-                    setLocalError(e?.message || 'Sign out failed.');
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
-              >
-                <LogOut className="h-4 w-4" />
-                Sign out
-              </button>
-              {localError ? <p className="text-xs text-red-700">{localError}</p> : null}
-            </div>
-          ) : (
-            <>
-              <p className="mb-2 text-sm font-medium text-slate-900">Sign in to sync your data</p>
-              <div className="grid gap-2">
-                <input
-                  className="input text-sm"
-                  type="email"
-                  autoComplete="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@university.edu"
-                />
-                <input
-                  className="input text-sm"
-                  type="password"
-                  autoComplete="current-password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                />
-              </div>
-              {localError ? <p className="mt-2 text-xs text-red-700">{localError}</p> : null}
-              <div className="mt-3 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  className="btn-primary inline-flex items-center gap-1"
-                  disabled={busy}
-                  onClick={async () => {
-                    setBusy(true);
-                    setLocalError('');
-                    try {
-                      const { data, error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
-                      if (error) throw error;
-                      onAuthChange?.(data.session);
-                      setOpen(false);
-                    } catch (e) {
-                      setLocalError(e?.message || 'Sign in failed.');
-                    } finally {
-                      setBusy(false);
-                    }
-                  }}
-                >
-                  <LogIn className="h-4 w-4" />
-                  Sign in
-                </button>
-                <button
-                  type="button"
-                  className="btn-ghost inline-flex items-center gap-1"
-                  disabled={busy}
-                  onClick={async () => {
-                    setBusy(true);
-                    setLocalError('');
-                    try {
-                      const { data, error } = await supabase.auth.signUp({ email: email.trim(), password });
-                      if (error) throw error;
-                      if (data.session) {
-                        onAuthChange?.(data.session);
-                        setOpen(false);
-                      } else {
-                        setLocalError('Check your email to confirm your account.');
-                      }
-                    } catch (e) {
-                      setLocalError(e?.message || 'Sign up failed.');
-                    } finally {
-                      setBusy(false);
-                    }
-                  }}
-                >
-                  <UserPlus className="h-4 w-4" />
-                  Create account
-                </button>
-              </div>
-            </>
-          )}
+      {menuOpen ? (
+        <div
+          className="absolute right-0 z-20 mt-2 w-[280px] rounded-xl border border-border bg-white p-3 shadow-soft"
+          role="region"
+          aria-label="Account menu"
+        >
+          <div className="space-y-2">
+            <p className="text-xs text-muted">Signed in as</p>
+            <p className="text-sm font-medium">{label}</p>
+            <button
+              type="button"
+              className="btn-ghost inline-flex w-full items-center justify-center gap-1"
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                setLocalError('');
+                try {
+                  await supabase.auth.signOut();
+                  onAuthChange?.(null);
+                  setMenuOpen(false);
+                } catch (e) {
+                  setLocalError(e?.message || 'Sign out failed.');
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              <LogOut className="h-4 w-4" />
+              Sign out
+            </button>
+            {localError ? <p className="text-xs text-red-700">{localError}</p> : null}
+          </div>
         </div>
       ) : null}
     </div>

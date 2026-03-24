@@ -14,7 +14,7 @@ export default class ErrorBoundary extends React.Component {
   }
 
   componentDidCatch(error, info) {
-    console.error('[Student Assistant]', error, info?.componentStack);
+    console.error('[Krea]', error, info?.componentStack);
   }
 
   render() {

@@ -4049,7 +4049,7 @@ async function sendTaskReminderEmail(to, { title, kind, dueAt, whenLabel }) {
   await tx.sendMail({
     from: process.env.SMTP_FROM || process.env.SMTP_USER,
     to,
-    subject: `[Student Assistant] ${whenLabel} until due: ${title}`,
+    subject: `[Krea] ${whenLabel} until due: ${title}`,
     text: `${kindLabel} "${title}" is scheduled for ${when}.\n\nThis is your ${whenLabel} reminder before the due time.`,
   });
   return true;

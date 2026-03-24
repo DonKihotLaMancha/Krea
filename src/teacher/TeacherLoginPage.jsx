@@ -2,28 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { LogIn, UserPlus } from 'lucide-react';
 import { supabase as supabaseBrowser } from '../lib/supabaseClient';
-
-/** Supabase returns terse messages; map them to actionable copy. */
-function messageForAuthError(err) {
-  const raw = String(err?.message || err || '');
-  const lower = raw.toLowerCase();
-  if (/rate limit|too many requests|over_request|over_email_send|email rate limit/.test(lower)) {
-    return 'Too many attempts (Supabase rate limit). Wait about 5–15 minutes, then try again. If you were creating an account, wait before clicking Create account again.';
-  }
-  if (/invalid login|invalid credentials|invalid_grant/.test(lower)) {
-    return 'Wrong email or password. If this email is not registered yet, use Create account instead of Sign in.';
-  }
-  if (/already registered|user already exists|email.*already been registered|already been taken/.test(lower)) {
-    return 'This email already has an account. Use Sign in, or reset your password in the Supabase dashboard.';
-  }
-  if (/email not confirmed|signup_not_completed|email_not_confirmed/.test(lower)) {
-    return 'Confirm your email (open the link Supabase sent) before signing in.';
-  }
-  if (/weak password|password.*short|least \d+ char/i.test(lower)) {
-    return raw;
-  }
-  return raw || 'Something went wrong.';
-}
+import { messageForAuthError } from '../lib/authMessages';
 
 export default function TeacherLoginPage() {
   const [email, setEmail] = useState('');
@@ -39,7 +18,7 @@ export default function TeacherLoginPage() {
           Supabase is not configured. Set your VITE Supabase environment variables.
         </p>
         <Link to="/" className="mt-6 text-sm text-white/80 underline hover:text-white">
-          Back to student app
+          Back to Krea
         </Link>
       </div>
     );
@@ -51,7 +30,7 @@ export default function TeacherLoginPage() {
         <p className="text-xs font-semibold uppercase tracking-wider text-indigo-600">Faculty</p>
         <h1 className="mt-1 text-2xl font-semibold text-slate-900">Teacher portal</h1>
         <p className="mt-2 text-sm text-slate-600">
-          Use the same account as the student app. New email? Choose <span className="font-medium text-slate-800">Create account</span> first, then sign in after you confirm your email (if your project requires it).
+          Use the same account as in Krea. New email? Choose <span className="font-medium text-slate-800">Create account</span> first, then sign in after you confirm your email (if your project requires it).
         </p>
         <div className="mt-6 grid gap-2">
           <input
@@ -138,7 +117,7 @@ export default function TeacherLoginPage() {
         </div>
       </div>
       <Link to="/" className="mt-8 text-sm text-white/80 hover:text-white">
-        ← Back to student app
+        ← Back to Krea
       </Link>
     </div>
   );

@@ -1,7 +1,7 @@
 {
   "name": "studentassistant",
   "version": "1.0.0",
-  "description": "Student Assistant web app in JavaScript",
+  "description": "Krea web app in JavaScript",
   "private": true,
   "scripts": {
     "dev": "vite",

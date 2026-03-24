@@ -69,8 +69,8 @@ export default defineConfig(({ mode }) => {
       showMaximumFileSizeToCacheInBytesWarning: true,
       includeAssets: ['favicon.ico'],
       manifest: {
-        name: 'Student Assistant',
-        short_name: 'StudentAssistant',
+        name: 'Krea',
+        short_name: 'Krea',
         theme_color: '#4f46e5',
         background_color: '#f8faff',
         display: 'standalone',
@@ -78,6 +78,9 @@ export default defineConfig(({ mode }) => {
         icons: [],
       },
       workbox: {
+        // New builds activate immediately so users are not stuck on stale cached JS (e.g. old auth UI).
+        skipWaiting: true,
+        clientsClaim: true,
         // pdf.worker ~2.2 MiB — Workbox default precache cap is 2 MiB (explicit number for all CI runners).
         maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
         // Include index.html: Workbox navigateFallback defaults to index.html; omitting it causes

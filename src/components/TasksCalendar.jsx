@@ -151,7 +151,7 @@ export default function TasksCalendar({ tasks, setTasks, studentId, session, set
         if (fireAt <= now) return;
         const id = window.setTimeout(() => {
           try {
-            new Notification('Student Assistant', {
+            new Notification('Krea', {
               body: `${label} until due: ${t.title}`,
               tag: `${t.id}-${label}`,
             });

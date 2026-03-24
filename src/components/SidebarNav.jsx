@@ -27,7 +27,7 @@ export default function SidebarNav({ tabs, tab, onChange, collapsed, onToggleCol
       <div className={`mb-4 border-b border-white/15 pb-3 ${collapsed ? 'text-center' : ''}`}>
         {!collapsed ? (
           <>
-            <h1 className="text-base font-semibold text-white">Student Assistant</h1>
+            <h1 className="text-base font-semibold text-white">Krea</h1>
             <p className="text-xs font-medium text-white/65">Dashboard</p>
           </>
         ) : (

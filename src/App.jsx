@@ -14,6 +14,7 @@ import {
 } from 'chart.js';
 import AppShell from './components/AppShell';
 import AuthPanel from './components/AuthPanel';
+import RoleLanding from './components/RoleLanding';
 import UploadCard from './components/UploadCard';
 import FlashcardDeck from './components/FlashcardDeck';
 import SubirArchivoPanel from './components/SubirArchivoPanel';
@@ -33,7 +34,7 @@ ChartJS.register(ArcElement, BarElement, Tooltip, Legend, CategoryScale, LinearS
 try {
   GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).toString();
 } catch (e) {
-  console.warn('[Student Assistant] PDF.js worker URL could not be set:', e);
+  console.warn('[Krea] PDF.js worker URL could not be set:', e);
 }
 
 const tabs = ['Ingest', 'LMS', 'Flashcards', 'Notebook', 'Concept Map', 'Tasks', 'Quizzes', 'Chat', 'Presentations', 'Academics', 'AI Tutor'];
@@ -1269,6 +1270,18 @@ export function StudentApp() {
       { data: [avg || 0, requiredFinal || 0], backgroundColor: ['#2563eb', '#10b981'] },
     ],
   }), [avg, requiredFinal]);
+
+  if (authLoading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-100 text-sm text-slate-600">
+        Checking session…
+      </div>
+    );
+  }
+
+  if (!session) {
+    return <RoleLanding onSignIn={(s) => setSession(s)} />;
+  }
 
   return (
     <>

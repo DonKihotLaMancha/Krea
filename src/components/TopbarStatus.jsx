@@ -13,7 +13,7 @@ export default function TopbarStatus({
     <header className="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-1 py-3 -mx-1 text-slate-900 md:px-2">
       <div>
         <div className="flex flex-wrap items-baseline gap-1.5 text-lg font-semibold text-slate-900">
-          <span className="font-normal text-slate-600">Student Assistant</span>
+          <span className="font-normal text-slate-600">Krea</span>
           <span className="text-slate-300" aria-hidden>
             /
           </span>

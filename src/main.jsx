@@ -30,8 +30,8 @@ queueMicrotask(() => {
       try {
         registerSW({ immediate: true });
       } catch (e) {
-        console.warn('[Student Assistant] Service worker registration:', e);
+        console.warn('[Krea] Service worker registration:', e);
       }
     })
-    .catch((e) => console.warn('[Student Assistant] PWA module skipped:', e));
+    .catch((e) => console.warn('[Krea] PWA module skipped:', e));
 });
