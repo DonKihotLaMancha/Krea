@@ -7,6 +7,7 @@ export default function TopbarStatus({
   isFocusMode,
   setIsFocusMode,
   onOpenSearch,
+  onOpenLocalLog,
 }) {
   return (
     <header className="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-1 py-3 -mx-1 text-slate-900 md:px-2">
@@ -24,12 +25,30 @@ export default function TopbarStatus({
         <button type="button" className="btn-ghost !px-3 !py-1.5 text-xs" onClick={onOpenSearch}>
           Search (Ctrl/Cmd+K)
         </button>
+        {onOpenLocalLog ? (
+          <button type="button" className="btn-ghost !px-3 !py-1.5 text-xs" onClick={onOpenLocalLog}>
+            Local log
+          </button>
+        ) : null}
         <button type="button" className="btn-ghost !px-3 !py-1.5 text-xs" onClick={() => setIsFocusMode?.((v) => !v)}>
           {isFocusMode ? 'Exit Focus' : 'Focus Mode'}
         </button>
         <span className="inline-flex items-center gap-1 rounded-full border border-canvas-primary/25 bg-[#e8f4fc] px-3 py-1 text-canvas-primary">
           <Sparkles size={14} />
           {modelStatus.model || 'Model'}
+        </span>
+        <span
+          className="inline-flex items-center gap-2"
+          title={
+            modelStatus.ollamaBase
+              ? `Ollama base: ${modelStatus.ollamaBase}${modelStatus.ollamaNgrokLocalFallback ? ' (local fallback)' : ''}`
+              : undefined
+          }
+        >
+          <span
+            className={`h-2.5 w-2.5 shrink-0 rounded-full ${modelStatus.ok ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)]' : 'bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.7)]'}`}
+            aria-hidden
+          />
         </span>
         {modelStatus.ok ? (
           <span className="inline-flex items-center gap-1 text-emerald-600">

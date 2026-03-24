@@ -21,7 +21,9 @@ import TablaApartados from './components/TablaApartados';
 import NotebookWorkspace from './components/NotebookWorkspace';
 import { supabase as supabaseBrowser } from './lib/supabaseClient';
 import { apiUrl, enhanceFetchError } from './lib/apiBase';
+import { streamTutorChat } from './lib/ollamaStream';
 import CommandPalette from './components/CommandPalette';
+import LocalLogPanel from './components/LocalLogPanel';
 import TasksCalendar from './components/TasksCalendar';
 const GraficasProgreso = lazy(() => import('./components/GraficasProgreso'));
 const SesionEstudio = lazy(() => import('./components/SesionEstudio'));
@@ -46,10 +48,24 @@ const LOCAL_PDFS_MAX_BYTES = 4_500_000;
 function mapLibraryPdfToChunk(p) {
   return {
     id: `db-pdf-${p.id}`,
+    sourceId: p.id,
     name: p.name,
     content: p.content || '',
     createdAt: p.createdAt || null,
   };
+}
+
+function fileToBase64DataOnly(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => {
+      const s = String(r.result || '');
+      const i = s.indexOf(',');
+      resolve(i >= 0 ? s.slice(i + 1) : s);
+    };
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(file);
+  });
 }
 function cleanAcademicText(raw) {
   let text = (raw || '')
@@ -156,11 +172,16 @@ async function generateConceptMapWithOllama({ text, title }) {
   };
 }
 
-async function sourceChatWithOllama({ question, sources }) {
+async function sourceChatWithOllama({ question, sources, studentId }) {
+  const payload = { question, sources };
+  if (studentId) {
+    payload.studentId = studentId;
+    if (sources.some((s) => s.sourceId)) payload.useRag = true;
+  }
   const resp = await fetchWithTimeout('/api/source-chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, sources }),
+    body: JSON.stringify(payload),
   }, AI_REQUEST_TIMEOUT_MS);
   if (!resp.ok) throw new Error('Source chat API error');
   return await resp.json();
@@ -269,14 +290,19 @@ async function upsertStudent(studentId, name = 'Student') {
   }, 12000);
 }
 
-async function savePdfToLibrary({ studentId, name, content }) {
+async function savePdfToLibrary({ studentId, name, content, pdfBase64 }) {
   if (!studentId) return null;
   const resp = await fetchWithTimeout(
     '/api/library/pdf',
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ studentId, name, content }),
+      body: JSON.stringify({
+        studentId,
+        name,
+        content,
+        ...(pdfBase64 ? { pdfBase64 } : {}),
+      }),
     },
     120_000,
   );
@@ -570,16 +596,20 @@ export function StudentApp() {
   const [conceptMapData, setConceptMapData] = useState(null);
   const [isGeneratingConceptMap, setIsGeneratingConceptMap] = useState(false);
   const [isNotebookBusy, setIsNotebookBusy] = useState(false);
+  const [localLogOpen, setLocalLogOpen] = useState(false);
   const [modelStatus, setModelStatus] = useState({
     ok: false,
     model: 'qwen2.5:7b',
     deployHost: null,
     healthHint: null,
     healthDetail: null,
+    ollamaBase: null,
+    ollamaNgrokLocalFallback: false,
   });
   const [quizConfig, setQuizConfig] = useState({ mode: 'quiz', difficulty: 'medium', count: 10 });
   const [isGeneratingQuiz, setIsGeneratingQuiz] = useState(false);
   const [isTutorBusy, setIsTutorBusy] = useState(false);
+  const [tutorStreamPreview, setTutorStreamPreview] = useState('');
   const [isAcademicsAiBusy, setIsAcademicsAiBusy] = useState(false);
 
   useEffect(() => {
@@ -628,6 +658,8 @@ export function StudentApp() {
             deployHost: data.deployHost || null,
             healthHint: data.hint || null,
             healthDetail: data.detail || null,
+            ollamaBase: data.ollamaBase || null,
+            ollamaNgrokLocalFallback: !!data.ollamaNgrokLocalFallback,
           });
         }
       } catch {
@@ -638,6 +670,8 @@ export function StudentApp() {
             deployHost: null,
             healthHint: null,
             healthDetail: null,
+            ollamaBase: null,
+            ollamaNgrokLocalFallback: false,
           });
         }
       }
@@ -914,10 +948,32 @@ export function StudentApp() {
       setChunks((prev) => [chunk, ...prev]);
       if (studentId) {
         try {
-          const saved = await savePdfToLibrary({ studentId, name: chunk.name, content: chunk.content });
+          let pdfBase64;
+          if (file.name.toLowerCase().endsWith('.pdf') && file.size <= 12_000_000) {
+            try {
+              pdfBase64 = await fileToBase64DataOnly(file);
+            } catch {
+              pdfBase64 = undefined;
+            }
+          }
+          const saved = await savePdfToLibrary({
+            studentId,
+            name: chunk.name,
+            content: chunk.content,
+            pdfBase64,
+          });
           if (saved?.id) {
             setChunks((prev) =>
-              prev.map((c) => (c.id === chunk.id ? { ...c, id: `db-pdf-${saved.id}`, createdAt: new Date().toISOString() } : c)),
+              prev.map((c) =>
+                c.id === chunk.id
+                  ? {
+                      ...c,
+                      id: `db-pdf-${saved.id}`,
+                      sourceId: saved.id,
+                      createdAt: new Date().toISOString(),
+                    }
+                  : c,
+              ),
             );
           }
         } catch (e) {
@@ -1227,6 +1283,7 @@ export function StudentApp() {
       isFocusMode={isFocusMode}
       setIsFocusMode={setIsFocusMode}
       onOpenSearch={() => setIsCommandOpen(true)}
+      onOpenLocalLog={() => setLocalLogOpen(true)}
       sidebarCollapsed={sidebarCollapsed}
       setSidebarCollapsed={setSidebarCollapsed}
     >
@@ -1325,7 +1382,7 @@ export function StudentApp() {
           }}
           onSourceChat={({ question, sources }) =>
             runNotebookAction(
-              () => sourceChatWithOllama({ question, sources }),
+              () => sourceChatWithOllama({ question, sources, studentId }),
               'Source-grounded chat',
               'source-chat',
               sources,
@@ -1485,25 +1542,41 @@ export function StudentApp() {
           chunks={chunks}
           studentId={studentId}
           isBusy={isTutorBusy}
+          streamingPreview={tutorStreamPreview}
           onNotify={setNotice}
           onAsk={async (prompt) => {
             setIsTutorBusy(true);
-            setNotice('Powered by Ollama: AI Tutor is thinking...');
+            setTutorStreamPreview('');
+            setNotice('Powered by Ollama: streaming response…');
+            const controller = new AbortController();
+            const kill = setTimeout(() => controller.abort(), 300000);
             try {
               const sources = chunks.slice(0, 5).map((c) => ({ name: c.name, content: c.content }));
-              const data = await tutorChatWithOllama({ prompt, sources });
+              const reply = await streamTutorChat({
+                prompt,
+                sources,
+                onDelta: (full) => setTutorStreamPreview(full),
+                signal: controller.signal,
+              });
               setNotice('Powered by Ollama: tutor response ready.');
-              return String(data?.reply || '').trim();
+              return reply || 'I could not respond right now. Please try again.';
             } catch (error) {
+              if (error?.name === 'AbortError') {
+                setNotice('Tutor request timed out.');
+                return 'Request timed out. Try a shorter question or check Ollama.';
+              }
               setNotice(`${error?.message || 'Tutor request failed'}.`);
               return 'I could not respond right now. Please try again.';
             } finally {
+              clearTimeout(kill);
+              setTutorStreamPreview('');
               setIsTutorBusy(false);
             }
           }}
         />
       ) : null}
     </AppShell>
+    {localLogOpen ? <LocalLogPanel onClose={() => setLocalLogOpen(false)} /> : null}
     <CommandPalette
       open={isCommandOpen}
       onClose={() => setIsCommandOpen(false)}
@@ -2494,7 +2567,7 @@ function Academics({
   );
 }
 
-function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, chunks = [], onNotify, studentId }) {
+function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, streamingPreview = '', chunks = [], onNotify, studentId }) {
   const [prompt, setPrompt] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [voiceHint, setVoiceHint] = useState('');
@@ -2557,6 +2630,16 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, chunks = [], 
       </p>
       {voiceHint ? <p className="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-950">{voiceHint}</p> : null}
       <textarea className="input min-h-24" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Ask study guidance..." />
+      {isBusy && streamingPreview ? (
+        <div
+          className="mt-2 max-h-40 overflow-y-auto rounded-lg border border-canvas-primary/30 bg-[#f0f7fc] px-3 py-2 text-sm text-slate-800 whitespace-pre-wrap"
+          aria-live="polite"
+        >
+          <span className="text-xs font-medium text-canvas-primary">Streaming…</span>
+          <br />
+          {streamingPreview}
+        </div>
+      ) : null}
       <div className="mt-2 flex flex-wrap gap-2">
         <button
           type="button"

@@ -20,6 +20,21 @@ const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen2.5:7b';
 /** Per Ollama /api/generate call. Large PDF-derived prompts often need 2–5+ minutes on local 7B models. */
 const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 120000);
 const OLLAMA_HEALTH_TIMEOUT_MS = Number(process.env.OLLAMA_HEALTH_TIMEOUT_MS || 20000);
+/** Keep model loaded in VRAM between requests (Ollama generate API). Examples: "5m", "30m", "-1". */
+const OLLAMA_KEEP_ALIVE = String(process.env.OLLAMA_KEEP_ALIVE || '5m').trim() || '5m';
+/** Ollama embeddings model (must match vector dimension in migration 0010, default 768). */
+const OLLAMA_EMBED_MODEL = String(process.env.OLLAMA_EMBED_MODEL || 'nomic-embed-text').trim() || 'nomic-embed-text';
+const OLLAMA_EMBED_DIM = Number(process.env.OLLAMA_EMBED_DIM || 768);
+const MAX_RAG_EMBED_CHUNKS = Math.min(96, Math.max(8, Number(process.env.MAX_RAG_EMBED_CHUNKS || 48)));
+const OLLAMA_EMBED_TIMEOUT_MS = Math.min(180000, Math.max(15000, Number(process.env.OLLAMA_EMBED_TIMEOUT_MS || 90000)));
+
+const OLLAMA_DEBUG_LOG_MAX = 80;
+const ollamaDebugLog = [];
+function pushOllamaLog(kind, data = {}) {
+  ollamaDebugLog.push({ t: Date.now(), kind, ...data });
+  while (ollamaDebugLog.length > OLLAMA_DEBUG_LOG_MAX) ollamaDebugLog.shift();
+}
+
 /** If true, send `ngrok-skip-browser-warning` on ngrok hosts. Some ngrok plans return HTTP 403 when this header is used (ERR_NGROK_7096). Default off — prefer 200 + HTML detection over 403. */
 const OLLAMA_NGROK_SKIP_HEADER = ['1', 'true', 'yes'].includes(
   String(process.env.OLLAMA_NGROK_SKIP_HEADER || '').toLowerCase().trim(),
@@ -313,6 +328,129 @@ function ollamaBasesToTry() {
   return out;
 }
 
+function extractSourceIdsFromSources(sources) {
+  const ids = [];
+  for (const s of sources) {
+    const sid = String(s?.sourceId || '').trim();
+    if (isUuid(sid)) ids.push(sid);
+  }
+  return [...new Set(ids)];
+}
+
+function buildSourceIdTitleMap(sources) {
+  const m = new Map();
+  for (const s of sources) {
+    const sid = String(s?.sourceId || '').trim();
+    if (isUuid(sid)) m.set(sid, String(s?.name || 'source').trim());
+  }
+  return m;
+}
+
+function parseEmbeddingVector(raw) {
+  if (raw == null) return null;
+  if (Array.isArray(raw)) return raw.map((x) => Number(x));
+  if (typeof raw === 'string') {
+    const t = raw.trim();
+    if (t.startsWith('[')) {
+      try {
+        return JSON.parse(t).map((x) => Number(x));
+      } catch {
+        return null;
+      }
+    }
+    if (t.startsWith('(') && t.endsWith(')')) {
+      return t
+        .slice(1, -1)
+        .split(',')
+        .map((x) => Number(x.trim()))
+        .filter((n) => !Number.isNaN(n));
+    }
+  }
+  return null;
+}
+
+function cosineSimilarity(a, b) {
+  if (!a?.length || !b?.length || a.length !== b.length) return 0;
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    const x = a[i];
+    const y = b[i];
+    dot += x * y;
+    na += x * x;
+    nb += y * y;
+  }
+  const denom = Math.sqrt(na) * Math.sqrt(nb);
+  return denom ? dot / denom : 0;
+}
+
+async function fetchOllamaEmbedding(text) {
+  const trimmed = String(text || '').slice(0, 8192);
+  if (!trimmed) return null;
+  const body = JSON.stringify({ model: OLLAMA_EMBED_MODEL, prompt: trimmed });
+  const bases = ollamaBasesToTry();
+  let lastErr;
+  for (const base of bases) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), OLLAMA_EMBED_TIMEOUT_MS);
+    try {
+      const resp = await fetch(`${base}/api/embeddings`, {
+        method: 'POST',
+        headers: ollamaHeadersJsonForBase(base),
+        body,
+        signal: controller.signal,
+      });
+      if (!resp.ok) {
+        lastErr = new Error(`embed ${resp.status}`);
+        continue;
+      }
+      const ct = resp.headers.get('content-type') || '';
+      const ng = String(base).toLowerCase().includes('ngrok');
+      const ngErr = resp.headers.get('ngrok-error-code') || resp.headers.get('Ngrok-Error-Code');
+      if (ng && (!/application\/json/i.test(ct) || ngErr)) {
+        lastErr = new Error('Ollama embeddings blocked by ngrok edge.');
+        continue;
+      }
+      const data = await resp.json();
+      const emb = data.embedding || data.embeddings?.[0];
+      if (Array.isArray(emb)) return emb.map((x) => Number(x));
+    } catch (e) {
+      lastErr = e?.name === 'AbortError' ? new Error('Ollama embed timed out.') : e;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  pushOllamaLog('fetchOllamaEmbedding_failed', { detail: String(lastErr?.message || lastErr).slice(0, 400) });
+  return null;
+}
+
+async function embedAndStoreChunksForSource({ ownerId, sourceId, rows }) {
+  if (!supabase || !ownerId || !sourceId || !rows?.length) return;
+  const model = OLLAMA_EMBED_MODEL;
+  const concurrency = 6;
+  const embRows = [];
+  for (let i = 0; i < rows.length; i += concurrency) {
+    const slice = rows.slice(i, i + concurrency);
+    const vectors = await Promise.all(slice.map((r) => fetchOllamaEmbedding(String(r.content || ''))));
+    for (let j = 0; j < slice.length; j += 1) {
+      const vec = vectors[j];
+      if (!Array.isArray(vec) || vec.length !== OLLAMA_EMBED_DIM) continue;
+      embRows.push({
+        chunk_id: slice[j].id,
+        source_id: sourceId,
+        owner_id: ownerId,
+        content: slice[j].content,
+        embedding: vec,
+        model,
+      });
+    }
+  }
+  if (!embRows.length) return;
+  const { error } = await supabase.from('source_embeddings_ollama').upsert(embRows, { onConflict: 'chunk_id' });
+  if (error) console.warn('[embed] source_embeddings_ollama:', error.message);
+}
+
 function analyzeOllamaTagsResponse(resp, base) {
   const ct = resp.headers.get('content-type') || '';
   const ngrokEdge = String(base).toLowerCase().includes('ngrok');
@@ -413,6 +551,119 @@ app.get('/api/health', async (_req, res) => {
     deployHost,
     model: OLLAMA_MODEL,
   });
+});
+
+/** Recent Ollama/API errors for local debugging (no secrets). */
+app.get('/api/debug/logs', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ entries: [...ollamaDebugLog].reverse() });
+});
+
+/**
+ * Pipe Ollama NDJSON stream to Express response. Returns { ok: true } or { ok: false, detail } (no headers sent).
+ */
+async function attemptOllamaStreamToExpress(res, prompt) {
+  const bases = ollamaBasesToTry();
+  let ollamaRes;
+  let lastErr;
+  for (const base of bases) {
+    try {
+      const r = await fetch(`${base}/api/generate`, {
+        method: 'POST',
+        headers: ollamaHeadersJsonForBase(base),
+        body: JSON.stringify({
+          model: OLLAMA_MODEL,
+          prompt,
+          stream: true,
+          keep_alive: OLLAMA_KEEP_ALIVE,
+        }),
+      });
+      if (!r.ok) {
+        lastErr = `HTTP ${r.status} from ${base}`;
+        pushOllamaLog('stream_http', { detail: lastErr });
+        continue;
+      }
+      const ng = String(base).toLowerCase().includes('ngrok');
+      const ngErr = r.headers.get('ngrok-error-code') || r.headers.get('Ngrok-Error-Code');
+      if (ng && ngErr) {
+        lastErr = `ngrok edge: ${ngErr}`;
+        pushOllamaLog('stream_ngrok', { detail: lastErr });
+        continue;
+      }
+      if (!r.body) {
+        lastErr = 'empty body';
+        continue;
+      }
+      ollamaRes = r;
+      break;
+    } catch (e) {
+      lastErr = e?.message || String(e);
+      pushOllamaLog('stream_fetch', { detail: String(lastErr).slice(0, 200) });
+    }
+  }
+  if (!ollamaRes?.body) {
+    return { ok: false, detail: lastErr || 'no reachable base' };
+  }
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Ollama-Stream', '1');
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+  const reader = ollamaRes.body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(value);
+    }
+  } catch (e) {
+    pushOllamaLog('stream_pipe', { detail: String(e?.message || e).slice(0, 200) });
+  } finally {
+    res.end();
+  }
+  return { ok: true };
+}
+
+/**
+ * Raw NDJSON stream proxy to Ollama /api/generate (stream: true). Client parses lines as JSON.
+ * Use for token-by-token UI instead of blocking on /api/* JSON routes.
+ */
+app.post('/api/ollama/stream', async (req, res) => {
+  const prompt = String(req.body?.prompt || '').trim();
+  if (!prompt) return res.status(400).json({ error: 'Missing prompt.' });
+  const out = await attemptOllamaStreamToExpress(res, prompt);
+  if (!out.ok) {
+    return res.status(502).json({
+      error: 'Ollama stream failed.',
+      detail: out.detail,
+    });
+  }
+});
+
+/** Same passages as /api/tutor-chat but streams plain text (no JSON wrapper). */
+app.post('/api/tutor-chat-stream', async (req, res) => {
+  const promptText = String(req.body?.prompt || '').trim();
+  const sources = Array.isArray(req.body?.sources) ? req.body.sources : [];
+  if (!promptText) return res.status(400).json({ error: 'Missing prompt.' });
+  const passages = buildPassagesFromSources(sources).slice(0, 10);
+  const prompt = `You are a university AI tutor.
+Answer concisely with practical study guidance.
+If sources are provided, ground your answer in them.
+Respond in plain text only (no JSON, no markdown code fences).
+
+QUESTION:
+${promptText}
+
+SOURCE_PASSAGES:
+${JSON.stringify(passages)}
+`;
+  const out = await attemptOllamaStreamToExpress(res, prompt);
+  if (!out.ok) {
+    return res.status(502).json({
+      error: 'Ollama stream failed.',
+      detail: out.detail,
+    });
+  }
 });
 
 /** JSON for fetch-based bootstrapping. */
@@ -782,6 +1033,7 @@ app.post('/api/library/pdf', async (req, res) => {
   const studentId = String(req.body?.studentId || '').trim();
   const name = String(req.body?.name || '').trim();
   const content = String(req.body?.content || '').trim();
+  const pdfBase64 = typeof req.body?.pdfBase64 === 'string' ? req.body.pdfBase64.trim() : '';
   if (!studentId || !name || !content) return res.status(400).json({ error: 'Missing studentId/name/content.' });
   if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
   try {
@@ -794,10 +1046,68 @@ app.post('/api/library/pdf', async (req, res) => {
       .single();
     if (sourceError) throw sourceError;
 
+    if (pdfBase64) {
+      try {
+        const buf = Buffer.from(pdfBase64, 'base64');
+        if (buf.length && buf.length <= 18 * 1024 * 1024) {
+          const storagePath = `${studentId}/${source.id}.pdf`;
+          const { error: upErr } = await supabase.storage.from('sources-private').upload(storagePath, buf, {
+            contentType: 'application/pdf',
+            upsert: true,
+          });
+          if (!upErr) {
+            await supabase
+              .from('sources')
+              .update({
+                storage_path: storagePath,
+                mime_type: 'application/pdf',
+                size_bytes: buf.length,
+              })
+              .eq('id', source.id);
+          } else {
+            console.warn('[library/pdf] storage upload:', upErr.message);
+          }
+        }
+      } catch (e) {
+        console.warn('[library/pdf] storage:', e?.message || e);
+      }
+    }
+
     const { error: contentError } = await supabase
       .from('source_contents')
       .insert({ source_id: source.id, raw_text: content, cleaned_text: content });
     if (contentError) throw contentError;
+
+    try {
+      const parts = chunkTextForStore(content);
+      const limited = parts.slice(0, MAX_RAG_EMBED_CHUNKS);
+      const chunkRows = limited.map((c, idx) => ({
+        source_id: source.id,
+        chunk_index: idx,
+        content: c,
+        token_estimate: Math.min(100000, Math.ceil(c.length / 4)),
+      }));
+      if (chunkRows.length) {
+        const { data: insertedChunks, error: chunkInsErr } = await supabase
+          .from('source_chunks')
+          .insert(chunkRows)
+          .select('id, chunk_index, content');
+        if (chunkInsErr) console.warn('[library/pdf] source_chunks:', chunkInsErr.message);
+        else if (insertedChunks?.length) {
+          try {
+            await embedAndStoreChunksForSource({
+              ownerId: studentId,
+              sourceId: source.id,
+              rows: insertedChunks,
+            });
+          } catch (e) {
+            console.warn('[library/pdf] embed:', e?.message || e);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[library/pdf] chunking:', e?.message || e);
+    }
 
     const { error: legacyErr } = await supabase
       .from('student_pdfs')
@@ -2846,11 +3156,51 @@ ${JSON.stringify(sourceJson)}
 app.post('/api/source-chat', async (req, res) => {
   const question = String(req.body?.question || '').trim();
   const sources = Array.isArray(req.body?.sources) ? req.body.sources : [];
+  const studentId = String(req.body?.studentId || '').trim();
+  const useRag = Boolean(req.body?.useRag);
   if (!question) return res.status(400).json({ error: 'Missing question.' });
   if (!sources.length) return res.status(400).json({ error: 'Missing sources.' });
 
   const passages = buildPassagesFromSources(sources);
-  const ranked = rankPassages(question, passages).slice(0, 6);
+  let ranked = null;
+  if (useRag && supabase && studentId && isUuid(studentId)) {
+    const sourceIds = extractSourceIdsFromSources(sources);
+    if (sourceIds.length) {
+      const qEmb = await fetchOllamaEmbedding(question);
+      if (Array.isArray(qEmb) && qEmb.length === OLLAMA_EMBED_DIM) {
+        const { data: rows, error: ragErr } = await supabase
+          .from('source_embeddings_ollama')
+          .select('source_id, content, embedding')
+          .eq('owner_id', studentId)
+          .in('source_id', sourceIds)
+          .limit(500);
+        if (!ragErr && rows?.length) {
+          const titleMap = buildSourceIdTitleMap(sources);
+          const scored = rows
+            .map((r) => {
+              const v = parseEmbeddingVector(r.embedding);
+              if (!v || v.length !== OLLAMA_EMBED_DIM) return null;
+              const score = cosineSimilarity(qEmb, v);
+              return {
+                source: titleMap.get(r.source_id) || 'source',
+                excerpt: String(r.content || '').slice(0, 1200),
+                page: null,
+                score,
+              };
+            })
+            .filter(Boolean)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 8);
+          if (scored.length) {
+            ranked = scored.map(({ score: _s, ...rest }) => rest);
+          }
+        }
+      }
+    }
+  }
+  if (!ranked) {
+    ranked = rankPassages(question, passages).slice(0, 6);
+  }
   const prompt = `
 You are a source-grounded academic assistant.
 Answer only using the provided PASSAGES.
@@ -3200,6 +3550,7 @@ async function callOllama(prompt, timeoutMs = OLLAMA_TIMEOUT_MS) {
     stream: false,
     format: 'json',
     options: { temperature: 0.2 },
+    keep_alive: OLLAMA_KEEP_ALIVE,
   });
   const bases = ollamaBasesToTry();
   let lastErr;
@@ -3234,6 +3585,8 @@ async function callOllama(prompt, timeoutMs = OLLAMA_TIMEOUT_MS) {
       clearTimeout(timeout);
     }
   }
+  const msg = lastErr?.message || String(lastErr || 'Ollama is not reachable.');
+  pushOllamaLog('callOllama_failed', { detail: msg.slice(0, 400) });
   throw lastErr || new Error('Ollama is not reachable.');
 }
 
@@ -3607,6 +3960,17 @@ function buildScholarReferencesFromSlides(title, slides) {
     text: `Google Scholar search ${i + 1}: ${q}`,
     url: `https://scholar.google.com/scholar?q=${encodeURIComponent(q)}`,
   }));
+}
+
+/** Split long PDF text into DB chunks for future RAG (embeddings optional). */
+function chunkTextForStore(text, maxChunk = 2000) {
+  const t = String(text || '').trim();
+  if (!t) return [];
+  const chunks = [];
+  for (let i = 0; i < t.length; i += maxChunk) {
+    chunks.push(t.slice(i, i + maxChunk));
+  }
+  return chunks;
 }
 
 function buildSourceJson(text) {

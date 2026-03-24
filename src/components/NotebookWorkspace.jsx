@@ -62,9 +62,15 @@ export default function NotebookWorkspace({
   const selectedSources = useMemo(() => {
     if (!chunks.length) return [];
     const ids = selectedChunkIds.length ? selectedChunkIds : [chunks[0].id];
+    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     return chunks
       .filter((c) => ids.includes(c.id))
-      .map((c) => ({ name: c.name, content: c.content }));
+      .map((c) => {
+        const o = { name: c.name, content: c.content };
+        const sid = c.sourceId || (String(c.id).startsWith('db-pdf-') ? c.id.slice(7) : null);
+        if (sid && uuidRe.test(sid)) o.sourceId = sid;
+        return o;
+      });
   }, [chunks, selectedChunkIds]);
 
   const noSources = !chunks.length;

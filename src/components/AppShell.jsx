@@ -13,6 +13,7 @@ export default function AppShell({
   isFocusMode,
   setIsFocusMode,
   onOpenSearch,
+  onOpenLocalLog,
   sidebarCollapsed,
   setSidebarCollapsed,
   children,
@@ -43,6 +44,7 @@ export default function AppShell({
               isFocusMode={isFocusMode}
               setIsFocusMode={setIsFocusMode}
               onOpenSearch={onOpenSearch}
+              onOpenLocalLog={onOpenLocalLog}
             />
             <div className="flex items-start justify-end">{authPanel}</div>
           </div>
