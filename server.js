@@ -42,7 +42,7 @@ const supabase = (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
   : null;
 
 app.use(cors());
-app.use(express.json({ limit: '4mb' }));
+app.use(express.json({ limit: '20mb' }));
 
 /** Values safe for the browser (anon key + project URL). Used by /api/client-env and /api/env.js. */
 function browserSupabasePublicEnv() {
@@ -101,6 +101,11 @@ async function ensureProfile(studentId, name = 'Student') {
     { onConflict: 'id' },
   );
   if (error) throw error;
+  // Keep legacy student profile row in sync for compatibility.
+  const { error: legacyStudentErr } = await supabase
+    .from('students')
+    .upsert({ id: studentId, name }, { onConflict: 'id' });
+  if (legacyStudentErr) throw legacyStudentErr;
 }
 
 async function createDefaultNotebookSession(studentId) {
@@ -289,8 +294,7 @@ app.get('/api/library', async (req, res) => {
         .limit(40),
     ]);
     if (srcErr || mapsErr || notebookErr) throw (srcErr || mapsErr || notebookErr);
-    return res.json({
-      pdfs: (sources || []).map((s) => {
+    const sourcePdfs = (sources || []).map((s) => {
         const sc = s.source_contents;
         const text = Array.isArray(sc) ? sc[0]?.cleaned_text : sc?.cleaned_text;
         return {
@@ -299,7 +303,25 @@ app.get('/api/library', async (req, res) => {
           content: text || '',
           createdAt: s.created_at,
         };
-      }),
+      });
+    let pdfs = sourcePdfs;
+    if (!pdfs.length) {
+      const { data: legacyPdfs, error: legacyErr } = await supabase
+        .from('student_pdfs')
+        .select('id,name,content,created_at')
+        .eq('student_id', studentId)
+        .order('created_at', { ascending: false })
+        .limit(1000);
+      if (legacyErr) throw legacyErr;
+      pdfs = (legacyPdfs || []).map((p) => ({
+        id: p.id,
+        name: p.name,
+        content: p.content || '',
+        createdAt: p.created_at,
+      }));
+    }
+    return res.json({
+      pdfs,
       maps: (maps || []).map((m) => ({
         title: m.title,
         id: m.id,
@@ -352,10 +374,10 @@ app.post('/api/library/pdf', async (req, res) => {
       .insert({ source_id: source.id, raw_text: content, cleaned_text: content });
     if (contentError) throw contentError;
 
-    const hasLegacyStudentPdfs = await tryTableExists('student_pdfs');
-    if (hasLegacyStudentPdfs) {
-      await supabase.from('student_pdfs').insert({ student_id: studentId, name, content });
-    }
+    const { error: legacyErr } = await supabase
+      .from('student_pdfs')
+      .insert({ student_id: studentId, name, content });
+    if (legacyErr) throw legacyErr;
     return res.json({ ok: true, id: source?.id || null });
   } catch (error) {
     return res.status(500).json(formatSupabaseError(error, 'Could not save PDF.'));

@@ -98,6 +98,14 @@ create table if not exists public.profiles (
   updated_at timestamptz not null default now()
 );
 
+-- Legacy-compatible student profile table used by some API paths.
+create table if not exists public.students (
+  id uuid primary key references public.profiles(id) on delete cascade,
+  name text not null default 'Student',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists public.sources (
   id uuid primary key default gen_random_uuid(),
   owner_id uuid not null references public.profiles(id) on delete cascade,
@@ -517,8 +525,22 @@ create table if not exists public.teacher_generated_quizzes (
   created_at timestamptz not null default now()
 );
 
+-- Legacy-compatible PDF archive table to preserve uploads across refreshes.
+create table if not exists public.student_pdfs (
+  id uuid primary key default gen_random_uuid(),
+  student_id uuid not null references public.profiles(id) on delete cascade,
+  name text not null,
+  content text not null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_students_created_at on public.students(created_at desc);
+create index if not exists idx_student_pdfs_student_created on public.student_pdfs(student_id, created_at desc);
+
 drop trigger if exists trg_profiles_updated_at on public.profiles;
 create trigger trg_profiles_updated_at before update on public.profiles for each row execute function public.set_updated_at();
+drop trigger if exists trg_students_updated_at on public.students;
+create trigger trg_students_updated_at before update on public.students for each row execute function public.set_updated_at();
 drop trigger if exists trg_sources_updated_at on public.sources;
 create trigger trg_sources_updated_at before update on public.sources for each row execute function public.set_updated_at();
 drop trigger if exists trg_source_contents_updated_at on public.source_contents;
