@@ -4,27 +4,48 @@ import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
-  const supabaseUrl = env.VITE_SUPABASE_URL || env.NEXT_PUBLIC_SUPABASE_URL || '';
+  const p = process.env;
+  // Merge file env + process.env (Vercel/CI injects SUPABASE_* at build time; loadEnv may not include them).
+  const supabaseUrl =
+    env.VITE_SUPABASE_URL ||
+    p.VITE_SUPABASE_URL ||
+    env.NEXT_PUBLIC_SUPABASE_URL ||
+    p.NEXT_PUBLIC_SUPABASE_URL ||
+    env.SUPABASE_URL ||
+    p.SUPABASE_URL ||
+    '';
   const supabaseAnonKey =
     env.VITE_SUPABASE_ANON_KEY ||
+    p.VITE_SUPABASE_ANON_KEY ||
     env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+    p.VITE_SUPABASE_PUBLISHABLE_KEY ||
     env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+    p.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
     env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY ||
+    p.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY ||
     env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    p.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    env.SUPABASE_ANON_KEY ||
+    p.SUPABASE_ANON_KEY ||
     '';
 
   return {
   plugins: [
     {
-      name: 'inject-sa-env-dev',
+      name: 'inject-sa-env',
       transformIndexHtml(html) {
-        // Production build must keep <!--SA_ENV_INJECT--> so server.js can inject runtime env on Render.
-        if (mode === 'production') return html;
         const payload = JSON.stringify({ supabaseUrl, supabaseAnonKey });
-        return html.replace(
-          '<!--SA_ENV_INJECT-->',
-          `<script>window.__SA_ENV__=${payload};</script>`,
-        );
+        const script = `<script>window.__SA_ENV__=${payload};</script>`;
+        // Static hosts (e.g. Vercel): inject at build time when env is present — there is no Node server to replace the placeholder.
+        if (supabaseUrl && supabaseAnonKey) {
+          return html.replace('<!--SA_ENV_INJECT-->', script);
+        }
+        // Dev: always inject (may be empty) so behavior is visible.
+        if (mode !== 'production') {
+          return html.replace('<!--SA_ENV_INJECT-->', script);
+        }
+        // Production without build-time keys: keep placeholder for Render (server.js injects at runtime).
+        return html;
       },
     },
     react(),

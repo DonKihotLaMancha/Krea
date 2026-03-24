@@ -15,10 +15,13 @@ export default function AuthPanel({ supabase, session, loading, onAuthChange }) 
         <code className="rounded bg-amber-100/80 px-0.5">VITE_SUPABASE_URL</code> +{' '}
         <code className="rounded bg-amber-100/80 px-0.5">VITE_SUPABASE_ANON_KEY</code> to{' '}
         <code className="rounded bg-amber-100/80 px-0.5">.env</code> and restart{' '}
-        <code className="rounded bg-amber-100/80 px-0.5">npm run dev</code>. Render: in the Web Service →{' '}
-        <strong>Environment</strong>, set <code className="rounded bg-amber-100/80 px-0.5">SUPABASE_URL</code>,{' '}
-        <code className="rounded bg-amber-100/80 px-0.5">VITE_SUPABASE_ANON_KEY</code> (anon key), and{' '}
-        <code className="rounded bg-amber-100/80 px-0.5">SUPABASE_SERVICE_ROLE_KEY</code>, then redeploy.
+        <code className="rounded bg-amber-100/80 px-0.5">npm run dev</code>. Vercel: Project → Settings →{' '}
+        <strong>Environment Variables</strong> — add the same keys (or{' '}
+        <code className="rounded bg-amber-100/80 px-0.5">NEXT_PUBLIC_SUPABASE_URL</code> + publishable/anon key), enable for{' '}
+        <strong>Production</strong> and <strong>Preview</strong>, then <strong>Redeploy</strong> (build must see them). Render: Web Service →{' '}
+        <strong>Environment</strong>: <code className="rounded bg-amber-100/80 px-0.5">SUPABASE_URL</code>,{' '}
+        <code className="rounded bg-amber-100/80 px-0.5">VITE_SUPABASE_ANON_KEY</code>,{' '}
+        <code className="rounded bg-amber-100/80 px-0.5">SUPABASE_SERVICE_ROLE_KEY</code>, redeploy.
       </div>
     );
   }
