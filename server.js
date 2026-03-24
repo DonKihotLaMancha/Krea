@@ -1164,36 +1164,32 @@ app.post('/api/library/concept-map', async (req, res) => {
   if (!requireSupabase(res)) return;
   const studentId = String(req.body?.studentId || '').trim();
   const sourceName = String(req.body?.sourceName || '').trim();
+  const sourceIdBody = req.body?.sourceId;
   const title = String(req.body?.title || 'Concept Map').trim();
   const map = req.body?.map;
-  if (!studentId || !sourceName || !map) return res.status(400).json({ error: 'Missing studentId/sourceName/map.' });
+  if (!studentId || !map) return res.status(400).json({ error: 'Missing studentId/map.' });
   if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
+  const hasMapSource = String(sourceName || '').trim() || (String(sourceIdBody || '').trim() && isUuid(String(sourceIdBody).trim()));
+  if (!hasMapSource) return res.status(400).json({ error: 'Missing sourceId or sourceName.' });
   try {
     await ensureProfile(studentId);
-    let sourceId = null;
-    const { data: source } = await supabase
-      .from('sources')
-      .select('id')
-      .eq('owner_id', studentId)
-      .eq('title', sourceName)
-      .eq('source_type', 'pdf')
-      .limit(1);
-    sourceId = source?.[0]?.id || null;
-    if (!sourceId) {
+    let pdfSourceId = await resolveSourceIdForLibrary(studentId, sourceIdBody, sourceName);
+    if (!pdfSourceId) {
+      const fallbackTitle = String(sourceName || '').trim() || 'Untitled source';
       const { data: createdSource, error: createdSourceErr } = await supabase
         .from('sources')
-        .insert({ owner_id: studentId, title: sourceName, source_type: 'pdf', status: 'ready' })
+        .insert({ owner_id: studentId, title: fallbackTitle, source_type: 'pdf', status: 'ready' })
         .select('id')
         .single();
       if (createdSourceErr) throw createdSourceErr;
-      sourceId = createdSource.id;
+      pdfSourceId = createdSource.id;
     }
 
     const { data, error } = await supabase
       .from('concept_maps')
       .insert({
         owner_id: studentId,
-        source_id: sourceId,
+        source_id: pdfSourceId,
         title,
         version: 1,
       })
@@ -1228,13 +1224,13 @@ app.post('/api/library/concept-map', async (req, res) => {
     };
     const edgeRows = links
       .map((l) => {
-        const sourceId = resolveNodeId(l.source);
-        const targetId = resolveNodeId(l.target);
-        if (!sourceId || !targetId) return null;
+        const edgeSrc = resolveNodeId(l.source);
+        const edgeTgt = resolveNodeId(l.target);
+        if (!edgeSrc || !edgeTgt) return null;
         return {
           map_id: data.id,
-          source_node_id: sourceId,
-          target_node_id: targetId,
+          source_node_id: edgeSrc,
+          target_node_id: edgeTgt,
           label: String(l.label || '').trim(),
         };
       })
@@ -1263,6 +1259,7 @@ app.post('/api/library/notebook', async (req, res) => {
   if (!requireSupabase(res)) return;
   const studentId = String(req.body?.studentId || '').trim();
   const sourceNames = Array.isArray(req.body?.sourceNames) ? req.body.sourceNames : [];
+  const sourceIdsBody = Array.isArray(req.body?.sourceIds) ? req.body.sourceIds : [];
   const outputType = String(req.body?.outputType || '').trim();
   const output = req.body?.output;
   if (!studentId || !outputType || !output) return res.status(400).json({ error: 'Missing studentId/outputType/output.' });
@@ -1283,6 +1280,35 @@ app.post('/api/library/notebook', async (req, res) => {
       .select('id')
       .single();
     if (error) throw error;
+
+    const sessionSourceIds = new Set();
+    for (const raw of sourceIdsBody.slice(0, 20)) {
+      const id = String(raw || '').trim();
+      if (!isUuid(id) || sessionSourceIds.has(id)) continue;
+      const { data: own, error: ownErr } = await supabase
+        .from('sources')
+        .select('id')
+        .eq('id', id)
+        .eq('owner_id', studentId)
+        .is('deleted_at', null)
+        .limit(1);
+      if (ownErr) throw ownErr;
+      if (!own?.[0]?.id) continue;
+      sessionSourceIds.add(own[0].id);
+      const { error: nssErr } = await supabase
+        .from('notebook_session_sources')
+        .upsert({ session_id: sessionId, source_id: own[0].id }, { onConflict: 'session_id,source_id' });
+      if (nssErr) console.warn('[library/notebook] notebook_session_sources:', nssErr.message);
+    }
+    for (const nm of sourceNames.slice(0, 12)) {
+      const sid = await resolveSourceIdByName(studentId, String(nm || '').trim());
+      if (!sid || sessionSourceIds.has(sid)) continue;
+      sessionSourceIds.add(sid);
+      const { error: nssErr } = await supabase
+        .from('notebook_session_sources')
+        .upsert({ session_id: sessionId, source_id: sid }, { onConflict: 'session_id,source_id' });
+      if (nssErr) console.warn('[library/notebook] notebook_session_sources:', nssErr.message);
+    }
 
     const hasLegacyNotebook = await tryTableExists('notebook_outputs_legacy');
     if (hasLegacyNotebook) {
@@ -1395,13 +1421,16 @@ app.post('/api/library/quiz', async (req, res) => {
   const mode = modeRaw === 'exam' ? 'exam' : 'quiz';
   const difficulty = String(req.body?.difficulty || 'medium').trim().toLowerCase();
   const sourceName = String(req.body?.sourceName || '').trim();
+  const sourceIdBody = req.body?.sourceId;
   const result = req.body?.result;
   const questions = Array.isArray(result?.questions) ? result.questions : [];
   if (!studentId || !questions.length) return res.status(400).json({ error: 'Missing studentId/quiz questions.' });
   if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
+  const hasQuizSource = String(sourceName || '').trim() || (String(sourceIdBody || '').trim() && isUuid(String(sourceIdBody).trim()));
+  if (!hasQuizSource) return res.status(400).json({ error: 'Missing sourceId or sourceName.' });
   try {
     await ensureProfile(studentId);
-    const sourceId = await resolveSourceIdByName(studentId, sourceName);
+    const sourceId = await resolveSourceIdForLibrary(studentId, sourceIdBody, sourceName);
     const safeDifficulty = ['easy', 'medium', 'hard'].includes(difficulty) ? difficulty : 'medium';
     const { data: quizData, error: quizErr } = await supabase
       .from('quizzes')
@@ -1444,6 +1473,7 @@ app.post('/api/library/presentation', async (req, res) => {
   const studentId = String(req.body?.studentId || '').trim();
   const title = String(req.body?.title || 'Presentation').trim();
   const sourceNames = Array.isArray(req.body?.sourceNames) ? req.body.sourceNames : [];
+  const sourceIdsBody = Array.isArray(req.body?.sourceIds) ? req.body.sourceIds : [];
   const slides = Array.isArray(req.body?.slides) ? req.body.slides : [];
   const references = Array.isArray(req.body?.references) ? req.body.references : [];
   if (!studentId || !slides.length) return res.status(400).json({ error: 'Missing studentId/slides.' });
@@ -1483,12 +1513,29 @@ app.post('/api/library/presentation', async (req, res) => {
       if (refsErr) throw refsErr;
     }
 
-    for (const sourceName of sourceNames.slice(0, 10)) {
-      const sourceId = await resolveSourceIdByName(studentId, sourceName);
-      if (!sourceId) continue;
+    const linkedSourceIds = [];
+    for (const nm of sourceNames.slice(0, 12)) {
+      const sid = await resolveSourceIdByName(studentId, String(nm || '').trim());
+      if (sid) linkedSourceIds.push(sid);
+    }
+    for (const raw of sourceIdsBody.slice(0, 12)) {
+      const id = String(raw || '').trim();
+      if (!isUuid(id)) continue;
+      const { data: own, error: ownErr } = await supabase
+        .from('sources')
+        .select('id')
+        .eq('id', id)
+        .eq('owner_id', studentId)
+        .is('deleted_at', null)
+        .limit(1);
+      if (ownErr) throw ownErr;
+      if (own?.[0]?.id) linkedSourceIds.push(own[0].id);
+    }
+    const uniqueSourceIds = [...new Set(linkedSourceIds)];
+    for (const srcId of uniqueSourceIds) {
       const { error: linkErr } = await supabase
         .from('presentation_sources')
-        .upsert({ presentation_id: presData.id, source_id: sourceId }, { onConflict: 'presentation_id,source_id' });
+        .upsert({ presentation_id: presData.id, source_id: srcId }, { onConflict: 'presentation_id,source_id' });
       if (linkErr) throw linkErr;
     }
 

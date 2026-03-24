@@ -1,4 +1,4 @@
-﻿-- =============================================================================
+-- =============================================================================
 -- StudentAssistant / Krea — full Supabase SQL bundle (generated)
 -- Apply in Supabase SQL Editor or via psql in this order (single file).
 -- Sections: schema -> RLS -> indexes -> auth trigger -> migrations 0005-0009 -> optional backfill
@@ -1762,6 +1762,22 @@ using (
   and split_part(name, '/', 1) = auth.uid()::text
 );
 
+-- Node API uses SUPABASE_SERVICE_ROLE_KEY: Storage requests bypass RLS by default.
+-- Explicit service_role policies document intent and help if you ever use a JWT-bound service client.
+drop policy if exists sources_private_service_role_all on storage.objects;
+create policy sources_private_service_role_all on storage.objects
+for all
+to service_role
+using (bucket_id = 'sources-private')
+with check (bucket_id = 'sources-private');
+
+drop policy if exists presentation_assets_service_role_all on storage.objects;
+create policy presentation_assets_service_role_all on storage.objects
+for all
+to service_role
+using (bucket_id = 'presentation-assets')
+with check (bucket_id = 'presentation-assets');
+
 
 -- >>>>> END: supabase-rls.sql <<<<<
 
@@ -2270,3 +2286,31 @@ end $body$;
 
 -- >>>>> END: supabase-backfill.sql <<<<<
 
+
+-- >>>>> BEGIN: Ollama RAG embeddings (768-dim; matches server OLLAMA_EMBED_DIM / nomic-embed-text) <<<<<
+-- Merged from supabase/migrations/0010_ollama_embeddings.sql — required for /api/library/pdf chunk embedding writes to source_embeddings_ollama.
+
+create extension if not exists vector;
+
+create table if not exists public.source_embeddings_ollama (
+  id uuid primary key default gen_random_uuid(),
+  chunk_id uuid not null references public.source_chunks(id) on delete cascade,
+  source_id uuid not null references public.sources(id) on delete cascade,
+  owner_id uuid not null references public.profiles(id) on delete cascade,
+  content text not null,
+  embedding vector(768) not null,
+  model text not null default 'nomic-embed-text',
+  created_at timestamptz not null default now(),
+  unique (chunk_id)
+);
+
+create index if not exists idx_source_emb_ollama_owner on public.source_embeddings_ollama(owner_id);
+create index if not exists idx_source_emb_ollama_source on public.source_embeddings_ollama(source_id);
+
+alter table public.source_embeddings_ollama enable row level security;
+
+drop policy if exists source_embeddings_ollama_owner on public.source_embeddings_ollama;
+create policy source_embeddings_ollama_owner on public.source_embeddings_ollama
+for all using (owner_id = auth.uid()) with check (owner_id = auth.uid());
+-- Service role (Node API) bypasses RLS for inserts from embedAndStoreChunksForSource.
+-- >>>>> END: Ollama RAG embeddings <<<<<

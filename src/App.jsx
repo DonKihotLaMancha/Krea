@@ -316,21 +316,33 @@ async function savePdfToLibrary({ studentId, name, content, pdfBase64 }) {
   return await resp.json();
 }
 
-async function saveConceptMapToLibrary({ studentId, sourceName, title, map }) {
+async function saveConceptMapToLibrary({ studentId, sourceName, sourceId, title, map }) {
   if (!studentId) return;
   await fetchWithTimeout('/api/library/concept-map', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ studentId, sourceName, title, map }),
+    body: JSON.stringify({
+      studentId,
+      sourceName,
+      ...(sourceId ? { sourceId } : {}),
+      title,
+      map,
+    }),
   }, 20000);
 }
 
-async function saveNotebookOutputToLibrary({ studentId, sourceNames, outputType, output }) {
+async function saveNotebookOutputToLibrary({ studentId, sourceNames, sourceIds, outputType, output }) {
   if (!studentId) return;
   await fetchWithTimeout('/api/library/notebook', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ studentId, sourceNames, outputType, output }),
+    body: JSON.stringify({
+      studentId,
+      sourceNames,
+      ...(Array.isArray(sourceIds) && sourceIds.length ? { sourceIds } : {}),
+      outputType,
+      output,
+    }),
   }, 20000);
 }
 
@@ -363,21 +375,35 @@ async function saveSectionsToLibrary({ studentId, sourceName, sourceId, sections
   }, 25000);
 }
 
-async function saveQuizToLibrary({ studentId, sourceName, mode, difficulty, result }) {
+async function saveQuizToLibrary({ studentId, sourceName, sourceId, mode, difficulty, result }) {
   if (!studentId || !result?.questions?.length) return;
   await fetchWithTimeout('/api/library/quiz', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ studentId, sourceName, mode, difficulty, result }),
+    body: JSON.stringify({
+      studentId,
+      sourceName,
+      ...(sourceId ? { sourceId } : {}),
+      mode,
+      difficulty,
+      result,
+    }),
   }, 25000);
 }
 
-async function savePresentationToLibrary({ studentId, title, slides, references, sourceNames }) {
+async function savePresentationToLibrary({ studentId, title, slides, references, sourceNames, sourceIds }) {
   if (!studentId || !Array.isArray(slides) || !slides.length) return;
   await fetchWithTimeout('/api/library/presentation', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ studentId, title, slides, references, sourceNames }),
+    body: JSON.stringify({
+      studentId,
+      title,
+      slides,
+      references,
+      sourceNames,
+      ...(Array.isArray(sourceIds) && sourceIds.length ? { sourceIds } : {}),
+    }),
   }, 25000);
 }
 
@@ -1124,6 +1150,7 @@ export function StudentApp() {
               slides: presentation.slides,
               references: presentation.references || [],
               sourceNames: sourceChunks.map((c) => c.name),
+              sourceIds: sourceChunks.map((c) => c.sourceId).filter(Boolean),
             });
           } catch {
             // Non-blocking persistence.
@@ -1143,6 +1170,7 @@ export function StudentApp() {
             slides: fallbackPresentation.slides,
             references: fallbackPresentation.references || [],
             sourceNames: sourceChunks.map((c) => c.name),
+            sourceIds: sourceChunks.map((c) => c.sourceId).filter(Boolean),
           });
         } catch {
           // Non-blocking persistence.
@@ -1161,6 +1189,7 @@ export function StudentApp() {
             slides: fallbackPresentation.slides,
             references: fallbackPresentation.references || [],
             sourceNames: sourceChunks.map((c) => c.name),
+            sourceIds: sourceChunks.map((c) => c.sourceId).filter(Boolean),
           });
         } catch {
           // Non-blocking persistence.
@@ -1191,6 +1220,7 @@ export function StudentApp() {
           await saveConceptMapToLibrary({
             studentId,
             sourceName: chunk.name,
+            sourceId: chunk.sourceId,
             title: generated.title || chunk.name.replace(/\.[^.]+$/, ''),
             map: generated,
           });
@@ -1219,10 +1249,15 @@ export function StudentApp() {
     setNotice(`${label}...`);
     try {
       const result = await action();
+      const enriched = sources.map((s) => {
+        const ch = chunks.find((c) => c.name === s.name);
+        return { ...s, sourceId: s.sourceId || ch?.sourceId };
+      });
       try {
         await saveNotebookOutputToLibrary({
           studentId,
-          sourceNames: sources.map((s) => s.name).filter(Boolean),
+          sourceNames: enriched.map((s) => s.name).filter(Boolean),
+          sourceIds: enriched.map((s) => s.sourceId).filter(Boolean),
           outputType,
           output: result,
         });
@@ -1260,6 +1295,7 @@ export function StudentApp() {
           await saveQuizToLibrary({
             studentId,
             sourceName: chunks[0]?.name || '',
+            sourceId: chunks[0]?.sourceId,
             mode: quizConfig.mode,
             difficulty: quizConfig.difficulty,
             result,
