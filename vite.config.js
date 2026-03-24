@@ -30,6 +30,10 @@ export default defineConfig(({ mode }) => {
     '';
 
   return {
+  build: {
+    // pdf.js / main bundle exceed default 500 kB warning — acceptable for this app
+    chunkSizeWarningLimit: 2500,
+  },
   // Force client bundle to see the same merged URL + anon key as index.html (fixes Vercel/CI where only process.env.SUPABASE_* is set).
   define: {
     'import.meta.env.VITE_SUPABASE_URL': JSON.stringify(supabaseUrl),
@@ -72,6 +76,8 @@ export default defineConfig(({ mode }) => {
         icons: [],
       },
       workbox: {
+        // pdf.worker ~2.2 MiB — default Workbox precache limit is 2 MiB (build fails on Vercel without this).
+        maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
         // Do not precache index.html — avoids a stale SW serving old HTML without window.__SA_ENV__ after redeploy.
         globPatterns: ['**/*.{js,mjs,css,woff2,svg,png,ico,webmanifest}'],
         cleanupOutdatedCaches: true,
