@@ -105,6 +105,18 @@ app.get('/api/health', async (_req, res) => {
   }
 });
 
+/** Public anon config for the browser when Vite build had no VITE_* (e.g. Render env added after build). */
+app.get('/api/client-env', (_req, res) => {
+  const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
+  const supabaseAnonKey =
+    process.env.VITE_SUPABASE_ANON_KEY ||
+    process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    '';
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ supabaseUrl, supabaseAnonKey });
+});
+
 app.post('/api/student', async (req, res) => {
   if (!requireSupabase(res)) return;
   const studentId = String(req.body?.studentId || '').trim();

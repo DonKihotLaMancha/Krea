@@ -4,20 +4,23 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import RootRoutes from './RootRoutes';
 import ErrorBoundary from './ErrorBoundary';
+import { initSupabaseClient } from './lib/supabaseClient';
 
 const rootEl = document.getElementById('root');
 if (!rootEl) {
   document.body.textContent = 'Missing #root — check index.html.';
 } else {
-  createRoot(rootEl).render(
-    <React.StrictMode>
-      <ErrorBoundary>
-        <BrowserRouter>
-          <RootRoutes />
-        </BrowserRouter>
-      </ErrorBoundary>
-    </React.StrictMode>,
-  );
+  void initSupabaseClient().finally(() => {
+    createRoot(rootEl).render(
+      <React.StrictMode>
+        <ErrorBoundary>
+          <BrowserRouter>
+            <RootRoutes />
+          </BrowserRouter>
+        </ErrorBoundary>
+      </React.StrictMode>,
+    );
+  });
 }
 
 // Register PWA after first paint so a SW failure can never block React.

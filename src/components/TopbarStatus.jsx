@@ -36,7 +36,10 @@ export default function TopbarStatus({
             <CircleCheck size={14} /> AI connected
           </span>
         ) : (
-          <span className="inline-flex items-center gap-1 text-rose-600">
+          <span
+            className="inline-flex cursor-help items-center gap-1 text-rose-600"
+            title="Start Ollama locally, pull the model (e.g. ollama pull qwen2.5:7b), and run npm run server or npm run dev:full so /api/health can reach the AI."
+          >
             <CircleX size={14} /> AI offline
           </span>
         )}
