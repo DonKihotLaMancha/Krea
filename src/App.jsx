@@ -38,6 +38,9 @@ const tabs = ['Ingest', 'LMS', 'Flashcards', 'Notebook', 'Concept Map', 'Tasks',
 
 /** Local-only PDF backup (before sign-in). Cleared after successful sync to Supabase. */
 const LOCAL_PDFS_KEY = 'sa_account_pdfs_v1';
+/** Client fetch budget for /api/* → Ollama. Keep above server OLLAMA_TIMEOUT_MS (flashcards may run two model calls). */
+const AI_REQUEST_TIMEOUT_MS = 180000;
+const AI_FLASHCARDS_TIMEOUT_MS = 300000;
 const LOCAL_PDFS_MAX_BYTES = 4_500_000;
 
 function mapLibraryPdfToChunk(p) {
@@ -106,7 +109,7 @@ async function generateCardsWithOllama(text) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text }),
-  }, 35000);
+  }, AI_FLASHCARDS_TIMEOUT_MS);
   if (!resp.ok) throw new Error('Ollama API error');
   const data = await resp.json();
   return Array.isArray(data.cards) ? data.cards : [];
@@ -117,7 +120,7 @@ async function generateSectionsWithOllama({ text, title }) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, title }),
-  }, 35000);
+  }, AI_REQUEST_TIMEOUT_MS);
   if (!resp.ok) throw new Error('Sections API error');
   const data = await resp.json();
   return Array.isArray(data.apartados) ? data.apartados : [];
@@ -128,7 +131,7 @@ async function generatePresentationWithOllama({ topic, promptText, sources = [],
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ topic, promptText, sources, slides }),
-  }, 45000);
+  }, AI_REQUEST_TIMEOUT_MS);
   if (!resp.ok) throw new Error('Presentation API error');
   const data = await resp.json();
   return {
@@ -143,7 +146,7 @@ async function generateConceptMapWithOllama({ text, title }) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, title }),
-  }, 45000);
+  }, AI_REQUEST_TIMEOUT_MS);
   if (!resp.ok) throw new Error('Concept map API error');
   const data = await resp.json();
   return {
@@ -158,7 +161,7 @@ async function sourceChatWithOllama({ question, sources }) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ question, sources }),
-  }, 45000);
+  }, AI_REQUEST_TIMEOUT_MS);
   if (!resp.ok) throw new Error('Source chat API error');
   return await resp.json();
 }
@@ -168,7 +171,7 @@ async function generateSummaryWithOllama({ sources }) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sources }),
-  }, 45000);
+  }, AI_REQUEST_TIMEOUT_MS);
   if (!resp.ok) throw new Error('Summary API error');
   return await resp.json();
 }
@@ -178,7 +181,7 @@ async function generateStudyGuideWithOllama({ sources }) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sources }),
-  }, 45000);
+  }, AI_REQUEST_TIMEOUT_MS);
   if (!resp.ok) throw new Error('Study guide API error');
   return await resp.json();
 }
@@ -188,7 +191,7 @@ async function compareSourcesWithOllama({ sources }) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sources }),
-  }, 45000);
+  }, AI_REQUEST_TIMEOUT_MS);
   if (!resp.ok) throw new Error('Source compare API error');
   return await resp.json();
 }
@@ -198,7 +201,7 @@ async function generateAudioOverviewWithOllama({ sources }) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sources }),
-  }, 45000);
+  }, AI_REQUEST_TIMEOUT_MS);
   if (!resp.ok) throw new Error('Audio overview API error');
   return await resp.json();
 }
@@ -208,7 +211,7 @@ async function generateQuizWithOllama({ mode, difficulty, count, sources }) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ mode, difficulty, count, sources }),
-  }, 45000);
+  }, AI_REQUEST_TIMEOUT_MS);
   if (!resp.ok) throw new Error('Quiz API error');
   return await resp.json();
 }
@@ -218,7 +221,7 @@ async function tutorChatWithOllama({ prompt, sources }) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt, sources }),
-  }, 45000);
+  }, AI_REQUEST_TIMEOUT_MS);
   if (!resp.ok) throw new Error('Tutor API error');
   return await resp.json();
 }
@@ -228,7 +231,7 @@ async function academicsAdviceWithOllama({ grades, target, finalWeight, avg }) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ grades, target, finalWeight, avg }),
-  }, 45000);
+  }, AI_REQUEST_TIMEOUT_MS);
   if (!resp.ok) throw new Error('Academics advice API error');
   return await resp.json();
 }
@@ -238,7 +241,7 @@ async function academicsEstimateWithOllama({ target, finalWeight, avg }) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ target, finalWeight, avg }),
-  }, 45000);
+  }, AI_REQUEST_TIMEOUT_MS);
   if (!resp.ok) throw new Error('Academics estimate API error');
   return await resp.json();
 }

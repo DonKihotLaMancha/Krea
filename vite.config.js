@@ -80,9 +80,9 @@ export default defineConfig(({ mode }) => {
       workbox: {
         // pdf.worker ~2.2 MiB — Workbox default precache cap is 2 MiB (explicit number for all CI runners).
         maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
-        // Do not precache index.html — avoids a stale SW serving old HTML without window.__SA_ENV__ after redeploy.
-        // Omit `mjs` from globs so pdf.worker (~2.2 MiB) is never in the precache manifest (Workbox default cap is 2 MiB).
-        globPatterns: ['**/*.{js,css,woff2,svg,png,ico,webmanifest}'],
+        // Include index.html: Workbox navigateFallback defaults to index.html; omitting it causes
+        // "non-precached-url: index.html" at runtime. Omit `mjs` so pdf.worker stays out of precache.
+        globPatterns: ['index.html', '**/*.{js,css,woff2,svg,png,ico,webmanifest}'],
         cleanupOutdatedCaches: true,
         // Never cache API — long Ollama calls must not hit SW timeout/cache.
         runtimeCaching: [

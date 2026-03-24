@@ -17,19 +17,44 @@ const OLLAMA_URL_RAW = String(process.env.OLLAMA_URL || '').trim();
 const OLLAMA_URL = OLLAMA_URL_RAW || 'http://127.0.0.1:11434';
 const OLLAMA_API_KEY = String(process.env.OLLAMA_API_KEY || '').trim();
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen2.5:7b';
-const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 45000);
+/** Per Ollama /api/generate call. Large PDF-derived prompts often need 2–5+ minutes on local 7B models. */
+const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 120000);
 const OLLAMA_HEALTH_TIMEOUT_MS = Number(process.env.OLLAMA_HEALTH_TIMEOUT_MS || 20000);
+/** If true, send `ngrok-skip-browser-warning` on ngrok hosts. Some ngrok plans return HTTP 403 when this header is used (ERR_NGROK_7096). Default off — prefer 200 + HTML detection over 403. */
+const OLLAMA_NGROK_SKIP_HEADER = ['1', 'true', 'yes'].includes(
+  String(process.env.OLLAMA_NGROK_SKIP_HEADER || '').toLowerCase().trim(),
+);
 
-function ollamaHeadersJson() {
-  const h = { 'Content-Type': 'application/json' };
+/** ngrok edge often returns 403 for Node/undici default User-Agent; use a browser-like UA so traffic reaches the tunnel. */
+const OLLAMA_NGROK_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+/** ngrok: optional skip header (see OLLAMA_NGROK_SKIP_HEADER). Browser-like UA + Accept for edge. */
+function ollamaHeadersExtraForUrl(url) {
+  const u = String(url || '').toLowerCase();
+  if (u.includes('ngrok')) {
+    const h = { Accept: 'application/json', 'User-Agent': OLLAMA_NGROK_USER_AGENT };
+    if (OLLAMA_NGROK_SKIP_HEADER) h['ngrok-skip-browser-warning'] = 'true';
+    return h;
+  }
+  return {};
+}
+
+function ollamaHeadersJsonForBase(baseUrl) {
+  const h = { 'Content-Type': 'application/json', ...ollamaHeadersExtraForUrl(baseUrl) };
   if (OLLAMA_API_KEY) h.Authorization = `Bearer ${OLLAMA_API_KEY}`;
   return h;
 }
 
+function ollamaHeadersJson() {
+  return ollamaHeadersJsonForBase(OLLAMA_URL);
+}
+
 /** GET /api/tags — avoid Content-Type on GET (some hosts are picky). */
-function ollamaHeadersForGet() {
-  if (!OLLAMA_API_KEY) return {};
-  return { Authorization: `Bearer ${OLLAMA_API_KEY}` };
+function ollamaHeadersForGet(baseUrl) {
+  const h = { ...ollamaHeadersExtraForUrl(baseUrl || OLLAMA_URL) };
+  if (OLLAMA_API_KEY) h.Authorization = `Bearer ${OLLAMA_API_KEY}`;
+  return h;
 }
 
 function isOllamaCloudUrl(url) {
@@ -269,8 +294,12 @@ async function logLmsAudit({ actorId, action, entityType, entityId = null, paylo
 
 function ollamaBasesToTry() {
   const raw = [OLLAMA_URL];
-  // On Render, localhost has no Ollama — only try the configured URL.
-  if (!process.env.RENDER) {
+  // If OLLAMA_URL is unset, also try local defaults.
+  if (!process.env.RENDER && !OLLAMA_URL_RAW) {
+    raw.push('http://127.0.0.1:11434', 'http://localhost:11434');
+  }
+  // Local dev: ngrok free visitor interstitial (ERR_NGROK_6024) often blocks programmatic access; still probe local Ollama when the tunnel targets this machine.
+  if (!process.env.RENDER && OLLAMA_URL_RAW && OLLAMA_URL_RAW.toLowerCase().includes('ngrok')) {
     raw.push('http://127.0.0.1:11434', 'http://localhost:11434');
   }
   const seen = new Set();
@@ -284,13 +313,34 @@ function ollamaBasesToTry() {
   return out;
 }
 
+function analyzeOllamaTagsResponse(resp, base) {
+  const ct = resp.headers.get('content-type') || '';
+  const ngrokEdge = String(base).toLowerCase().includes('ngrok');
+  const ngrokErrCode = resp.headers.get('ngrok-error-code') || resp.headers.get('Ngrok-Error-Code') || '';
+  const looksLikeHtml = ct.includes('text/html');
+  const looksLikeJson = /application\/json/i.test(ct);
+  const effectiveOk =
+    resp.ok &&
+    !looksLikeHtml &&
+    (!ngrokEdge || (looksLikeJson && !ngrokErrCode));
+  let detail;
+  if (looksLikeHtml && resp.ok) detail = 'likely_ngrok_html';
+  else if (ngrokEdge && resp.ok && !looksLikeJson) detail = 'likely_ngrok_interstitial';
+  return { effectiveOk, detail, ngrokErrCode, ct, looksLikeHtml, looksLikeJson, ngrokEdge };
+}
+
 async function fetchOllamaTags(base, timeoutMs = OLLAMA_HEALTH_TIMEOUT_MS) {
   const url = `${base}/api/tags`;
   const c = new AbortController();
   const t = setTimeout(() => c.abort(), timeoutMs);
   try {
-    const resp = await fetch(url, { signal: c.signal, headers: ollamaHeadersForGet() });
-    return { ok: resp.ok, status: resp.status };
+    const resp = await fetch(url, { signal: c.signal, headers: ollamaHeadersForGet(base) });
+    const { effectiveOk, detail } = analyzeOllamaTagsResponse(resp, base);
+    return {
+      ok: effectiveOk,
+      status: resp.status,
+      detail,
+    };
   } finally {
     clearTimeout(t);
   }
@@ -324,18 +374,31 @@ app.get('/api/health', async (_req, res) => {
   let lastErr = '';
   for (const base of ollamaBasesToTry()) {
     try {
-      const { ok, status } = await fetchOllamaTags(base);
+      const { ok, status, detail } = await fetchOllamaTags(base);
       if (ok) {
+        const localProbe =
+          /^https?:\/\/(127\.0\.0\.1|localhost):11434$/i.test(String(base || '').trim());
+        const ollamaNgrokLocalFallback =
+          Boolean(OLLAMA_URL_RAW && OLLAMA_URL_RAW.toLowerCase().includes('ngrok')) && localProbe;
         return res.json({
           ok: true,
           model: OLLAMA_MODEL,
           ollamaBase: base,
           deployHost,
+          ...(ollamaNgrokLocalFallback ? { ollamaNgrokLocalFallback: true } : {}),
         });
       }
-      lastErr = `HTTP ${status} from ${base}`;
+      lastErr =
+        detail === 'likely_ngrok_html'
+          ? `HTTP ${status} HTML from ${base} — not Ollama JSON (ngrok warning page, wrong tunnel target, or Ollama down).`
+          : detail === 'likely_ngrok_interstitial'
+            ? `HTTP ${status} non-JSON from ${base} — ngrok interstitial or edge block (ERR_NGROK_*). Open the tunnel URL in a browser once, confirm ngrok forwards to 127.0.0.1:11434, and keep ollama serve running.`
+            : `HTTP ${status} from ${base}`;
       if (status === 401 || status === 403) {
-        lastErr += ' — check OLLAMA_API_KEY and model access on ollama.com';
+        const ng = String(base).toLowerCase().includes('ngrok');
+        lastErr += ng
+          ? ' — ngrok may reject custom headers on your plan (403). Leave OLLAMA_NGROK_SKIP_HEADER unset, or allow headers on the tunnel; this is not the same as Ollama Cloud API keys.'
+          : ' — check OLLAMA_API_KEY and model access on ollama.com';
       }
     } catch (e) {
       lastErr = e?.name === 'AbortError' ? `timeout ${base}` : `${base}: ${e?.message || e}`;
@@ -3130,30 +3193,48 @@ async function generateConceptMapWithOllama(prompt) {
   });
 }
 
-async function callOllama(prompt) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
-  try {
-    const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
-      method: 'POST',
-      headers: ollamaHeadersJson(),
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        prompt,
-        stream: false,
-        format: 'json',
-        options: { temperature: 0.2 },
-      }),
-      signal: controller.signal,
-    });
-    if (!resp.ok) throw new Error(`Failed to query Ollama (${resp.status}).`);
-    return await resp.json();
-  } catch (error) {
-    if (error?.name === 'AbortError') throw new Error('Ollama timed out.');
-    throw error;
-  } finally {
-    clearTimeout(timeout);
+async function callOllama(prompt, timeoutMs = OLLAMA_TIMEOUT_MS) {
+  const body = JSON.stringify({
+    model: OLLAMA_MODEL,
+    prompt,
+    stream: false,
+    format: 'json',
+    options: { temperature: 0.2 },
+  });
+  const bases = ollamaBasesToTry();
+  let lastErr;
+  for (const base of bases) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const resp = await fetch(`${base}/api/generate`, {
+        method: 'POST',
+        headers: ollamaHeadersJsonForBase(base),
+        body,
+        signal: controller.signal,
+      });
+      if (!resp.ok) {
+        lastErr = new Error(`Failed to query Ollama (${resp.status}).`);
+        continue;
+      }
+      const ct = resp.headers.get('content-type') || '';
+      const ng = String(base).toLowerCase().includes('ngrok');
+      const ngErr = resp.headers.get('ngrok-error-code') || resp.headers.get('Ngrok-Error-Code');
+      if (ng && (!/application\/json/i.test(ct) || ngErr)) {
+        lastErr = new Error(
+          'Ollama response blocked by ngrok edge (non-JSON). Open the tunnel URL in a browser once or fix tunnel → 127.0.0.1:11434.',
+        );
+        continue;
+      }
+      return await resp.json();
+    } catch (error) {
+      lastErr = error?.name === 'AbortError' ? new Error('Ollama timed out.') : error;
+      continue;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
+  throw lastErr || new Error('Ollama is not reachable.');
 }
 
 function normalizeCards(cards) {
