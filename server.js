@@ -1873,6 +1873,7 @@ setInterval(() => {
 const distDir = path.join(__dirname, 'dist');
 if (fs.existsSync(distDir)) {
   app.use(express.static(distDir));
+  console.log(`[static] Serving SPA from ${distDir}`);
   app.use((req, res, next) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();
     if (req.path.startsWith('/api')) {
