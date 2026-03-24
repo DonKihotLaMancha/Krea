@@ -30,6 +30,16 @@ export default defineConfig(({ mode }) => {
     '';
 
   return {
+  // Force client bundle to see the same merged URL + anon key as index.html (fixes Vercel/CI where only process.env.SUPABASE_* is set).
+  define: {
+    'import.meta.env.VITE_SUPABASE_URL': JSON.stringify(supabaseUrl),
+    'import.meta.env.NEXT_PUBLIC_SUPABASE_URL': JSON.stringify(supabaseUrl),
+    'import.meta.env.VITE_SUPABASE_ANON_KEY': JSON.stringify(supabaseAnonKey),
+    'import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY': JSON.stringify(supabaseAnonKey),
+    'import.meta.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY': JSON.stringify(supabaseAnonKey),
+    'import.meta.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY': JSON.stringify(supabaseAnonKey),
+    'import.meta.env.NEXT_PUBLIC_SUPABASE_ANON_KEY': JSON.stringify(supabaseAnonKey),
+  },
   plugins: [
     {
       name: 'inject-sa-env',
@@ -62,6 +72,9 @@ export default defineConfig(({ mode }) => {
         icons: [],
       },
       workbox: {
+        // Do not precache index.html — avoids a stale SW serving old HTML without window.__SA_ENV__ after redeploy.
+        globPatterns: ['**/*.{js,mjs,css,woff2,svg,png,ico,webmanifest}'],
+        cleanupOutdatedCaches: true,
         // Never cache API — long Ollama calls must not hit SW timeout/cache.
         runtimeCaching: [
           {

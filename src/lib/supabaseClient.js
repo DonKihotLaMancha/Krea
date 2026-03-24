@@ -37,10 +37,11 @@ export async function initSupabaseClient() {
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
-    const b = fromBuildEnv();
+    // Prefer window.__SA_ENV__ first: Vite injects it in index.html before the bundle runs (reliable on Vercel static).
     const w = fromWindowEnv();
-    let url = b.url || w.url;
-    let anonKey = b.anonKey || w.anonKey;
+    const b = fromBuildEnv();
+    let url = w.url || b.url;
+    let anonKey = w.anonKey || b.anonKey;
     if (!url || !anonKey) {
       try {
         const r = await fetch(apiUrl('/api/client-env'));
