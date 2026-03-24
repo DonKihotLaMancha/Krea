@@ -37,6 +37,8 @@ function isOllamaCloudUrl(url) {
 }
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+/** Vercel account API token (e.g. deployments API). Server-only — do not expose to the client. */
+const VERCEL_API_KEY = String(process.env.VERCEL_API_KEY || '').trim();
 const supabase = (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
   ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
   : null;
@@ -3709,6 +3711,7 @@ app.listen(PORT, () => {
   console.log(
     `[Ollama] OLLAMA_URL=${OLLAMA_URL} model=${OLLAMA_MODEL}${OLLAMA_API_KEY ? ' (API key set)' : ''}`,
   );
+  if (VERCEL_API_KEY) console.log('[vercel] VERCEL_API_KEY is set (server-side token).');
   if (SMTP_CONFIGURED) console.log('[task-email] SMTP reminders enabled (checks every 60s).');
   else console.log('[task-email] SMTP not configured — set SMTP_HOST, SMTP_USER, SMTP_PASS for email reminders.');
   processTaskEmailReminders().catch(() => {});
