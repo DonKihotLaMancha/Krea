@@ -27,7 +27,6 @@ import CommandPalette from './components/CommandPalette';
 import LocalLogPanel from './components/LocalLogPanel';
 import TasksCalendar from './components/TasksCalendar';
 const GraficasProgreso = lazy(() => import('./components/GraficasProgreso'));
-const SesionEstudio = lazy(() => import('./components/SesionEstudio'));
 const ConceptMap = lazy(() => import('./components/ConceptMap'));
 
 ChartJS.register(ArcElement, BarElement, Tooltip, Legend, CategoryScale, LinearScale, PointElement, LineElement);
@@ -577,7 +576,9 @@ function slideHeroImageUrl(deckTitle, slideIndex, slideTitle) {
 const SLIDE_IMAGE_QUERY_MAX = 280;
 
 function buildSlideImageSearchQuery(deckTitle, slide) {
+  const iq = String(slide?.imageSearchQuery || '').trim();
   const parts = [
+    ...(iq ? [iq] : []),
     String(deckTitle || '').trim(),
     String(slide?.title || '').trim(),
     ...(Array.isArray(slide?.bullets) ? slide.bullets.slice(0, 3).map((b) => String(b || '').trim()) : []),
@@ -586,7 +587,17 @@ function buildSlideImageSearchQuery(deckTitle, slide) {
   return parts.join(' ').slice(0, SLIDE_IMAGE_QUERY_MAX).trim();
 }
 
-function slideChartBarsAreValid(chartBars) {
+/** Must match server slideTextSuggestsNumericData — charts only when bullets/title cite quantities. */
+function slideTextSuggestsNumericDataForChart(slide) {
+  const t = [slide?.title, ...(slide?.bullets || [])].join(' ');
+  return (
+    /\d/.test(t) ||
+    /%|percent|percentage|ratio|proportion|×|\btimes\b|\bhalf\b|\bdouble\b|\btriple\b|°[cf]\b|\$|€|£/i.test(t)
+  );
+}
+
+function slideChartBarsAreValid(chartBars, slide) {
+  if (!slide || !slideTextSuggestsNumericDataForChart(slide)) return false;
   if (!Array.isArray(chartBars) || chartBars.length < 2) return false;
   const labels = new Set();
   for (const row of chartBars) {
@@ -603,7 +614,7 @@ function slideChartBarsAreValid(chartBars) {
 /** Chart.js bar payload when slide has model-provided chartBars; otherwise null. */
 function buildSlideChartJsData(slide) {
   const bars = slide?.chartBars;
-  if (!slideChartBarsAreValid(bars)) return null;
+  if (!slideChartBarsAreValid(bars, slide)) return null;
   return {
     labels: bars.map((b) => String(b.label).trim().slice(0, 48)),
     datasets: [
@@ -743,7 +754,7 @@ export function StudentApp() {
   const [generationStage, setGenerationStage] = useState('');
   const [generationIndeterminate, setGenerationIndeterminate] = useState(false);
   const [isAnalyzingSections, setIsAnalyzingSections] = useState(false);
-  const [studyMode, setStudyMode] = useState(null);
+  const [deckSessionGrades, setDeckSessionGrades] = useState({ right: 0, wrong: 0 });
   const [conceptMapData, setConceptMapData] = useState(null);
   const [isGeneratingConceptMap, setIsGeneratingConceptMap] = useState(false);
   const [isNotebookBusy, setIsNotebookBusy] = useState(false);
@@ -866,6 +877,10 @@ export function StudentApp() {
       return false;
     });
   }, [cards, activeChunk, chunks.length]);
+
+  useEffect(() => {
+    setDeckSessionGrades({ right: 0, wrong: 0 });
+  }, [activeChunk?.id]);
 
   useEffect(() => {
     if (!activeChunk?.name) {
@@ -1286,6 +1301,10 @@ export function StudentApp() {
   const markCard = useCallback((ok) => {
     const top = deckCards[0];
     if (!top) return;
+    setDeckSessionGrades((s) => ({
+      right: s.right + (ok ? 1 : 0),
+      wrong: s.wrong + (ok ? 0 : 1),
+    }));
     setCards((prev) => {
       const idx = prev.findIndex((c) => c.id === top.id);
       if (idx < 0) return prev;
@@ -1675,39 +1694,17 @@ export function StudentApp() {
             setShowAnswer={setShowAnswer}
             onRight={() => markCard(true)}
             onWrong={() => markCard(false)}
+            sessionRight={deckSessionGrades.right}
+            sessionWrong={deckSessionGrades.wrong}
             latestBatchAt={latestBatchAt}
             onGenerateMore={() => activeChunk && generateForChunk(activeChunk, { append: true })}
             onClear={() => {
               const drop = new Set(deckCards.map((c) => c.id));
               setCards((prev) => prev.filter((c) => !drop.has(c.id)));
               setLatestBatchAt(null);
-              setStudyMode(null);
+              setDeckSessionGrades({ right: 0, wrong: 0 });
             }}
           />
-          {deckCards.length ? (
-            <section className="panel mt-4">
-              <h3 className="mb-3 text-lg font-semibold">Study Session (Spaced Repetition)</h3>
-              {!studyMode ? (
-                <div className="flex flex-wrap gap-2">
-                  <button className="btn-primary" onClick={() => setStudyMode('all')}>Start full session</button>
-                  <button className="btn-ghost" onClick={() => setStudyMode('review')}>Review difficult only</button>
-                </div>
-              ) : (
-                <Suspense fallback={<section className="panel mt-2 text-sm text-muted">Loading study session...</section>}>
-                  <SesionEstudio
-                    tarjetas={deckCards}
-                    soloRepaso={studyMode === 'review'}
-                    onGuardar={(updates) =>
-                      setCards((prev) =>
-                        prev.map((c) => (updates[c.id] ? { ...c, ...updates[c.id] } : c)),
-                      )
-                    }
-                    onVolver={() => setStudyMode(null)}
-                  />
-                </Suspense>
-              )}
-            </section>
-          ) : null}
         </>
       ) : null}
       <div
@@ -2749,7 +2746,8 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
         notes: s.notes || '',
         imageSuggestion: s.imageSuggestion || '',
         graphSuggestion: s.graphSuggestion || '',
-        chartBars: slideChartBarsAreValid(s.chartBars) ? s.chartBars : undefined,
+        chartBars: slideChartBarsAreValid(s.chartBars, s) ? s.chartBars : undefined,
+        imageSearchQuery: String(s.imageSearchQuery || '').trim().slice(0, 220),
       })),
     });
   };
@@ -2770,18 +2768,25 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
               const [text, url] = line.split('|').map((x) => x?.trim() || '');
               return { text, url };
             }),
-          slides: draft.slides.map((s, idx) => ({
-            title: s.title.trim() || `Slide ${idx + 1}`,
-            bullets: s.bulletsText
+          slides: draft.slides.map((s, idx) => {
+            const title = s.title.trim() || `Slide ${idx + 1}`;
+            const bullets = s.bulletsText
               .split('\n')
               .map((line) => line.trim())
               .filter(Boolean)
-              .slice(0, 6),
-            notes: s.notes.trim(),
-            imageSuggestion: s.imageSuggestion.trim(),
-            graphSuggestion: s.graphSuggestion.trim(),
-            ...(slideChartBarsAreValid(s.chartBars) ? { chartBars: s.chartBars } : {}),
-          })),
+              .slice(0, 6);
+            const slideLike = { title, bullets, chartBars: s.chartBars };
+            const iq = String(s.imageSearchQuery || '').trim().slice(0, 220);
+            return {
+              title,
+              bullets,
+              notes: s.notes.trim(),
+              imageSuggestion: s.imageSuggestion.trim(),
+              graphSuggestion: s.graphSuggestion.trim(),
+              ...(iq ? { imageSearchQuery: iq } : {}),
+              ...(slideChartBarsAreValid(s.chartBars, slideLike) ? { chartBars: s.chartBars } : {}),
+            };
+          }),
         };
       }),
     );
@@ -2898,7 +2903,7 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
                       />
                     )}
                     <p className="mt-1 text-[11px] leading-snug text-muted">
-                      Image from Wikimedia Commons when available, else keyword-based placeholder. AI suggestion:{' '}
+                      Search uses slide keywords (Commons when available); otherwise a stable placeholder for this slide, not a topic illustration. AI suggestion:{' '}
                       {s.imageSuggestion || '—'}
                     </p>
                   </div>

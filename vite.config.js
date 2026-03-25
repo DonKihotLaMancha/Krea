@@ -65,6 +65,8 @@ export default defineConfig(({ mode }) => {
     react(),
     VitePWA({
       registerType: 'autoUpdate',
+      // Never install a caching SW during `vite dev` — avoids stale UI when iterating on components.
+      devOptions: { enabled: false },
       // Default false → plugin throws on Workbox "file exceeds 2 MiB" warnings even if workbox.maximumFileSizeToCacheInBytes is set (some CI merges differ). Set true to warn only, not fail.
       showMaximumFileSizeToCacheInBytesWarning: true,
       includeAssets: ['favicon.ico'],

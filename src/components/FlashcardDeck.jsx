@@ -11,6 +11,8 @@ export default function FlashcardDeck({
   setShowAnswer,
   onRight,
   onWrong,
+  sessionRight = 0,
+  sessionWrong = 0,
   latestBatchAt,
   onGenerateMore,
   onClear,
@@ -18,26 +20,32 @@ export default function FlashcardDeck({
   const currentCard = cards[0];
   const pointerStart = useRef(null);
   const suppressClickUntil = useRef(0);
+  const flashTimer = useRef(null);
   const [dragX, setDragX] = useState(0);
+  const [gradeFlash, setGradeFlash] = useState(null);
 
-  const scored = cards.map((c) => {
-    const due = c.proxima_revision ? new Date(c.proxima_revision) : null;
-    const daysLate = due ? Math.floor((Date.now() - due.getTime()) / (1000 * 60 * 60 * 24)) : 0;
-    const wrongWeight = Number(c.veces_mal || c.wrong || 0) * 2;
-    const urgency = Math.max(0, daysLate) + wrongWeight;
-    return { ...c, urgency };
-  });
-  const maxU = scored.reduce((m, c) => Math.max(m, c.urgency), 0);
-  const seenQ = new Set();
-  const urgent = scored
-    .sort((a, b) => b.urgency - a.urgency)
-    .filter((c) => {
-      const key = String(c.question || '').slice(0, 48);
-      if (seenQ.has(key)) return false;
-      seenQ.add(key);
-      return true;
-    })
-    .slice(0, 3);
+  const triggerGradeFlash = useCallback((kind) => {
+    if (flashTimer.current) window.clearTimeout(flashTimer.current);
+    setGradeFlash(kind);
+    flashTimer.current = window.setTimeout(() => {
+      setGradeFlash(null);
+      flashTimer.current = null;
+    }, 520);
+  }, []);
+
+  const handleRight = useCallback(() => {
+    triggerGradeFlash('right');
+    onRight();
+  }, [onRight, triggerGradeFlash]);
+
+  const handleWrong = useCallback(() => {
+    triggerGradeFlash('wrong');
+    onWrong();
+  }, [onWrong, triggerGradeFlash]);
+
+  useEffect(() => () => {
+    if (flashTimer.current) window.clearTimeout(flashTimer.current);
+  }, []);
 
   const toggleFlip = useCallback(() => {
     setShowAnswer((v) => !v);
@@ -66,16 +74,16 @@ export default function FlashcardDeck({
       if (showAnswer) {
         if (e.key === 'ArrowLeft') {
           e.preventDefault();
-          onWrong();
+          handleWrong();
         } else if (e.key === 'ArrowRight') {
           e.preventDefault();
-          onRight();
+          handleRight();
         }
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [currentCard, showAnswer, onWrong, onRight, toggleFlip]);
+  }, [currentCard, showAnswer, handleWrong, handleRight, toggleFlip]);
 
   const onPointerDown = (e) => {
     pointerStart.current = { x: e.clientX, y: e.clientY };
@@ -101,10 +109,10 @@ export default function FlashcardDeck({
     let acted = false;
     if (showAnswer) {
       if (dx > SWIPE_GRADE_PX) {
-        onRight();
+        handleRight();
         acted = true;
       } else if (dx < -SWIPE_GRADE_PX) {
-        onWrong();
+        handleWrong();
         acted = true;
       }
     } else if (Math.abs(dx) > SWIPE_REVEAL_PX) {
@@ -115,7 +123,13 @@ export default function FlashcardDeck({
   };
 
   const deckSize = cards.length;
-  const dotCount = Math.min(deckSize, 12);
+
+  const cardShellClass =
+    gradeFlash === 'right'
+      ? 'shadow-[0_0_0_4px_rgba(16,185,129,0.9)]'
+      : gradeFlash === 'wrong'
+        ? 'shadow-[0_0_0_4px_rgba(244,63,94,0.9)]'
+        : '';
 
   return (
     <section className="panel">
@@ -137,39 +151,17 @@ export default function FlashcardDeck({
         </p>
       ) : (
         <>
-          {urgent.length ? (
-            <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3">
-              <p className="text-xs font-semibold text-amber-900">Due for review</p>
-              {maxU <= 0 ? (
-                <p className="mt-1 text-xs text-amber-800">Nothing overdue — you&apos;re caught up.</p>
-              ) : (
-                <ul className="mt-1 space-y-1 text-xs text-amber-800">
-                  {urgent.map((u) => (
-                    <li key={`u-${u.id}`}>
-                      {String(u.question).slice(0, 80)}
-                      {String(u.question).length > 80 ? '…' : ''}{' '}
-                      <span className="font-semibold">Urgency {u.urgency}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          ) : null}
-
-          <div className="mb-4 flex flex-col items-center gap-2">
-            <p className="text-sm font-medium text-slate-700">
+          <div className="mb-4 min-h-[4.75rem] w-full max-w-xl mx-auto flex flex-col items-center justify-center gap-1.5 px-2">
+            <p className="text-center text-sm font-medium text-slate-700">
               {deckSize} card{deckSize === 1 ? '' : 's'} in this deck
+              <span className="text-slate-400"> · </span>
+              <span className="text-emerald-700">Know: {sessionRight}</span>
+              <span className="text-slate-400"> · </span>
+              <span className="text-rose-700">Review: {sessionWrong}</span>
             </p>
-            <div className="flex gap-1.5" role="presentation" aria-hidden>
-              {Array.from({ length: dotCount }, (_, i) => (
-                <span
-                  key={i}
-                  className={`h-2 w-2 rounded-full transition-colors ${i === 0 ? 'bg-[#4257b2]' : 'bg-slate-200'}`}
-                />
-              ))}
-            </div>
-            <p className="text-center text-xs text-slate-500">
-              Spaced repetition: cards you know move to the back; ones you miss stay up front.
+            <p className="text-center text-xs leading-snug text-slate-500">
+              <strong className="font-medium text-slate-600">How it works:</strong> Know it moves this card to the back of the deck;
+              Still learning keeps it at the front so it comes up again soon. Counts are for this PDF until you switch documents or clear the set.
             </p>
           </div>
 
@@ -216,7 +208,7 @@ export default function FlashcardDeck({
                     e.preventDefault();
                     toggleFlip();
                   }}
-                  className="relative mx-auto cursor-pointer select-none outline-none focus-visible:ring-2 focus-visible:ring-[#4257b2] focus-visible:ring-offset-2 rounded-2xl"
+                  className={`relative mx-auto cursor-pointer select-none outline-none focus-visible:ring-2 focus-visible:ring-[#4257b2] focus-visible:ring-offset-2 rounded-2xl transition-shadow duration-200 ${cardShellClass}`}
                   aria-label={showAnswer ? 'Show term (flip card)' : 'Show definition (flip card)'}
                 >
                   <div
@@ -258,15 +250,15 @@ export default function FlashcardDeck({
           <div className="mx-auto mt-2 flex max-w-xl flex-col gap-3 sm:flex-row sm:items-stretch">
             <button
               type="button"
-              className="btn-ghost order-2 flex-1 border-rose-200 py-3 text-rose-800 hover:bg-rose-50 sm:order-1"
-              onClick={onWrong}
+              className="order-2 flex-1 rounded-xl border-2 border-rose-600 bg-rose-50 py-3 text-sm font-semibold text-rose-900 shadow-sm transition hover:bg-rose-100 sm:order-1"
+              onClick={handleWrong}
             >
               Still learning
             </button>
             <button
               type="button"
-              className="order-1 flex-1 rounded-xl border-0 bg-[#2e8b57] py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-[#26734a] sm:order-2"
-              onClick={onRight}
+              className="order-1 flex-1 rounded-xl border-2 border-emerald-700 bg-emerald-600 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 sm:order-2"
+              onClick={handleRight}
             >
               Know it
             </button>

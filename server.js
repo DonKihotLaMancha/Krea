@@ -617,11 +617,19 @@ function isAllowedSlideImageUrl(url) {
     if (u.protocol !== 'https:') return false;
     const h = u.hostname.toLowerCase();
     if (h === 'upload.wikimedia.org' || h.endsWith('.wikimedia.org')) return true;
-    if (h === 'loremflickr.com') return true;
+    if (h === 'picsum.photos') return true;
     return false;
   } catch {
     return false;
   }
+}
+
+/** Stable placeholder when Commons has no match (same query → same image; not random stock). */
+function slideImagePicsumSeedFromQuery(raw) {
+  const s = String(raw || 'slide');
+  let h = 0;
+  for (let i = 0; i < s.length; i += 1) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+  return `wm${Math.abs(h).toString(36)}`;
 }
 
 /** Topic-related slide hero: Wikimedia Commons search, then keyword LoremFlickr (no API keys). */
@@ -669,8 +677,9 @@ app.get('/api/slide-image', async (req, res) => {
     }
     throw new Error('no image');
   } catch {
-    const fallback = `https://loremflickr.com/960/540/${encodeURIComponent(tags)}`;
-    return res.json({ url: fallback, source: 'loremflickr' });
+    const seed = slideImagePicsumSeedFromQuery(raw || tags);
+    const fallback = `https://picsum.photos/seed/${seed}/960/540`;
+    return res.json({ url: fallback, source: 'picsum' });
   }
 });
 
@@ -1071,10 +1080,12 @@ app.get('/api/library', async (req, res) => {
     for (const slide of presentationSlidesRows || []) {
       if (!presentationIds.has(slide.presentation_id)) continue;
       if (!groupedSlides.has(slide.presentation_id)) groupedSlides.set(slide.presentation_id, []);
-      const chartBars = normalizeChartBarsInput(slide.chart_bars);
+      const bullets = Array.isArray(slide.bullets) ? slide.bullets.map((b) => String(b)) : [];
+      const textProof = [String(slide.title || ''), ...bullets].join(' ');
+      const chartBars = normalizeChartBarsInput(slide.chart_bars, textProof);
       groupedSlides.get(slide.presentation_id).push({
         title: slide.title,
-        bullets: Array.isArray(slide.bullets) ? slide.bullets.map((b) => String(b)) : [],
+        bullets,
         notes: slide.notes || '',
         imageSuggestion: slide.image_suggestion || '',
         graphSuggestion: slide.graph_suggestion || '',
@@ -1626,12 +1637,15 @@ app.post('/api/library/presentation', async (req, res) => {
     if (presErr) throw presErr;
 
     const slideRows = slides.slice(0, 60).map((s, idx) => {
-      const chartBars = normalizeChartBarsInput(s?.chartBars);
+      const title = String(s?.title || `Slide ${idx + 1}`).trim();
+      const bullets = Array.isArray(s?.bullets) ? s.bullets.map((b) => String(b)) : [];
+      const textProof = [title, ...bullets].join(' ');
+      const chartBars = normalizeChartBarsInput(s?.chartBars, textProof);
       return {
         presentation_id: presData.id,
         slide_index: idx,
-        title: String(s?.title || `Slide ${idx + 1}`).trim(),
-        bullets: Array.isArray(s?.bullets) ? s.bullets.map((b) => String(b)) : [],
+        title,
+        bullets,
         notes: String(s?.notes || '').trim(),
         image_suggestion: String(s?.imageSuggestion || '').trim(),
         graph_suggestion: String(s?.graphSuggestion || '').trim(),
@@ -3235,7 +3249,8 @@ Rules:
 - Add short speaker notes (1-2 sentences).
 - Add references and Google Scholar links when available.
 - Ensure slide titles are unique and avoid repeated bullets.
-- Optional per-slide "chartBars": use ONLY when SOURCE_JSON or the slide bullets state explicit comparable numbers, percentages, or clear ordinal rankings grounded in that text. Format: [{"label":"short label","value":number}, ...] with 2 to 5 items, distinct labels. If there are no such values, omit chartBars or use []. Never invent statistics.
+- Optional per-slide "chartBars": use ONLY when SOURCE_JSON or the slide bullets state explicit comparable numbers, percentages, or clear ordinal rankings grounded in that text. Format: [{"label":"short label","value":number}, ...] with 2 to 5 items, distinct labels. If there are no such values, omit chartBars or use []. Never invent statistics. Do not use chartBars on summary/conclusion slides unless bullets contain digits or percentages.
+- Required per-slide "imageSearchQuery": a short English phrase (4–14 words) of concrete search keywords for Wikimedia Commons — nouns and proper nouns from THIS slide's title and bullets only (e.g. "Java ArrayList data structure diagram"). No generic words like "slide", "overview", "image", "photo".
 - Return JSON only with this exact shape:
 {
   "title":"...",
@@ -3249,6 +3264,7 @@ Rules:
       "notes":"...",
       "imageSuggestion":"...",
       "graphSuggestion":"...",
+      "imageSearchQuery":"...",
       "chartBars":[{"label":"...","value":0}]
     }
   ]
@@ -3280,7 +3296,7 @@ Return strict JSON only:
     {"text":"Primary source from uploaded material","url":"https://scholar.google.com/scholar?q=${encodeURIComponent(topic)}"}
   ],
   "slides":[
-    {"title":"Slide 1", "bullets":["...","...","..."], "notes":"...", "imageSuggestion":"...", "graphSuggestion":"...", "chartBars":[]}
+    {"title":"Slide 1", "bullets":["...","...","..."], "notes":"...", "imageSuggestion":"...", "graphSuggestion":"...", "imageSearchQuery":"topic keywords diagram", "chartBars":[]}
   ]
 }
 Create exactly ${requestedSlides} slides.
@@ -3761,13 +3777,20 @@ async function generatePresentationWithOllama(prompt) {
         .filter((s) => s?.title && Array.isArray(s?.bullets) && s.bullets.length)
         .slice(0, 20)
         .map((s) => {
-          const chartBars = normalizeChartBarsInput(s.chartBars);
+          const bullets = s.bullets.map((b) => String(b).trim()).filter(Boolean).slice(0, 6);
+          const textProof = [String(s.title || ''), ...bullets].join(' ');
+          const chartBars = normalizeChartBarsInput(s.chartBars, textProof);
+          const imageSearchQuery = String(s.imageSearchQuery || '')
+            .trim()
+            .replace(/\s+/g, ' ')
+            .slice(0, 220);
           const base = {
             title: String(s.title).trim(),
-            bullets: s.bullets.map((b) => String(b).trim()).filter(Boolean).slice(0, 6),
+            bullets,
             notes: String(s.notes || '').trim(),
             imageSuggestion: String(s.imageSuggestion || '').trim(),
             graphSuggestion: String(s.graphSuggestion || '').trim(),
+            ...(imageSearchQuery ? { imageSearchQuery } : {}),
           };
           return chartBars ? { ...base, chartBars } : base;
         })
@@ -3879,8 +3902,17 @@ function normalizeSlides(slides) {
   });
 }
 
-/** 2–5 bars, finite values, distinct labels; otherwise null (omit chart). */
-function normalizeChartBarsInput(raw) {
+function slideTextSuggestsNumericData(textProof) {
+  const t = String(textProof || '');
+  return (
+    /\d/.test(t) ||
+    /%|percent|percentage|ratio|proportion|×|\btimes\b|\bhalf\b|\bdouble\b|\btriple\b|°[cf]\b|\$|€|£/i.test(t)
+  );
+}
+
+/** 2–5 bars, finite values, distinct labels; drop unless slide text shows numeric/comparative grounding. */
+function normalizeChartBarsInput(raw, textProof) {
+  if (!slideTextSuggestsNumericData(textProof)) return null;
   if (!Array.isArray(raw)) return null;
   const out = [];
   const seen = new Set();

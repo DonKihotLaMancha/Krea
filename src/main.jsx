@@ -23,8 +23,17 @@ if (!rootEl) {
   });
 }
 
-// Register PWA after first paint so a SW failure can never block React.
+// Register PWA only in production. A dev/proxy service worker can otherwise serve stale JS bundles,
+// so UI changes (e.g. Flashcards) appear "stuck" until the cache updates.
 queueMicrotask(() => {
+  if (!import.meta.env.PROD) {
+    if ('serviceWorker' in navigator) {
+      void navigator.serviceWorker.getRegistrations().then((regs) => {
+        for (const r of regs) void r.unregister();
+      });
+    }
+    return;
+  }
   import('virtual:pwa-register')
     .then(({ registerSW }) => {
       try {
