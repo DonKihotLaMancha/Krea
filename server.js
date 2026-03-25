@@ -1210,8 +1210,12 @@ app.post('/api/library/pdf', async (req, res) => {
   const name = String(req.body?.name || '').trim();
   const content = String(req.body?.content || '').trim();
   const pdfBase64 = typeof req.body?.pdfBase64 === 'string' ? req.body.pdfBase64.trim() : '';
-  if (!studentId || !name || !content) return res.status(400).json({ error: 'Missing studentId/name/content.' });
-  if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
+  if (!studentId || !name || !content) {
+    return res.status(400).json({ error: 'Missing studentId/name/content.' });
+  }
+  if (!isUuid(studentId)) {
+    return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
+  }
   try {
     await ensureProfile(studentId);
     // Always create a new source row so every upload is kept (same filename allowed).
@@ -1261,8 +1265,10 @@ app.post('/api/library/pdf', async (req, res) => {
       .insert({ source_id: source.id, raw_text: content, cleaned_text: content });
     if (contentError) throw contentError;
 
+    let chunkPartCount = 0;
     try {
       const parts = chunkTextForStore(content);
+      chunkPartCount = parts.length;
       const limited = parts.slice(0, MAX_RAG_EMBED_CHUNKS);
       const chunkRows = limited.map((c, idx) => ({
         source_id: source.id,

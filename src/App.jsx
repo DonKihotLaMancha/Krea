@@ -349,6 +349,9 @@ async function upsertStudent(studentId, name = 'Student') {
   }, 12000);
 }
 
+/** Must exceed worst-case server indexing (embeddings); UI copy allows 1–3+ minutes for large PDFs. */
+const LIBRARY_PDF_SAVE_TIMEOUT_MS = 240_000;
+
 async function savePdfToLibrary({ studentId, name, content, pdfBase64 }) {
   if (!studentId) return null;
   const resp = await fetchWithTimeout(
@@ -363,7 +366,7 @@ async function savePdfToLibrary({ studentId, name, content, pdfBase64 }) {
         ...(pdfBase64 ? { pdfBase64 } : {}),
       }),
     },
-    120_000,
+    LIBRARY_PDF_SAVE_TIMEOUT_MS,
   );
   if (!resp.ok) {
     const t = await resp.text();
@@ -1258,12 +1261,16 @@ export function StudentApp() {
         try {
           let pdfBase64;
           if (file.name.toLowerCase().endsWith('.pdf') && file.size <= 18_000_000) {
+            setGenerationIndeterminate(true);
+            setGenerationStage('Encoding PDF for your account…');
             try {
               pdfBase64 = await fileToBase64DataOnly(file);
             } catch {
               pdfBase64 = undefined;
             }
           }
+          setGenerationIndeterminate(true);
+          setGenerationStage('Saving to your account (indexing can take 1–3 minutes for large PDFs)…');
           const saved = await savePdfToLibrary({
             studentId,
             name: chunk.name,
@@ -1290,7 +1297,15 @@ export function StudentApp() {
       } else {
         setNotice('Saved in this browser only — sign in to keep PDFs in your account across devices.');
       }
-      await generateForChunk(chunkForGen);
+      // Upload + save are done; flashcards use AI separately — do not block this handler on Ollama (avoids “stuck” UI).
+      setGenerationProgress(0);
+      setGenerationStage('');
+      setGenerationIndeterminate(false);
+      queueMicrotask(() => {
+        void generateForChunk(chunkForGen).catch((e) => {
+          setNotice(`Flashcard generation failed: ${e?.message || e}`);
+        });
+      });
     } catch (error) {
       setNotice(`Upload failed: ${error?.message || 'Unknown error.'}`);
       setGenerationProgress(0);
