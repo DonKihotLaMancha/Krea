@@ -1,8 +1,20 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
-/** Pastel branch palette — children inherit their parent branch color (reference-style). */
+/** Pastel branch palette — fallback when categoryTag is missing. */
 const ROOT_FILL = '#fdba74';
 const BRANCH_PALETTES = ['#fde68a', '#bae6fd', '#bbf7d0', '#fecaca', '#e9d5ff', '#fed7aa', '#a5f3fc', '#ddd6fe'];
+
+/** Semantic fills by categoryTag (study-tool convention). */
+const CATEGORY_FILL = {
+  theory: '#bbf7d0',
+  process: '#86efac',
+  action: '#fde68a',
+  definition: '#93c5fd',
+  fact: '#bfdbfe',
+  exam: '#fecaca',
+  risk: '#fca5a5',
+  other: '#e5e7eb',
+};
 
 const COL_GAP = 200;
 const ROW_GAP = 56;
@@ -52,6 +64,35 @@ function measureBox(label, level) {
   const w = Math.min(MAX_BOX_W, Math.max(MIN_BOX_W, textW + BOX_PAD_X * 2));
   const h = Math.max(40, lines.length * LINE_HEIGHT + BOX_PAD_Y * 2);
   return { lines, w, h, lineHeight: LINE_HEIGHT, maxChars };
+}
+
+function measureBoxForNode(n) {
+  const label = nodeDisplayLabel(n);
+  const tldr = String(n.tldr || '').trim();
+  const maxChars = n.level === 0 ? 18 : 16;
+  const labelLines = splitLabelToLines(label, n.level === 0 ? 3 : 2, maxChars);
+  const tldrLines = tldr ? splitLabelToLines(tldr, 2, 26) : [];
+  const cardStrip = 14;
+  const lineHeight = LINE_HEIGHT;
+  const tldrLineHeight = LINE_HEIGHT - 1;
+  const allLens = [...labelLines.map((l) => l.length), ...tldrLines.map((l) => l.length), 4];
+  const textW = Math.max(...allLens) * CHAR_PX;
+  const w = Math.min(MAX_BOX_W + 8, Math.max(MIN_BOX_W, textW + BOX_PAD_X * 2));
+  const labelH = labelLines.length * lineHeight;
+  const tldrH = tldrLines.length ? 4 + tldrLines.length * tldrLineHeight : 0;
+  const h = Math.max(44, labelH + tldrH + BOX_PAD_Y * 2 + cardStrip);
+  return { labelLines, tldrLines, w, h, lineHeight, tldrLineHeight, cardStrip };
+}
+
+function getVisibleNodeIds(root, children, collapsedIds) {
+  const out = new Set();
+  function walk(id) {
+    out.add(id);
+    if (collapsedIds.has(id)) return;
+    for (const c of children.get(id) || []) walk(c);
+  }
+  if (root) walk(root);
+  return out;
 }
 
 function buildDirectedChildren(nodes, links) {
@@ -156,10 +197,10 @@ function layoutLevelColumns(nodes) {
   for (const lv of sortedLevels) {
     const arr = byLevel.get(lv);
     const colX = lv * COL_GAP + pad;
-    const totalH = arr.reduce((s, item) => s + measureBox(nodeDisplayLabel(item), lv).h + ROW_GAP, 0);
+    const totalH = arr.reduce((s, item) => s + measureBoxForNode({ ...item, level: lv }).h + ROW_GAP, 0);
     let y = pad + Math.max(0, (400 - totalH) / 2);
     for (const item of arr) {
-      const m = measureBox(nodeDisplayLabel(item), lv);
+      const m = measureBoxForNode({ ...item, level: lv });
       out.set(item.id, { x: colX, y, depth: lv, w: m.w, h: m.h });
       y += m.h + ROW_GAP;
       maxW = Math.max(maxW, colX + m.w);
@@ -169,41 +210,52 @@ function layoutLevelColumns(nodes) {
   return { positions: out, contentW: maxW + pad, contentH: maxH + pad };
 }
 
-function buildNodesFromMap(conceptMapData) {
-  const raw = (conceptMapData?.nodes || []).slice(0, 40);
+function buildNodesFromMap(conceptMapData, collapsedIds = new Set()) {
+  const raw = (conceptMapData?.nodes || []).slice(0, 72);
   if (!raw.length) return [];
 
-  const nodes = raw.map((item, i) => ({
+  const nodes = raw.map((item) => ({
     id: item.id,
     nombre: item.label,
     label: item.label,
     descripcion: item.description,
+    tldr: String(item.tldr || '').trim(),
+    categoryTag: String(item.categoryTag || 'other').toLowerCase(),
     level: item.level !== undefined && item.level !== null ? Math.max(0, Math.min(3, Number(item.level))) : 1,
   }));
 
-  const links = conceptMapData?.links || [];
-  const measureById = new Map(nodes.map((n) => {
-    const m = measureBox(nodeDisplayLabel(n), n.level);
-    return [n.id, m];
-  }));
+  const allLinks = conceptMapData?.links || [];
+  const treeLinks = allLinks.filter((l) => !l.crossLink);
+  const measureById = new Map(nodes.map((n) => [n.id, measureBoxForNode(n)]));
 
-  if (!links.length) {
+  if (!treeLinks.length) {
     const { positions } = layoutLevelColumns(nodes);
     return nodes.map((n) => {
       const p = positions.get(n.id);
-      return { ...n, x: p.x, y: p.y, w: p.w, h: p.h };
+      const m = measureById.get(n.id) || measureBoxForNode(n);
+      return { ...n, x: p.x, y: p.y, w: m.w, h: m.h, _measure: m };
     });
   }
 
-  const { root, children } = buildDirectedChildren(nodes, links);
+  const { root, children } = buildDirectedChildren(nodes, treeLinks);
   if (!root) return [];
 
-  const posMap = layoutTreePositions(root, children, measureById);
-  return nodes
+  const visibleIds = getVisibleNodeIds(root, children, collapsedIds);
+  const nodesVisible = nodes.filter((n) => visibleIds.has(n.id));
+  const childrenFiltered = new Map(nodesVisible.map((n) => [n.id, []]));
+  for (const n of nodesVisible) {
+    const ch = (children.get(n.id) || []).filter((c) => visibleIds.has(c));
+    childrenFiltered.set(n.id, ch);
+  }
+
+  const measureByVisible = new Map(nodesVisible.map((n) => [n.id, measureBoxForNode(n)]));
+  const posMap = layoutTreePositions(root, childrenFiltered, measureByVisible);
+  return nodesVisible
     .filter((n) => posMap.has(n.id))
     .map((n) => {
       const p = posMap.get(n.id);
-      return { ...n, x: p.x, y: p.y, w: p.w, h: p.h };
+      const m = measureByVisible.get(n.id) || measureBoxForNode(n);
+      return { ...n, x: p.x, y: p.y, w: m.w, h: m.h, _measure: m };
     });
 }
 
@@ -281,9 +333,14 @@ export default function ConceptMap({
   conceptMapData = null,
   isGenerating = false,
   onGenerate,
+  onGenerateFlashcardsFromTopic,
 }) {
   const [selectedId, setSelectedId] = useState(null);
   const [zoomLevel, setZoomLevel] = useState(1);
+  const [deepDive, setDeepDive] = useState(false);
+  const [collapsedIdsArr, setCollapsedIdsArr] = useState([]);
+  const scrollRef = useRef(null);
+  const panRef = useRef({ active: false, sx: 0, sy: 0, sl: 0, st: 0 });
   const selectedChunk = chunks.find((c) => c.id === activePdfId) || chunks[0];
   const isFromAiMap = !!(conceptMapData?.nodes?.length);
 
@@ -292,9 +349,15 @@ export default function ConceptMap({
     return t.length > 40 ? `${t.slice(0, 38)}…` : t;
   }, [conceptMapData?.title]);
 
+  const collapsedSet = useMemo(() => new Set(collapsedIdsArr), [collapsedIdsArr]);
+
+  useEffect(() => {
+    setCollapsedIdsArr([]);
+  }, [conceptMapData?.title, conceptMapData?.nodes?.length]);
+
   const layout = useMemo(() => {
     if (isFromAiMap) {
-      const placed = buildNodesFromMap(conceptMapData);
+      const placed = buildNodesFromMap(conceptMapData, collapsedSet);
       let maxR = 0;
       let maxB = 0;
       for (const n of placed) {
@@ -304,10 +367,10 @@ export default function ConceptMap({
       const pad = 48;
       const contentW = Math.max(520, maxR + pad);
       const contentH = Math.max(360, maxB + pad);
-      const links = conceptMapData?.links || [];
+      const treeLinks = (conceptMapData?.links || []).filter((l) => !l.crossLink);
       const { root, children } = buildDirectedChildren(
         placed.map((n) => ({ id: n.id, label: n.nombre, level: n.level })),
-        links,
+        treeLinks,
       );
       const branchFill = assignBranchColorsFromTree(root, children);
       return { nodes: placed, hub: null, contentW, contentH, branchFill, children, rootId: root };
@@ -325,36 +388,46 @@ export default function ConceptMap({
       children: null,
       rootId: hub?.id,
     };
-  }, [apartados, conceptMapData, isFromAiMap, hubLabel]);
+  }, [apartados, conceptMapData, isFromAiMap, hubLabel, collapsedSet]);
 
-  const { nodes, hub, contentW, contentH, branchFill } = layout;
+  const { nodes, hub, contentW, contentH, branchFill, children: treeChildrenMap } = layout;
 
   const allDrawNodes = useMemo(() => (hub ? [hub, ...nodes] : nodes), [hub, nodes]);
 
   const selected = allDrawNodes.find((n) => n.id === selectedId) || allDrawNodes[0];
 
-  const linksToDraw = useMemo(() => {
-    if (isFromAiMap && conceptMapData?.links?.length) return conceptMapData.links;
-    if (!isFromAiMap && hub && nodes.length) {
-      return nodes.map((n) => ({ source: hub.id, target: n.id }));
-    }
-    return [];
-  }, [isFromAiMap, conceptMapData?.links, hub, nodes]);
+  const visibleNodeIds = useMemo(() => new Set(allDrawNodes.map((n) => n.id)), [allDrawNodes]);
+
+  const treeEdges = useMemo(() => {
+    if (!isFromAiMap || !conceptMapData?.links?.length) return [];
+    return conceptMapData.links.filter(
+      (l) => !l.crossLink && visibleNodeIds.has(l.source) && visibleNodeIds.has(l.target),
+    );
+  }, [isFromAiMap, conceptMapData?.links, visibleNodeIds]);
+
+  const crossEdges = useMemo(() => {
+    if (!isFromAiMap || !conceptMapData?.links?.length) return [];
+    return conceptMapData.links.filter(
+      (l) => l.crossLink && visibleNodeIds.has(l.source) && visibleNodeIds.has(l.target),
+    );
+  }, [isFromAiMap, conceptMapData?.links, visibleNodeIds]);
+
+  const hubEdges = useMemo(() => {
+    if (isFromAiMap || !hub || !nodes.length) return [];
+    return nodes.map((n) => ({ source: hub.id, target: n.id, label: '', crossLink: false }));
+  }, [isFromAiMap, hub, nodes]);
 
   const baseView = useMemo(() => {
     const pad = 24;
     return { x: 0, y: 0, w: contentW + pad * 2, h: contentH + pad * 2 };
   }, [contentW, contentH]);
 
-  const viewBoxStr = useMemo(() => {
-    const { x, y, w, h } = baseView;
-    const z = Math.max(0.35, Math.min(3, zoomLevel));
-    const vw = w / z;
-    const vh = h / z;
-    const vx = x + (w - vw) / 2;
-    const vy = y + (h - vh) / 2;
-    return `${vx.toFixed(2)} ${vy.toFixed(2)} ${vw.toFixed(2)} ${vh.toFixed(2)}`;
-  }, [baseView, zoomLevel]);
+  useEffect(() => {
+    setZoomLevel(1);
+  }, [contentW, contentH]);
+
+  const displayW = baseView.w * Math.max(0.25, Math.min(4, zoomLevel));
+  const displayH = baseView.h * Math.max(0.25, Math.min(4, zoomLevel));
 
   const downloadBlob = (filename, blob) => {
     const url = URL.createObjectURL(blob);
@@ -405,16 +478,41 @@ export default function ConceptMap({
   };
 
   const exportHtml = () => {
+    const exportLinks = isFromAiMap ? conceptMapData?.links || [] : hubEdges;
     const payload = JSON.stringify({
       title: conceptMapData?.title || 'Concept Map',
       nodes: allDrawNodes,
-      links: conceptMapData?.links || linksToDraw,
+      links: exportLinks,
     });
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>Concept Map</title></head><body><h2>Concept Map Export</h2><pre id="data"></pre><script>const data=${payload};document.getElementById('data').textContent=JSON.stringify(data,null,2);</script></body></html>`;
     downloadBlob('concept-map.html', new Blob([html], { type: 'text/html' }));
   };
 
   const nodeById = useMemo(() => new Map(allDrawNodes.map((n) => [n.id, n])), [allDrawNodes]);
+
+  const drawEdges = (list, { dashed = false, stroke = '#c4c4c4' }) =>
+    list.map((l, i) => {
+      const source = nodeById.get(l.source);
+      const target = nodeById.get(l.target);
+      if (!source || !target) return null;
+      const x1 = source.x + source.w;
+      const y1 = source.y + source.h / 2;
+      const x2 = target.x;
+      const y2 = target.y + target.h / 2;
+      return (
+        <path
+          key={`${dashed ? 'x' : 't'}-${l.source}-${l.target}-${i}`}
+          d={edgePathBezier(x1, y1, x2, y2)}
+          fill="none"
+          stroke={dashed ? '#64748b' : stroke}
+          strokeWidth={dashed ? 1.25 : 1.5}
+          strokeDasharray={dashed ? '7 5' : undefined}
+          opacity={dashed ? 0.95 : 1}
+        >
+          <title>{l.label || (dashed ? 'cross-link' : 'related')}</title>
+        </path>
+      );
+    });
 
   return (
     <section className="panel">
@@ -439,28 +537,43 @@ export default function ConceptMap({
           ) : null}
         </div>
       </div>
-      <div className="mb-3 grid grid-cols-1 gap-2 md:grid-cols-[1fr_auto]">
-        <select
-          className="input"
-          value={activePdfId || ''}
-          onChange={(e) => onSelectPdf?.(e.target.value)}
-          disabled={!chunks.length || isGenerating}
-        >
-          {!chunks.length ? <option value="">Upload a document first</option> : null}
-          {chunks.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          className="btn-primary"
-          disabled={!selectedChunk || isGenerating}
-          onClick={() => selectedChunk && onGenerate(selectedChunk.id)}
-        >
-          {isGenerating ? 'Generating map...' : 'Generate map'}
-        </button>
+      <div className="mb-3 flex flex-col gap-2">
+        <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_auto]">
+          <select
+            className="input"
+            value={activePdfId || ''}
+            onChange={(e) => onSelectPdf?.(e.target.value)}
+            disabled={!chunks.length || isGenerating}
+          >
+            {!chunks.length ? <option value="">Upload a document first</option> : null}
+            {chunks.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={!selectedChunk || isGenerating}
+            onClick={() => selectedChunk && onGenerate(selectedChunk.id, { deepDive })}
+          >
+            {isGenerating ? 'Generating map...' : deepDive ? 'Generate deep dive map' : 'Generate map'}
+          </button>
+        </div>
+        <label className="flex cursor-pointer items-start gap-2 text-xs text-slate-700">
+          <input
+            type="checkbox"
+            className="mt-0.5 rounded border-border"
+            checked={deepDive}
+            onChange={(e) => setDeepDive(e.target.checked)}
+            disabled={isGenerating}
+          />
+          <span>
+            <strong className="text-slate-800">Deep dive</strong> — pulls a Wikipedia summary when possible, expands the graph
+            (24–40 nodes), tighter link labels, and suggested books/papers/standards to read next. Slower and uses more context.
+          </span>
+        </label>
       </div>
       {!allDrawNodes.length ? (
         <div className="mb-3 rounded-lg border border-border bg-slate-50 p-3 text-sm text-muted">
@@ -468,9 +581,20 @@ export default function ConceptMap({
         </div>
       ) : (
         <p className="mb-3 text-xs text-muted">
-          Tap a node for details. Branches use matching colors; lines show how ideas connect.
+          Tap a node for details. Solid lines = hierarchy; dashed = cross-links. Colors follow category tags (see legend).
         </p>
       )}
+      {isFromAiMap && allDrawNodes.length ? (
+        <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted">
+          <span className="font-semibold text-slate-600">Legend:</span>
+          {Object.entries(CATEGORY_FILL).map(([k, col]) => (
+            <span key={k} className="inline-flex items-center gap-1">
+              <span className="inline-block h-2.5 w-2.5 rounded-sm border border-slate-300" style={{ background: col }} />
+              {k}
+            </span>
+          ))}
+        </div>
+      ) : null}
 
       {allDrawNodes.length ? (
         <div className="relative overflow-hidden rounded-xl border border-border bg-[#f4f4f5]">
@@ -485,50 +609,103 @@ export default function ConceptMap({
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
             </svg>
           </button>
-          <div className="overflow-x-auto p-3 pt-12">
+          <p className="absolute left-3 top-11 z-[5] max-w-[min(100%,36rem)] rounded border border-border bg-white/95 px-2 py-1.5 text-[11px] leading-snug text-muted shadow-sm">
+            Drag empty canvas to pan · scrollbars · <kbd className="rounded border border-border bg-slate-50 px-1">Ctrl</kbd> + wheel
+            to zoom · use +/−
+          </p>
+          <div
+            ref={scrollRef}
+            className="max-h-[78vh] cursor-grab touch-pan-y overflow-auto overscroll-contain p-3 pt-12 active:cursor-grabbing"
+            onWheel={(e) => {
+              if (!e.ctrlKey) return;
+              e.preventDefault();
+              setZoomLevel((z) => Math.max(0.25, Math.min(4, z * (e.deltaY > 0 ? 0.92 : 1.08))));
+            }}
+            onPointerDown={(e) => {
+              if (e.button !== 0) return;
+              if (e.target.closest('.concept-map-node') || e.target.closest('.concept-map-no-pan')) return;
+              const el = scrollRef.current;
+              if (!el) return;
+              panRef.current = {
+                active: true,
+                sx: e.clientX,
+                sy: e.clientY,
+                sl: el.scrollLeft,
+                st: el.scrollTop,
+              };
+              try {
+                e.currentTarget.setPointerCapture(e.pointerId);
+              } catch {
+                /* ignore */
+              }
+            }}
+            onPointerMove={(e) => {
+              if (!panRef.current.active) return;
+              const el = scrollRef.current;
+              if (!el) return;
+              const dx = e.clientX - panRef.current.sx;
+              const dy = e.clientY - panRef.current.sy;
+              el.scrollLeft = panRef.current.sl - dx;
+              el.scrollTop = panRef.current.st - dy;
+            }}
+            onPointerUp={(e) => {
+              panRef.current.active = false;
+              try {
+                e.currentTarget.releasePointerCapture(e.pointerId);
+              } catch {
+                /* ignore */
+              }
+            }}
+            onPointerCancel={(e) => {
+              panRef.current.active = false;
+              try {
+                e.currentTarget.releasePointerCapture(e.pointerId);
+              } catch {
+                /* ignore */
+              }
+            }}
+            role="presentation"
+          >
             <svg
               id="concept-map-svg"
-              viewBox={viewBoxStr}
-              preserveAspectRatio="xMidYMid meet"
-              className="h-[480px] max-h-[70vh] w-full min-w-[320px]"
+              width={displayW}
+              height={displayH}
+              viewBox={`0 0 ${baseView.w} ${baseView.h}`}
+              preserveAspectRatio="xMinYMin meet"
+              className="block min-w-0"
             >
               <rect x="0" y="0" width={baseView.w} height={baseView.h} fill="#f4f4f5" />
               <g transform={`translate(24, 24)`}>
-                {linksToDraw.map((l, i) => {
-                  const source = nodeById.get(l.source);
-                  const target = nodeById.get(l.target);
-                  if (!source || !target) return null;
-                  const x1 = source.x + source.w;
-                  const y1 = source.y + source.h / 2;
-                  const x2 = target.x;
-                  const y2 = target.y + target.h / 2;
-                  return (
-                    <path
-                      key={`edge-${l.source}-${l.target}-${i}`}
-                      d={edgePathBezier(x1, y1, x2, y2)}
-                      fill="none"
-                      stroke="#c4c4c4"
-                      strokeWidth="1.5"
-                    >
-                      <title>{l.label || 'related'}</title>
-                    </path>
-                  );
-                })}
+                {drawEdges(isFromAiMap ? treeEdges : hubEdges, { dashed: false })}
+                {drawEdges(crossEdges, { dashed: true })}
 
                 {allDrawNodes.map((n) => {
                   const isActive = selected?.id === n.id;
-                  const label = nodeDisplayLabel(n);
-                  const m = n._lines ? { lines: n._lines, w: n.w, h: n.h, lineHeight: LINE_HEIGHT } : measureBox(label, n.level);
-                  const fill =
-                    branchFill.get(n.id) ||
-                    (n.level === 0 ? ROOT_FILL : BRANCH_PALETTES[Math.abs(String(n.id).length) % BRANCH_PALETTES.length]);
+                  const m = n._measure || measureBoxForNode(n);
+                  const labelLineTexts = n._lines
+                    ? splitLabelToLines(nodeDisplayLabel(n), n.level === 0 ? 3 : 2, n.level === 0 ? 18 : 16)
+                    : m.labelLines;
+                  const tldrLineTexts = n._lines ? [] : m.tldrLines || [];
+                  const lineHeight = m.lineHeight || LINE_HEIGHT;
+                  const tldrLineHeight = m.tldrLineHeight || LINE_HEIGHT - 1;
+                  const tag = String(n.categoryTag || 'other').toLowerCase();
+                  const fill = isFromAiMap
+                    ? CATEGORY_FILL[tag] || branchFill.get(n.id) || ROOT_FILL
+                    : branchFill.get(n.id) ||
+                      (n.level === 0 ? ROOT_FILL : BRANCH_PALETTES[Math.abs(String(n.id).length) % BRANCH_PALETTES.length]);
                   const strokeW = isActive ? 2.25 : 1;
-                  const lines = m.lines;
                   const fs = n.level === 0 ? 12.5 : 11;
-                  const midY = n.y + n.h / 2;
-                  const startY = midY - ((lines.length - 1) * m.lineHeight) / 2;
+                  const fsTldr = 9.5;
+                  const labelBlockH = labelLineTexts.length * lineHeight;
+                  const tldrBlockH = tldrLineTexts.length ? 4 + tldrLineTexts.length * tldrLineHeight : 0;
+                  const contentH = labelBlockH + tldrBlockH;
+                  const startY = n.y + (n.h - contentH) / 2;
+                  const desc = String(n.descripcion || '').trim();
+                  const hasCh = isFromAiMap && (treeChildrenMap?.get(n.id) || []).length > 0;
+                  const isCollapsed = collapsedIdsArr.includes(n.id);
                   return (
-                    <g key={n.id} className="cursor-pointer" onClick={() => setSelectedId(n.id)}>
+                    <g key={n.id} className="concept-map-node cursor-pointer" onClick={() => setSelectedId(n.id)}>
+                      <title>{desc || String(n.tldr || n.nombre || '')}</title>
                       <rect
                         x={n.x}
                         y={n.y}
@@ -540,11 +717,46 @@ export default function ConceptMap({
                         stroke="#171717"
                         strokeWidth={strokeW}
                       />
-                      {lines.map((line, idx) => (
+                      {hasCh ? (
+                        <g
+                          className="concept-map-no-pan"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setCollapsedIdsArr((prev) =>
+                              prev.includes(n.id) ? prev.filter((x) => x !== n.id) : [...prev, n.id],
+                            );
+                          }}
+                        >
+                          <rect
+                            x={n.x + 4}
+                            y={n.y + 4}
+                            width={16}
+                            height={16}
+                            rx={4}
+                            fill="rgba(255,255,255,0.85)"
+                            stroke="#525252"
+                            strokeWidth={1}
+                          />
+                          <text
+                            x={n.x + 12}
+                            y={n.y + 15}
+                            textAnchor="middle"
+                            dominantBaseline="middle"
+                            fill="#171717"
+                            fontSize="12"
+                            fontWeight="700"
+                            style={{ fontFamily: 'ui-sans-serif, system-ui, sans-serif' }}
+                          >
+                            {isCollapsed ? '+' : '−'}
+                          </text>
+                          <title>{isCollapsed ? 'Expand branch' : 'Collapse branch'}</title>
+                        </g>
+                      ) : null}
+                      {labelLineTexts.map((line, idx) => (
                         <text
-                          key={idx}
+                          key={`l-${idx}`}
                           x={n.x + n.w / 2}
-                          y={startY + idx * m.lineHeight}
+                          y={startY + idx * lineHeight + lineHeight / 2}
                           textAnchor="middle"
                           dominantBaseline="middle"
                           fill="#171717"
@@ -555,6 +767,45 @@ export default function ConceptMap({
                           {line}
                         </text>
                       ))}
+                      {tldrLineTexts.map((line, idx) => (
+                        <text
+                          key={`t-${idx}`}
+                          x={n.x + n.w / 2}
+                          y={startY + labelBlockH + 4 + idx * tldrLineHeight + tldrLineHeight / 2}
+                          textAnchor="middle"
+                          dominantBaseline="middle"
+                          fill="#334155"
+                          fontSize={fsTldr}
+                          fontWeight="500"
+                          style={{ fontFamily: 'ui-sans-serif, system-ui, sans-serif' }}
+                        >
+                          {line}
+                        </text>
+                      ))}
+                      {isFromAiMap && onGenerateFlashcardsFromTopic && selectedChunk ? (
+                        <text
+                          className="concept-map-no-pan"
+                          x={n.x + n.w / 2}
+                          y={n.y + n.h - 5}
+                          textAnchor="middle"
+                          fill="#1d4ed8"
+                          fontSize="9"
+                          fontWeight="700"
+                          style={{ fontFamily: 'ui-sans-serif, system-ui, sans-serif', cursor: 'pointer' }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onGenerateFlashcardsFromTopic({
+                              nodeId: n.id,
+                              label: n.nombre,
+                              tldr: n.tldr,
+                              description: n.descripcion,
+                              categoryTag: n.categoryTag,
+                            });
+                          }}
+                        >
+                          Flashcards →
+                        </text>
+                      ) : null}
                     </g>
                   );
                 })}
@@ -565,7 +816,7 @@ export default function ConceptMap({
             <button
               type="button"
               className="rounded px-2 py-1 text-sm font-medium text-zinc-700 hover:bg-zinc-100"
-              onClick={() => setZoomLevel((z) => Math.min(3, z * 1.2))}
+              onClick={() => setZoomLevel((z) => Math.min(4, z * 1.2))}
               aria-label="Zoom in"
             >
               +
@@ -573,7 +824,7 @@ export default function ConceptMap({
             <button
               type="button"
               className="rounded px-2 py-1 text-sm font-medium text-zinc-700 hover:bg-zinc-100"
-              onClick={() => setZoomLevel((z) => Math.max(0.35, z / 1.2))}
+              onClick={() => setZoomLevel((z) => Math.max(0.25, z / 1.2))}
               aria-label="Zoom out"
             >
               −
@@ -589,15 +840,65 @@ export default function ConceptMap({
         </div>
       ) : null}
 
+      {conceptMapData?.externalResources?.length ? (
+        <div className="mt-4 rounded-xl border border-border bg-white p-3">
+          <p className="text-sm font-semibold text-slate-800">Suggested further reading</p>
+          <p className="mb-2 text-[11px] text-muted">
+            From deep dive mode — verify links before relying on them for coursework.
+          </p>
+          <ul className="space-y-2 text-xs text-slate-700">
+            {conceptMapData.externalResources.map((r, i) => (
+              <li key={`ext-${i}`} className="rounded-lg border border-slate-100 bg-slate-50/80 px-2 py-1.5">
+                <span className="font-semibold text-slate-800">
+                  [{String(r.kind || 'ref').slice(0, 24)}] {r.title}
+                </span>
+                {r.note ? <span className="text-muted"> — {r.note}</span> : null}
+                {r.url ? (
+                  <a
+                    href={r.url}
+                    className="ml-1 text-canvas-primary underline"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    Open
+                  </a>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
       {selected && allDrawNodes.length ? (
         <div className="mt-3 rounded-xl border border-border bg-slate-50 p-3">
           <p className="text-sm font-semibold text-text">{selected.nombre}</p>
           {selected.level !== undefined ? (
             <p className="text-xs text-muted">
               Tier {selected.level} {selected.level === 0 ? '(theme)' : ''}
+              {isFromAiMap && selected.categoryTag ? ` · ${selected.categoryTag}` : ''}
             </p>
           ) : null}
+          {isFromAiMap && selected.tldr ? (
+            <p className="mt-1 text-sm text-slate-800">{selected.tldr}</p>
+          ) : null}
           <p className="mt-1 text-sm text-muted">{selected.descripcion || 'No description available.'}</p>
+          {isFromAiMap && onGenerateFlashcardsFromTopic && selectedChunk ? (
+            <button
+              type="button"
+              className="btn-primary mt-3 text-sm"
+              onClick={() =>
+                onGenerateFlashcardsFromTopic({
+                  nodeId: selected.id,
+                  label: selected.nombre,
+                  tldr: selected.tldr,
+                  description: selected.descripcion,
+                  categoryTag: selected.categoryTag,
+                })
+              }
+            >
+              Generate flashcards for this topic
+            </button>
+          ) : null}
         </div>
       ) : null}
     </section>

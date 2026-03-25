@@ -199,11 +199,13 @@ function fallbackCardsFromText(raw) {
     }));
 }
 
-async function generateCardsWithOllama(text) {
+async function generateCardsWithOllama(text, { focusTopic = '' } = {}) {
+  const body = { text };
+  if (String(focusTopic || '').trim()) body.focusTopic = String(focusTopic).trim();
   const resp = await fetchWithTimeout('/api/flashcards', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify(body),
   }, AI_FLASHCARDS_TIMEOUT_MS);
   if (!resp.ok) throw new Error('Ollama API error');
   const data = await resp.json();
@@ -239,18 +241,22 @@ async function generatePresentationWithOllama({ topic, promptText, sources = [],
   };
 }
 
-async function generateConceptMapWithOllama({ text, title }) {
+async function generateConceptMapWithOllama({ text, title, deepDive = false }) {
+  const body = { text, title };
+  if (deepDive) body.deepDive = true;
   const resp = await fetchWithTimeout('/api/concept-map', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, title }),
-  }, AI_REQUEST_TIMEOUT_MS);
+    body: JSON.stringify(body),
+  }, deepDive ? Math.max(AI_REQUEST_TIMEOUT_MS, 180000) : AI_REQUEST_TIMEOUT_MS);
   if (!resp.ok) throw new Error('Concept map API error');
   const data = await resp.json();
   return {
     title: String(data.title || title || 'Concept Map').trim(),
     nodes: Array.isArray(data.nodes) ? data.nodes : [],
     links: Array.isArray(data.links) ? data.links : [],
+    externalResources: Array.isArray(data.externalResources) ? data.externalResources : [],
+    deepDive: Boolean(data.deepDive),
   };
 }
 
@@ -388,11 +394,13 @@ async function tutorSocraticWithOllama({ prompt, sources, studentId, bottlenecks
   return await resp.json();
 }
 
-async function generateAnkiFlashcardsWithOllama({ sources }) {
+async function generateAnkiFlashcardsWithOllama({ sources, focusTopic = '' }) {
+  const body = { format: 'anki', sources };
+  if (String(focusTopic || '').trim()) body.focusTopic = String(focusTopic).trim();
   const resp = await fetchWithTimeout('/api/flashcards', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ format: 'anki', sources }),
+    body: JSON.stringify(body),
   }, AI_REQUEST_TIMEOUT_MS);
   if (!resp.ok) throw new Error('Anki flashcards API error');
   return await resp.json();
@@ -1414,7 +1422,7 @@ export function StudentApp() {
     return items;
   }, [chunks, cards, messages, tutorMessages, presentations, tasks]);
 
-  const generateForChunk = async (chunk, { append = false } = {}) => {
+  const generateForChunk = async (chunk, { append = false, focusTopic = '' } = {}) => {
     if (!chunk?.content?.trim()) {
       setNotice('No readable content found for flashcard generation.');
       return;
@@ -1426,13 +1434,15 @@ export function StudentApp() {
     setNotice('Generating your study set...');
     try {
       let aiCards = [];
+      const focus = String(focusTopic || '').trim();
       if (flashcardDeckStyle === 'anki') {
         const data = await generateAnkiFlashcardsWithOllama({
           sources: [{ name: chunk.name, content: chunk.content }],
+          ...(focus ? { focusTopic: focus } : {}),
         });
         aiCards = ankiCardsToStudyCards(data.cards || []);
       } else {
-        aiCards = await generateCardsWithOllama(chunk.content);
+        aiCards = await generateCardsWithOllama(chunk.content, focus ? { focusTopic: focus } : {});
       }
       if (aiCards.length) {
         const normalized = tagFlashcardsForChunk(chunk, normalizeStudyCards(aiCards));
@@ -1854,18 +1864,23 @@ export function StudentApp() {
     }
   };
 
-  const generateConceptMap = async (chunkId) => {
+  const generateConceptMap = async (chunkId, { deepDive = false } = {}) => {
     const chunk = chunkId ? chunks.find((c) => c.id === chunkId) : activeChunk;
     if (!chunk?.content?.trim()) {
       setNotice('Upload a PDF first, then generate a concept map.');
       return;
     }
     setIsGeneratingConceptMap(true);
-    setNotice('Generating concept map from document...');
+    setNotice(
+      deepDive
+        ? 'Deep dive: fetching cross-references and building a larger map (may take a few minutes)...'
+        : 'Generating concept map from document...',
+    );
     try {
       const generated = await generateConceptMapWithOllama({
         text: chunk.content,
         title: chunk.name.replace(/\.[^.]+$/, ''),
+        deepDive,
       });
       if (generated.nodes.length) {
         setConceptMapData(generated);
@@ -1899,8 +1914,8 @@ export function StudentApp() {
         }
         setNotice(
           studentId
-            ? `Concept map generated with ${generated.nodes.length} concepts.`
-            : `Concept map generated with ${generated.nodes.length} concepts (local only until sign-in).`,
+            ? `${deepDive ? 'Deep dive map' : 'Concept map'} generated with ${generated.nodes.length} concepts.`
+            : `${deepDive ? 'Deep dive map' : 'Concept map'} generated with ${generated.nodes.length} concepts (local only until sign-in).`,
         );
         return;
       }
@@ -2066,17 +2081,32 @@ export function StudentApp() {
 
       {tab === 'Flashcards' ? (
         <>
-          <div className="mb-2 flex flex-wrap items-center gap-2 px-1">
-            <span className="text-xs text-muted">Deck style (Ingest generate)</span>
-            <select
-              className="input max-w-xs py-1 text-xs"
-              value={flashcardDeckStyle}
-              onChange={(e) => setFlashcardDeckStyle(e.target.value)}
+          <div className="mb-4 flex flex-col gap-3 rounded-xl border border-border bg-slate-50/90 p-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-medium text-slate-700">Deck style</span>
+              <select
+                className="input max-w-xs py-1.5 text-xs"
+                value={flashcardDeckStyle}
+                onChange={(e) => setFlashcardDeckStyle(e.target.value)}
+                disabled={isGenerating}
+              >
+                <option value="legacy">Classic QA</option>
+                <option value="anki">Anki-style (QA + cloze)</option>
+              </select>
+              <span className="text-[11px] text-muted">Applies to Generate below</span>
+            </div>
+            <button
+              type="button"
+              className="btn-primary shrink-0"
+              disabled={!activeChunk?.content?.trim() || isGenerating}
+              onClick={() => activeChunk && generateForChunk(activeChunk)}
             >
-              <option value="legacy">Classic QA</option>
-              <option value="anki">Anki-style (QA + cloze)</option>
-            </select>
+              {isGenerating ? 'Generating…' : 'Generate flashcards'}
+            </button>
           </div>
+          <p className="mb-2 px-1 text-[11px] text-muted">
+            Uses the PDF selected in Ingest. A full generate replaces the deck for this document; use “Generate more” on the deck to append.
+          </p>
           <FlashcardDeck
             cards={deckCards}
             sourceLabel={activeChunk?.name}
@@ -2087,6 +2117,7 @@ export function StudentApp() {
             sessionRight={deckSessionGrades.right}
             sessionWrong={deckSessionGrades.wrong}
             latestBatchAt={latestBatchAt}
+            isGenerating={isGenerating}
             onGenerateMore={() => activeChunk && generateForChunk(activeChunk, { append: true })}
             onClear={() => {
               const drop = new Set(deckCards.map((c) => c.id));
@@ -2298,7 +2329,17 @@ export function StudentApp() {
             onSelectPdf={setActivePdfId}
             conceptMapData={conceptMapData}
             isGenerating={isGeneratingConceptMap}
-            onGenerate={generateConceptMap}
+            onGenerate={(chunkId, opts) => generateConceptMap(chunkId, opts)}
+            onGenerateFlashcardsFromTopic={(payload) => {
+              const chunk = chunks.find((c) => c.id === activePdfId) || chunks[0];
+              if (!chunk?.content?.trim()) {
+                setNotice('Select a document with readable content first.');
+                return;
+              }
+              const focusTopic = [payload.label, payload.tldr, payload.description].filter(Boolean).join('\n\n');
+              setTab('Flashcards');
+              generateForChunk(chunk, { append: true, focusTopic });
+            }}
           />
         </Suspense>
       ) : null}

@@ -84,6 +84,12 @@ This document maps current endpoints to normalized Supabase schema and defines t
 - Additional body field: `format: 'storyboard'` — enforces ≤3 bullets/slide, one ELI5 slide, optional `vizSuggestion` / `storyKind` on slides.
 - Response may include `format: 'storyboard'|'default'`.
 
+### `POST /api/concept-map`
+- Request: `{ text, title, deepDive?: boolean }`
+- Default: hierarchical map (~8–22 nodes) from `SOURCE_JSON`.
+- `deepDive: true`: fetches a best-effort Wikipedia summary for `title`, prompts for 24–40 nodes, richer link labels, optional `externalResources[]`, higher `maxNodes`/`maxLinks` in normalization.
+- Response may include `externalResources`, `deepDive: true`.
+
 ## V2 Routes
 
 ### `GET /api/v2/sources`

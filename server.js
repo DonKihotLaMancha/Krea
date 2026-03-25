@@ -3630,6 +3630,10 @@ app.post('/api/ai-job', async (req, res) => {
 
 app.post('/api/flashcards', async (req, res) => {
   const format = String(req.body?.format || '').toLowerCase();
+  const focusTopic = String(req.body?.focusTopic || '').trim();
+  const focusBlock = focusTopic
+    ? `\nFOCUS TOPIC — generate cards ONLY about this theme; every card must clearly relate to it:\n${focusTopic.slice(0, 2000)}\n`
+    : '';
   if (format === 'anki') {
     const sources = Array.isArray(req.body?.sources) ? req.body.sources : [];
     let text = String(req.body?.text || '').trim();
@@ -3646,6 +3650,7 @@ app.post('/api/flashcards', async (req, res) => {
     const prompt = `
 You are an Anki-style flashcard generator.
 Use ONLY SOURCE_JSON. Prefer "why" and "how" mechanisms, not just definitions.
+${focusBlock}
 - type "qa": short question on front, answer on back.
 - type "cloze": clozeText must contain exactly one {{blank}} (or {{c1::hidden}}) for the hidden term; back is the revealed text or brief explanation.
 - HARD LIMITS: front ≤ 35 words, back ≤ 45 words (≈10 second read). If too long, split meaning into two cards in the next array entries.
@@ -3661,6 +3666,7 @@ ${JSON.stringify(sourceJson)}
       if (cards.length < 4) {
         const fallbackPrompt = `
 Return 8 flashcards from SOURCE_JSON.facts only.
+${focusBlock}
 JSON only: {"cards":[{"type":"qa","front":"...","back":"...","evidence":"..."}]}
 SOURCE_JSON:
 ${JSON.stringify(sourceJson)}
@@ -3685,7 +3691,7 @@ Input is structured JSON extracted from a university document.
 Generate 10 accurate and varied flashcards using ONLY input data.
 
 Rules:
-- Use only SOURCE_JSON facts/sentences.
+${focusBlock}- Use only SOURCE_JSON facts/sentences.
 - Questions must be diverse: definition, why, how, comparison, application.
 - Answers concise (1-3 sentences).
 - evidence must copy exact short phrase from SOURCE_JSON.sentences or SOURCE_JSON.facts.
@@ -3703,6 +3709,7 @@ ${JSON.stringify(sourceJson)}
       // Recovery prompt: guarantee cards from explicit facts list.
       const fallbackPrompt = `
 Return 8 flashcards from SOURCE_JSON.facts only.
+${focusBlock}
 Output strict JSON: {"cards":[{"question":"...","answer":"...","evidence":"..."}]}
 SOURCE_JSON:
 ${JSON.stringify(sourceJson)}
@@ -4008,30 +4015,63 @@ ${JSON.stringify(sourceJson)}
 app.post('/api/concept-map', async (req, res) => {
   const text = String(req.body?.text || '').trim();
   const title = String(req.body?.title || 'Concept Map').trim();
+  const deepDive = Boolean(req.body?.deepDive);
   if (!text) {
     return res.status(400).json({ error: 'Missing text.' });
   }
 
   const sourceJson = buildSourceJson(text);
-  const prompt = `
-You are an academic concept-map generator.
-Create a HIERARCHICAL concept map from university study material (go deeper than a flat list).
+  let wiki = null;
+  if (deepDive) {
+    try {
+      wiki = await fetchWikipediaSummary(title);
+    } catch {
+      wiki = null;
+    }
+  }
 
-Rules:
-- Return 8 to 20 nodes.
-- Each node has "level": 0 (central theme), 1 (major subtopics), 2 (details/examples), 3 (optional fine points).
-- Keep labels concise (max 6 words). descriptions: one short sentence.
-- Links must reflect real logical relationships from source content (cause/effect, part-of, process step, prerequisite, contrast, evidence).
-- Every non-root node must have at least one incoming logical link from a parent or prerequisite node.
-- Prefer parent->child direction (broader to narrower); include a few cross-links only when justified by content.
-- Return strict JSON only:
+  const wikiBlock = wiki
+    ? `
+
+CROSS_REFERENCE (Wikipedia — use to situate the topic and add standard vocabulary; must remain consistent with SOURCE_JSON facts; if conflict, prefer SOURCE_JSON):
+- Article: ${wiki.title}
+- URL: ${wiki.url}
+- Summary:
+${wiki.extract}
+`
+    : '';
+
+  const normOpts = deepDive
+    ? { maxNodes: 48, maxLinks: 88, deepDive: true }
+    : { maxNodes: 22, maxLinks: 40 };
+
+  const standardPrompt = `
+You are a Senior Information Architect. Build a TREE mind map from the PDF-derived material — never a flat vertical list of chapter siblings.
+
+STRUCTURE (mandatory):
+- Exactly ONE root (level 0): the document's overarching theme.
+- Identify 3–5 "super-nodes" (level 1 MAIN THEMES) that group related ideas. Every other node must nest under one of these themes or under their descendants — not as random siblings of the root.
+- Multi-tier depth: Level 0 → Level 1 themes → Level 2 clusters → Level 3 details. Prefer horizontal expansion (several branches) over one deep ladder.
+- FIVE-BRANCH RULE: No node may have more than 5 direct children. If more items belong under one parent, insert an intermediate "Sub-category" node and attach extras under it.
+- PRUNE: High-impact keywords only; merge redundant phrases; no box bloat.
+
+SEMANTICS:
+- Assign every node "categoryTag": one of Theory | Action | Process | Fact | Definition | Exam | Risk | Other (use Theory for core concepts, Action/Process for steps, Fact for names/dates/numbers, Exam for must-know test points, Risk for pitfalls).
+- "tldr": exactly ONE short sentence (≤ 140 chars) the student sees first. "description": fuller 1–2 sentences for detail on demand.
+
+LINKS:
+- Tree links (parent→child hierarchy): set "crossLink": false. Label the relationship (includes, part-of, prerequisite, etc.).
+- Cross-links (distant ideas that interact): set "crossLink": true and a precise "label" (e.g. "Direct impact", "Constrains", "Feeds into"). Use 2–8 cross-links only where the text justifies them.
+
+Return strict JSON only:
 {
   "title":"...",
   "nodes":[
-    {"id":"n0","label":"...","description":"...","level":0}
+    {"id":"n0","label":"...","tldr":"...","description":"...","categoryTag":"Theory","level":0}
   ],
   "links":[
-    {"source":"n0","target":"n1","label":"includes"}
+    {"source":"n0","target":"n1","label":"includes","crossLink":false},
+    {"source":"n2","target":"n7","label":"Direct impact","crossLink":true}
   ]
 }
 
@@ -4039,8 +4079,49 @@ SOURCE_JSON:
 ${JSON.stringify(sourceJson)}
 `;
 
+  const deepDivePrompt = `
+You are a Senior Information Architect in DEEP DIVE mode. Merge SOURCE_JSON with the cross-reference (if any); the document stays primary.
+
+STRUCTURE:
+- Same tree rules as standard mode but 24–40 nodes: 3–5 level-1 super-nodes, deep grouping, five-branch rule, prune redundancy.
+- Rich cross-links (crossLink true) between sections that causally interact across the document.
+
+SEMANTICS:
+- Every node: "tldr", "description", "categoryTag" as in standard mode.
+
+Also add "externalResources": 5–10 items (survey papers, standards, textbooks). "title", "kind" (book|paper|standard|course|article), "note", optional "url" only if confident.
+
+Return strict JSON only:
+{
+  "title":"...",
+  "nodes":[...],
+  "links":[...],
+  "externalResources":[{"title":"...","kind":"paper","note":"...","url":""}]
+}
+
+SOURCE_JSON:
+${JSON.stringify(sourceJson)}
+${wikiBlock}
+`;
+
+  const prompt = deepDive ? deepDivePrompt : standardPrompt;
+
   try {
-    let conceptMap = await generateConceptMapWithOllama(prompt);
+    let conceptMap = await generateConceptMapWithOllama(prompt, normOpts);
+    if (wiki && !conceptMap.externalResources?.length) {
+      conceptMap = {
+        ...conceptMap,
+        externalResources: [
+          {
+            title: wiki.title,
+            kind: 'article',
+            note: 'Wikipedia summary used as cross-reference for this deep dive.',
+            url: wiki.url,
+          },
+        ],
+        deepDive: true,
+      };
+    }
     if (conceptMap.nodes.length < 6 || conceptMap.links.length < 4) {
       conceptMap = buildLocalConceptMapFallback(title, sourceJson);
     }
@@ -4669,15 +4750,19 @@ async function generateSectionsWithOllama(prompt) {
   return normalizeApartados(apartados);
 }
 
-async function generateConceptMapWithOllama(prompt) {
+async function generateConceptMapWithOllama(prompt, normOpts = {}) {
   const data = await callOllama(prompt);
   const raw = String(data.response || '').trim();
   const parsed = safeParseModelJson(raw);
-  return normalizeConceptMap({
-    title: String(parsed?.title || 'Concept Map').trim(),
-    nodes: Array.isArray(parsed?.nodes) ? parsed.nodes : [],
-    links: Array.isArray(parsed?.links) ? parsed.links : [],
-  });
+  return normalizeConceptMap(
+    {
+      title: String(parsed?.title || 'Concept Map').trim(),
+      nodes: Array.isArray(parsed?.nodes) ? parsed.nodes : [],
+      links: Array.isArray(parsed?.links) ? parsed.links : [],
+      externalResources: parsed?.externalResources,
+    },
+    normOpts,
+  );
 }
 
 async function callOllama(prompt, timeoutMs = OLLAMA_TIMEOUT_MS) {
@@ -4858,9 +4943,12 @@ function linkKey(a, b) {
  * Uses level constraints + lexical overlap to infer missing logical connections.
  */
 function inferConceptLinksFromNodes(nodes, links) {
-  const out = [...links];
+  const out = links.map((l) => ({
+    ...l,
+    crossLink: Boolean(l.crossLink),
+  }));
   const idToNode = new Map(nodes.map((n) => [n.id, n]));
-  const hasIn = new Set(links.map((l) => l.target));
+  const hasIn = new Set(links.filter((l) => !l.crossLink).map((l) => l.target));
   const edgeSet = new Set(links.map((l) => linkKey(l.source, l.target)));
 
   const rootId =
@@ -4898,13 +4986,13 @@ function inferConceptLinksFromNodes(nodes, links) {
     if (hasIn.has(n.id)) continue;
     const parent = bestParentFor(n);
     if (parent && parent !== n.id && !edgeSet.has(linkKey(parent, n.id))) {
-      out.push({ source: parent, target: n.id, label: 'supports' });
+      out.push({ source: parent, target: n.id, label: 'supports', crossLink: false });
       edgeSet.add(linkKey(parent, n.id));
       hasIn.add(n.id);
     }
   }
 
-  // add limited sibling cross-links when strongly related
+  // add limited sibling cross-links when strongly related (dashed in UI)
   const maxCrossLinks = Math.min(8, Math.max(2, Math.floor(nodes.length / 3)));
   let addedCross = 0;
   for (let i = 0; i < nodes.length && addedCross < maxCrossLinks; i += 1) {
@@ -4919,21 +5007,50 @@ function inferConceptLinksFromNodes(nodes, links) {
       if (overlap < 2) continue;
       const dir = Number(a.level) <= Number(b.level) ? [a.id, b.id] : [b.id, a.id];
       if (edgeSet.has(linkKey(dir[0], dir[1])) || edgeSet.has(linkKey(dir[1], dir[0]))) continue;
-      out.push({ source: dir[0], target: dir[1], label: 'related' });
+      out.push({ source: dir[0], target: dir[1], label: 'related', crossLink: true });
       edgeSet.add(linkKey(dir[0], dir[1]));
       addedCross += 1;
     }
   }
-  return out.slice(0, 64);
+  return out.slice(0, 96);
 }
 
-function normalizeConceptMap(map) {
+function normalizeCategoryTag(raw) {
+  const t = String(raw || '')
+    .toLowerCase()
+    .trim();
+  if (['theory', 'action', 'fact', 'process', 'exam', 'definition', 'risk', 'other'].includes(t)) return t;
+  if (/process|workflow|pipeline/.test(t)) return 'process';
+  if (/action|step|operation|task/.test(t)) return 'action';
+  if (/theor|concept|principle|model/.test(t)) return 'theory';
+  if (/defin|term|meaning/.test(t)) return 'definition';
+  if (/exam|assessment|critical|must-know/.test(t)) return 'exam';
+  if (/risk|warning|pitfall/.test(t)) return 'risk';
+  if (/fact|date|name|metric|number/.test(t)) return 'fact';
+  return 'other';
+}
+
+function tldrFromNode(n) {
+  const t = String(n?.tldr || n?.summary || '').trim();
+  if (t) return t.slice(0, 220);
+  const d = String(n?.description || '').trim();
+  if (!d) return String(n?.label || '').slice(0, 120);
+  const one = d.split(/\n+/)[0];
+  const sentence = one.split(/(?<=[.!?])\s+/)[0] || one;
+  return sentence.slice(0, 200);
+}
+
+function normalizeConceptMap(map, options = {}) {
+  const maxNodes = Number(options.maxNodes) > 0 ? Math.min(56, Number(options.maxNodes)) : 22;
+  const maxLinks = Number(options.maxLinks) > 0 ? Math.min(96, Number(options.maxLinks)) : 40;
   const seenNode = new Set();
   const nodes = (map.nodes || [])
     .map((n, i) => ({
       id: String(n?.id || `n${i + 1}`),
       label: String(n?.label || '').trim(),
       description: String(n?.description || '').trim(),
+      tldr: tldrFromNode(n),
+      categoryTag: normalizeCategoryTag(n?.categoryTag),
       level: n?.level !== undefined && n?.level !== null ? Number(n.level) : NaN,
     }))
     .filter((n) => n.label && n.label.length >= 2)
@@ -4943,7 +5060,7 @@ function normalizeConceptMap(map) {
       seenNode.add(key);
       return true;
     })
-    .slice(0, 22);
+    .slice(0, maxNodes);
 
   const validIds = new Set(nodes.map((n) => n.id));
   let links = (map.links || [])
@@ -4951,15 +5068,72 @@ function normalizeConceptMap(map) {
       source: String(l?.source || '').trim(),
       target: String(l?.target || '').trim(),
       label: String(l?.label || '').trim(),
+      crossLink: Boolean(
+        l?.crossLink ||
+          l?.isCrossLink ||
+          String(l?.kind || l?.linkKind || '').toLowerCase() === 'cross',
+      ),
     }))
     .filter((l) => l.source && l.target && l.source !== l.target)
     .filter((l) => validIds.has(l.source) && validIds.has(l.target))
-    .slice(0, 40);
+    .slice(0, maxLinks);
 
-  assignConceptLevels(nodes, links);
+  assignConceptLevels(nodes, links.filter((l) => !l.crossLink));
   links = inferConceptLinksFromNodes(nodes, links);
 
-  return { title: map.title || 'Concept Map', nodes, links };
+  const externalResources = Array.isArray(map.externalResources)
+    ? map.externalResources
+        .map((r) => ({
+          title: String(r?.title || '').trim(),
+          kind: String(r?.kind || r?.type || 'reference').trim(),
+          note: String(r?.note || r?.description || '').trim(),
+          url: String(r?.url || '').trim(),
+        }))
+        .filter((r) => r.title)
+        .slice(0, 10)
+    : [];
+
+  return {
+    title: map.title || 'Concept Map',
+    nodes,
+    links,
+    ...(externalResources.length ? { externalResources } : {}),
+    ...(options.deepDive ? { deepDive: true } : {}),
+  };
+}
+
+/** Best-effort Wikipedia summary for cross-referencing (educational use). */
+async function fetchWikipediaSummary(topic) {
+  const t = String(topic || '')
+    .replace(/\.[^.]+$/i, '')
+    .replace(/[_]+/g, ' ')
+    .trim()
+    .slice(0, 120);
+  if (t.length < 2) return null;
+  const q = encodeURIComponent(t.replace(/\s+/g, '_'));
+  try {
+    const controller = new AbortController();
+    const to = setTimeout(() => controller.abort(), 12000);
+    const resp = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${q}`, {
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'StudentAssistant/1.0 (https://example.local; educational concept maps)',
+      },
+    });
+    clearTimeout(to);
+    if (!resp.ok) return null;
+    const j = await resp.json();
+    const extract = String(j?.extract || '').trim().slice(0, 3500);
+    if (!extract) return null;
+    return {
+      title: String(j?.title || t).trim(),
+      extract,
+      url: String(j?.content_urls?.desktop?.page || `https://en.wikipedia.org/wiki/${q}`).trim(),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function buildLocalConceptMapFallback(title, sourceJson) {
@@ -4969,25 +5143,32 @@ function buildLocalConceptMapFallback(title, sourceJson) {
     {
       id: 'n0',
       label: String(title || 'Main Topic').slice(0, 40),
+      tldr: 'Central theme from your document.',
       description: 'Main concept from uploaded document.',
+      categoryTag: 'theory',
       level: 0,
     },
   ];
+  const tagCycle = ['theory', 'process', 'definition', 'fact', 'exam'];
   core.forEach((label, i) => {
     const lv = i < 4 ? 1 : 2;
+    const short = String(label).split(/\s+/).slice(0, 5).join(' ');
+    const desc = String(sourceJson.facts?.[i] || '').slice(0, 200);
     nodes.push({
       id: `n${i + 1}`,
-      label: String(label).split(/\s+/).slice(0, 5).join(' '),
-      description: String(sourceJson.facts?.[i] || '').slice(0, 200),
+      label: short,
+      tldr: desc ? desc.split(/(?<=[.!?])\s+/)[0]?.slice(0, 120) || `Key point: ${short}.` : `Key point: ${short}.`,
+      description: desc,
+      categoryTag: tagCycle[i % tagCycle.length],
       level: lv,
     });
   });
-  const links = nodes.slice(1, 5).map((n) => ({ source: 'n0', target: n.id, label: 'includes' }));
+  const links = nodes.slice(1, 5).map((n) => ({ source: 'n0', target: n.id, label: 'includes', crossLink: false }));
   for (let i = 5; i < nodes.length; i += 1) {
-    links.push({ source: nodes[1 + ((i - 5) % 4)].id, target: nodes[i].id, label: 'extends' });
+    links.push({ source: nodes[1 + ((i - 5) % 4)].id, target: nodes[i].id, label: 'extends', crossLink: false });
   }
   for (let i = 2; i < Math.min(nodes.length, 8); i += 1) {
-    links.push({ source: nodes[i - 1].id, target: nodes[i].id, label: 'related' });
+    links.push({ source: nodes[i - 1].id, target: nodes[i].id, label: 'related', crossLink: true });
   }
   return { title: title || 'Concept Map', nodes, links };
 }

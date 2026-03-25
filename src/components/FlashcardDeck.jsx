@@ -16,6 +16,7 @@ export default function FlashcardDeck({
   latestBatchAt,
   onGenerateMore,
   onClear,
+  isGenerating = false,
 }) {
   const currentCard = cards[0];
   const pointerStart = useRef(null);
@@ -151,9 +152,14 @@ export default function FlashcardDeck({
 
       {!currentCard ? (
         <p className="text-sm text-muted">
-          {sourceLabel
-            ? `No flashcards yet for “${sourceLabel}”. Generate from Ingest or another tab for this document.`
-            : 'No cards yet. Upload material in Ingest and select a PDF.'}
+          {sourceLabel ? (
+            <>
+              No flashcards yet for “{sourceLabel}”. Pick a deck style and click{' '}
+              <strong className="text-slate-700">Generate flashcards</strong> above, or use Generate on the Ingest tab.
+            </>
+          ) : (
+            <>No cards yet. Upload material in Ingest and select a PDF, then use Generate flashcards above.</>
+          )}
         </p>
       ) : (
         <>
@@ -274,10 +280,10 @@ export default function FlashcardDeck({
           </p>
 
           <div className="mt-5 flex flex-wrap justify-center gap-2 border-t border-slate-100 pt-4">
-            <button type="button" className="btn-ghost text-sm" onClick={onGenerateMore}>
-              Generate more
+            <button type="button" className="btn-ghost text-sm" disabled={isGenerating} onClick={onGenerateMore}>
+              {isGenerating ? 'Generating…' : 'Generate more'}
             </button>
-            <button type="button" className="btn-ghost text-sm text-slate-600" onClick={onClear}>
+            <button type="button" className="btn-ghost text-sm text-slate-600" disabled={isGenerating} onClick={onClear}>
               Clear set
             </button>
           </div>
