@@ -2399,6 +2399,35 @@ app.patch('/api/library/presentation-slide', async (req, res) => {
   }
 });
 
+/** Soft-delete a presentation (owner-scoped). Empty decks can be cleared from the library list. */
+app.post('/api/library/presentation/delete', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const studentId = String(req.body?.studentId || '').trim();
+  const presentationId = String(req.body?.presentationId || '').trim();
+  if (!studentId || !presentationId) {
+    return res.status(400).json({ error: 'Missing studentId/presentationId.' });
+  }
+  if (!isUuid(studentId) || !isUuid(presentationId)) {
+    return res.status(400).json({ error: 'Invalid ids.' });
+  }
+  try {
+    await ensureProfile(studentId);
+    const now = new Date().toISOString();
+    const { data: updatedRows, error: upErr } = await supabase
+      .from('presentations')
+      .update({ deleted_at: now })
+      .eq('id', presentationId)
+      .eq('owner_id', studentId)
+      .is('deleted_at', null)
+      .select('id');
+    if (upErr) throw upErr;
+    if (!updatedRows?.length) return res.status(404).json({ error: 'Presentation not found.' });
+    return res.json({ ok: true });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not delete presentation.'));
+  }
+});
+
 app.post('/api/library/grade', async (req, res) => {
   if (!requireSupabase(res)) return;
   const studentId = String(req.body?.studentId || '').trim();

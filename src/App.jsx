@@ -3556,6 +3556,12 @@ function Chat({ room, setRoom, messages, setMessages, studentId, setNotice }) {
   );
 }
 
+function presentationIdIsUuid(id) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    String(id || ''),
+  );
+}
+
 function Presentations({
   presentations,
   setPresentations,
@@ -3709,6 +3715,40 @@ function Presentations({
     await pptx.writeFile({ fileName: `${presentation.title.replace(/\s+/g, '_') || 'presentation'}.pptx` });
   };
 
+  const removePresentationFromList = (p) => {
+    setPresentations((prev) => prev.filter((x) => x.id !== p.id));
+    setPreviewId((id) => (id === p.id ? null : id));
+    setEditingId((id) => {
+      if (id !== p.id) return id;
+      setDraft(null);
+      return null;
+    });
+  };
+
+  const deleteEmptyPresentation = async (p) => {
+    const slideCount = (p.slides || []).length;
+    if (slideCount > 0) return;
+    if (studentId && presentationIdIsUuid(p.id)) {
+      try {
+        await fetchWithTimeout(
+          '/api/library/presentation/delete',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ studentId, presentationId: p.id }),
+          },
+          15000,
+        );
+      } catch (e) {
+        setNotice?.(e?.message || 'Could not remove this presentation from your library.');
+        return;
+      }
+    }
+    removePresentationFromList(p);
+  };
+
+  const emptyPresentations = presentations.filter((p) => !(p.slides || []).length);
+
   const beginEdit = (p) => {
     setEditingId(p.id);
     setDraft({
@@ -3836,25 +3876,57 @@ function Presentations({
           </button>
         </div>
       </div>
+      {emptyPresentations.length > 0 ? (
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            className="btn-ghost text-sm text-red-700"
+            onClick={() => {
+              void (async () => {
+                const list = [...emptyPresentations];
+                for (const pres of list) {
+                  await deleteEmptyPresentation(pres);
+                }
+              })();
+            }}
+          >
+            Remove all empty ({emptyPresentations.length})
+          </button>
+          <span className="text-xs text-muted">Decks with no slides can be cleared from your library.</span>
+        </div>
+      ) : null}
       <ul className="space-y-2">
-        {presentations.map((p) => (
+        {presentations.map((p) => {
+          const slideCount = (p.slides || []).length;
+          const firstSlide = (p.slides || [])[0];
+          return (
           <li key={p.id} className="rounded-lg border border-border bg-white px-3 py-2 text-sm">
-            <p className="font-medium">{p.title} ({slideCountLabel(p.slides.length)})</p>
-            {p.slides[0] ? (
+            <p className="font-medium">{p.title} ({slideCountLabel(slideCount)})</p>
+            {firstSlide ? (
               <p className="mt-1 text-xs text-muted">
-                First slide: {p.slides[0].title}
+                First slide: {firstSlide.title}
               </p>
             ) : null}
-            <div className="mt-2 flex gap-2">
+            <div className="mt-2 flex flex-wrap gap-2">
               <button className="btn-ghost" onClick={() => setPreviewId((id) => (id === p.id ? null : p.id))}>
                 {previewId === p.id ? 'Hide preview' : 'Preview'}
               </button>
               <button className="btn-ghost" onClick={() => beginEdit(p)}>
                 Edit
               </button>
+              {slideCount === 0 ? (
+                <button
+                  type="button"
+                  className="btn-ghost text-red-700"
+                  onClick={() => void deleteEmptyPresentation(p)}
+                >
+                  Delete
+                </button>
+              ) : null}
             </div>
           </li>
-        ))}
+          );
+        })}
       </ul>
 
       {previewPresentation ? (
