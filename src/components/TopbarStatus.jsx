@@ -54,9 +54,16 @@ export default function TopbarStatus({
         <span
           className="inline-flex items-center gap-2"
           title={
-            modelStatus.ollamaBase
-              ? `Ollama base: ${modelStatus.ollamaBase}${modelStatus.ollamaNgrokLocalFallback ? ' (local fallback)' : ''}`
-              : undefined
+            [
+              modelStatus.ollamaBase
+                ? `Ollama base: ${modelStatus.ollamaBase}${modelStatus.ollamaNgrokLocalFallback ? ' (local fallback)' : ''}`
+                : null,
+              modelStatus.ollamaEmbedModel
+                ? `Embed model (search index / RAG): ${modelStatus.ollamaEmbedModel}`
+                : null,
+            ]
+              .filter(Boolean)
+              .join(' · ') || undefined
           }
         >
           <span

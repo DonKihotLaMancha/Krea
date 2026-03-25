@@ -105,6 +105,21 @@ function mapLibraryPdfToChunk(p) {
   };
 }
 
+/** Keeps in-memory uploads when GET /api/library returns before the new row exists (bootstrap vs upload race). */
+function mergeLibraryChunksWithLocal(prev, dbChunks) {
+  const safeDb = Array.isArray(dbChunks) ? dbChunks : [];
+  const byId = new Map(safeDb.map((c) => [c.id, c]));
+  const bySourceId = new Map(safeDb.filter((c) => c.sourceId).map((c) => [String(c.sourceId), c]));
+  const prepended = [];
+  for (const p of prev) {
+    if (byId.has(p.id)) continue;
+    if (p.sourceId && bySourceId.has(String(p.sourceId))) continue;
+    if (!String(p.content || '').trim()) continue;
+    prepended.push(p);
+  }
+  return [...prepended, ...safeDb];
+}
+
 function fileToBase64DataOnly(file) {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -134,10 +149,14 @@ function cleanAcademicText(raw) {
     /\bunauthorized reproduction\b/i,
     /\blicensed to\b/i,
   ];
+  // Only strip legal/footer boilerplate when it appears in the tail of the document.
+  // Headers and cover pages often say "Copyright" and would otherwise delete the whole body.
+  const len = text.length;
+  const footerZoneStart = len <= 1600 ? len : Math.max(1200, len - 4000);
   let firstCutoff = -1;
   for (const pattern of cutoffPatterns) {
     const match = text.match(pattern);
-    if (match?.index !== undefined) {
+    if (match?.index !== undefined && match.index >= footerZoneStart) {
       if (firstCutoff === -1 || match.index < firstCutoff) firstCutoff = match.index;
     }
   }
@@ -148,10 +167,16 @@ function cleanAcademicText(raw) {
 
 function looksLikeGibberish(text) {
   if (!text) return true;
-  const sample = text.slice(0, 2000);
+  const sample = text.slice(0, 4000);
   const weird = (sample.match(/[<>{}[\]\\/|~`]/g) || []).length;
-  const alpha = (sample.match(/[A-Za-z]/g) || []).length;
-  return alpha < 80 || weird / Math.max(sample.length, 1) > 0.1;
+  if (weird / Math.max(sample.length, 1) > 0.1) return true;
+  const letters = (sample.match(/\p{L}/gu) || []).length;
+  const latin = (sample.match(/[A-Za-z]/g) || []).length;
+  const letterish = Math.max(letters, latin);
+  if (letterish >= 60) return false;
+  const digits = (sample.match(/\d/g) || []).length;
+  if (letterish >= 35 && letterish + digits >= 80) return false;
+  return letterish < 40;
 }
 
 function fallbackCardsFromText(raw) {
@@ -342,11 +367,35 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
 
 async function upsertStudent(studentId, name = 'Student') {
   if (!studentId) return;
-  await fetchWithTimeout('/api/student', {
+  const resp = await fetchWithTimeout('/api/student', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ studentId, name }),
   }, 12000);
+  if (!resp.ok) {
+    const text = await resp.text();
+    let detail = '';
+    try {
+      const j = JSON.parse(text);
+      const nested =
+        j?.details && typeof j.details === 'object'
+          ? String(j.details.message || '').trim()
+          : '';
+      const detailsStr = typeof j?.details === 'string' ? j.details.trim() : '';
+      const top = typeof j?.error === 'string' ? j.error.trim() : '';
+      detail = nested || detailsStr || top;
+    } catch {
+      /* ignore */
+    }
+    const trimmed = detail.trim();
+    if (trimmed) throw new Error(trimmed);
+    const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 200);
+    throw new Error(
+      snippet
+        ? `Profile sync (${resp.status}): ${snippet}`
+        : `Profile sync failed (HTTP ${resp.status})`,
+    );
+  }
 }
 
 /** Must exceed worst-case server indexing (embeddings); UI copy allows 1–3+ minutes for large PDFs. */
@@ -519,8 +568,33 @@ async function saveTutorPairToLibrary({ studentId, prompt, reply }) {
 
 async function loadLibrary(studentId) {
   if (!studentId) return { pdfs: [], maps: [], notebook: [] };
-  const resp = await fetchWithTimeout(`/api/library?studentId=${encodeURIComponent(studentId)}`, {}, 20000);
-  if (!resp.ok) throw new Error('Could not load library');
+  const path = `/api/library?studentId=${encodeURIComponent(studentId)}`;
+  const resp = await fetchWithTimeout(path, {}, 20000);
+  if (!resp.ok) {
+    const text = await resp.text();
+    let detail = '';
+    try {
+      const j = JSON.parse(text);
+      const nested =
+        j?.details && typeof j.details === 'object'
+          ? String(j.details.message || '').trim()
+          : '';
+      const detailsStr = typeof j?.details === 'string' ? j.details.trim() : '';
+      const top = typeof j?.error === 'string' ? j.error.trim() : '';
+      /** Prefer nested PostgREST/DB message; top-level error is often a generic fallback from formatSupabaseError. */
+      detail = nested || detailsStr || top;
+    } catch {
+      /* ignore */
+    }
+    const trimmed = detail.trim();
+    if (trimmed) throw new Error(trimmed);
+    const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 280);
+    throw new Error(
+      snippet
+        ? `Could not load library (${resp.status}): ${snippet}`
+        : `Could not load library (HTTP ${resp.status})`,
+    );
+  }
   return await resp.json();
 }
 
@@ -682,7 +756,12 @@ function tagFlashcardsForChunk(chunk, list) {
 }
 
 async function extractPdfText(file, onProgress) {
+  const emit = (payload) => {
+    if (onProgress) onProgress(payload);
+  };
+  emit({ progress: 5, label: 'Loading file…', indeterminate: false });
   const buffer = await file.arrayBuffer();
+  emit({ progress: 12, label: 'Opening PDF (this can take a while for large files)…', indeterminate: true });
   const pdf = await getDocument({ data: buffer }).promise;
   let allText = '';
   const totalPages = Math.max(pdf.numPages, 1);
@@ -700,13 +779,12 @@ async function extractPdfText(file, onProgress) {
       lastY = y;
     }
     allText += `${pageText}\n`;
-    if (onProgress) {
-      onProgress({
-        phase: 'extract',
-        progress: Math.round((page / totalPages) * 100),
-        label: `Reading PDF page ${page} of ${totalPages}...`,
-      });
-    }
+    const pct = 15 + Math.round((page / totalPages) * 85);
+    emit({
+      progress: pct,
+      label: `Reading PDF page ${page} of ${totalPages}…`,
+      indeterminate: false,
+    });
   }
   return allText;
 }
@@ -714,8 +792,13 @@ async function extractPdfText(file, onProgress) {
 async function fileToText(file, onProgress) {
   const ext = file.name.toLowerCase().split('.').pop() || '';
   if (ext === 'pdf') return extractPdfText(file, onProgress);
+  if (onProgress) onProgress({ progress: 40, label: 'Reading text file…', indeterminate: true });
   const buffer = await file.arrayBuffer();
-  if (ext === 'txt' || ext === 'md' || ext === 'csv') return new TextDecoder().decode(buffer);
+  if (ext === 'txt' || ext === 'md' || ext === 'csv') {
+    const text = new TextDecoder().decode(buffer);
+    if (onProgress) onProgress({ progress: 100, label: 'Preparing text…', indeterminate: false });
+    return text;
+  }
   return '';
 }
 
@@ -750,6 +833,7 @@ export function StudentApp() {
   const [simulations, setSimulations] = useState([]);
   const [tutorMessages, setTutorMessages] = useState([]);
   const [notice, setNotice] = useState('');
+  const [ingestBusy, setIngestBusy] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isGeneratingPresentation, setIsGeneratingPresentation] = useState(false);
   const [latestBatchAt, setLatestBatchAt] = useState(null);
@@ -765,6 +849,7 @@ export function StudentApp() {
   const [modelStatus, setModelStatus] = useState({
     ok: false,
     model: 'qwen2.5:7b',
+    ollamaEmbedModel: null,
     deployHost: null,
     healthHint: null,
     healthDetail: null,
@@ -779,9 +864,13 @@ export function StudentApp() {
   const [libraryReloadBusy, setLibraryReloadBusy] = useState(false);
 
   /** Apply GET /api/library JSON to client state (bootstrap + manual refresh). */
-  const applyLibraryData = useCallback((data) => {
+  const applyLibraryData = useCallback((data, opts = {}) => {
     const dbChunks = Array.isArray(data?.pdfs) ? data.pdfs.map(mapLibraryPdfToChunk) : [];
-    setChunks(dbChunks);
+    const seedChunks = opts.seedChunks;
+    setChunks((prev) => {
+      const base = seedChunks !== undefined ? seedChunks : prev;
+      return mergeLibraryChunksWithLocal(base, dbChunks);
+    });
     const dbSections = Array.isArray(data?.sections)
       ? data.sections.map((s) => ({
           ...s,
@@ -955,6 +1044,7 @@ export function StudentApp() {
           setModelStatus({
             ok: !!data.ok,
             model: data.model || 'qwen2.5:7b',
+            ollamaEmbedModel: data.ollamaEmbedModel || null,
             deployHost: data.deployHost || null,
             healthHint: data.hint || null,
             healthDetail: data.detail || null,
@@ -967,6 +1057,7 @@ export function StudentApp() {
           setModelStatus({
             ok: false,
             model: 'qwen2.5:7b',
+            ollamaEmbedModel: null,
             deployHost: null,
             healthHint: null,
             healthDetail: null,
@@ -989,7 +1080,12 @@ export function StudentApp() {
     let mounted = true;
     const bootstrapDb = async () => {
       try {
-        await upsertStudent(studentId, displayNameFromUser(session?.user));
+        let profileSyncFailed = false;
+        try {
+          await upsertStudent(studentId, displayNameFromUser(session?.user));
+        } catch {
+          profileSyncFailed = true;
+        }
         // Push any PDFs that were uploaded while signed out into this account.
         try {
           const raw = localStorage.getItem(LOCAL_PDFS_KEY);
@@ -1015,7 +1111,13 @@ export function StudentApp() {
         if (cached?.length) setChunks(cached);
         const data = await loadLibrary(studentId);
         if (!mounted) return;
-        applyLibraryData(data);
+        applyLibraryData(data, { seedChunks: cached?.length ? cached : undefined });
+        const n = Array.isArray(data?.pdfs) ? data.pdfs.length : 0;
+        if (profileSyncFailed) {
+          setNotice(
+            `Library loaded (${n} PDF${n === 1 ? '' : 's'} from account). Profile sync could not complete — try “Refresh from account” later.`,
+          );
+        }
       } catch (e) {
         if (!mounted) return;
         const cached = readWorkspacePdfCache(studentId);
@@ -1234,24 +1336,27 @@ export function StudentApp() {
       setNotice('Please select a file first.');
       return;
     }
-    setGenerationIndeterminate(false);
-    setGenerationProgress(5);
-    setGenerationStage('Uploading file...');
+    setIngestBusy(true);
+    setGenerationIndeterminate(true);
+    setGenerationProgress(0);
+    setGenerationStage('Preparing file…');
     try {
-      const text = await fileToText(file, ({ progress, label }) => {
-        setGenerationIndeterminate(false);
+      const text = await fileToText(file, ({ progress, label, indeterminate }) => {
+        if (typeof indeterminate === 'boolean') setGenerationIndeterminate(indeterminate);
         setGenerationProgress(progress);
         setGenerationStage(label);
       });
       if (!file.name.toLowerCase().endsWith('.pdf')) {
         setGenerationProgress(100);
-        setGenerationStage('Preparing extracted text...');
+        setGenerationStage('Preparing extracted text…');
+        setGenerationIndeterminate(false);
       }
       const cleaned = cleanAcademicText(text);
       if (!cleaned || looksLikeGibberish(cleaned)) {
         setNotice('Could not extract readable text. Use a text-based PDF/TXT.');
         setGenerationProgress(0);
         setGenerationStage('');
+        setGenerationIndeterminate(false);
         return;
       }
       const chunk = { id: `${Date.now()}`, name: file.name, content: cleaned };
@@ -1287,9 +1392,24 @@ export function StudentApp() {
             setChunks((prev) =>
               prev.map((c) => (c.id === chunk.id ? chunkForGen : c)),
             );
+            try {
+              const fresh = await loadLibrary(studentId);
+              applyLibraryData(fresh);
+            } catch {
+              /* keep local row if refresh fails */
+            }
           }
-          if (saved?.storageWarning) {
-            setNotice(`Library saved. ${saved.storageWarning}`);
+          const libParts = [];
+          if (saved?.storageWarning) libParts.push(saved.storageWarning);
+          if (saved?.embeddingWarning) libParts.push(saved.embeddingWarning);
+          if (saved?.id) {
+            setNotice(
+              libParts.length
+                ? `Added “${chunk.name}” to Saved PDFs. ${libParts.join(' ')}`
+                : `Added “${chunk.name}” to Saved PDFs.`,
+            );
+          } else if (libParts.length) {
+            setNotice(`Library saved. ${libParts.join(' ')}`);
           }
         } catch (e) {
           setNotice(`PDF read OK, but not saved to your account: ${e?.message || 'API error'}`);
@@ -1297,10 +1417,7 @@ export function StudentApp() {
       } else {
         setNotice('Saved in this browser only — sign in to keep PDFs in your account across devices.');
       }
-      // Upload + save are done; flashcards use AI separately — do not block this handler on Ollama (avoids “stuck” UI).
-      setGenerationProgress(0);
-      setGenerationStage('');
-      setGenerationIndeterminate(false);
+      // Hand off to flashcard generation without clearing the bar (avoids a blank frame); generateForChunk sets progress.
       queueMicrotask(() => {
         void generateForChunk(chunkForGen).catch((e) => {
           setNotice(`Flashcard generation failed: ${e?.message || e}`);
@@ -1310,6 +1427,9 @@ export function StudentApp() {
       setNotice(`Upload failed: ${error?.message || 'Unknown error.'}`);
       setGenerationProgress(0);
       setGenerationStage('');
+      setGenerationIndeterminate(false);
+    } finally {
+      setIngestBusy(false);
     }
   };
 
@@ -1680,6 +1800,7 @@ export function StudentApp() {
             activePdfId={activePdfId}
             onSelectPdf={setActivePdfId}
             isGenerating={isGenerating}
+            ingestBusy={ingestBusy}
             progress={generationProgress}
             progressLabel={generationStage}
             isIndeterminate={generationIndeterminate}

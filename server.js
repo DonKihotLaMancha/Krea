@@ -443,11 +443,13 @@ async function fetchOllamaEmbedding(text) {
   return null;
 }
 
+/** @returns {Promise<string|null>} Human-readable warning if embeddings missing or partial; null if OK. */
 async function embedAndStoreChunksForSource({ ownerId, sourceId, rows }) {
-  if (!supabase || !ownerId || !sourceId || !rows?.length) return;
+  if (!supabase || !ownerId || !sourceId || !rows?.length) return null;
   const model = OLLAMA_EMBED_MODEL;
   const concurrency = 6;
   const embRows = [];
+  const expected = rows.length;
   for (let i = 0; i < rows.length; i += concurrency) {
     const slice = rows.slice(i, i + concurrency);
     const vectors = await Promise.all(slice.map((r) => fetchOllamaEmbedding(String(r.content || ''))));
@@ -464,9 +466,18 @@ async function embedAndStoreChunksForSource({ ownerId, sourceId, rows }) {
       });
     }
   }
-  if (!embRows.length) return;
+  if (!embRows.length) {
+    return `Search index: no embeddings stored (${model} may be unavailable). Chat search for this PDF may not work until Ollama embeddings are fixed.`;
+  }
+  if (embRows.length < expected) {
+    return `Search index: only ${embRows.length}/${expected} chunks embedded (Ollama may be overloaded). Chat search may be incomplete.`;
+  }
   const { error } = await supabase.from('source_embeddings_ollama').upsert(embRows, { onConflict: 'chunk_id' });
-  if (error) console.warn('[embed] source_embeddings_ollama:', error.message);
+  if (error) {
+    console.warn('[embed] source_embeddings_ollama:', error.message);
+    return `Search index: embeddings not saved (${error.message}).`;
+  }
+  return null;
 }
 
 function analyzeOllamaTagsResponse(resp, base) {
@@ -539,6 +550,7 @@ app.get('/api/health', async (_req, res) => {
         return res.json({
           ok: true,
           model: OLLAMA_MODEL,
+          ollamaEmbedModel: OLLAMA_EMBED_MODEL,
           ollamaBase: base,
           deployHost,
           ...(ollamaNgrokLocalFallback ? { ollamaNgrokLocalFallback: true } : {}),
@@ -836,6 +848,111 @@ app.post('/api/student', async (req, res) => {
   }
 });
 
+/** Scoped to this user's presentations; chunked `.in()`; chart_bars optional if migration 0012 missing. */
+async function fetchPresentationSlidesScoped(presentationIds) {
+  if (!presentationIds?.length) return { data: [], error: null };
+  const fullCols =
+    'id,presentation_id,slide_index,title,bullets,notes,image_suggestion,graph_suggestion,chart_bars';
+  const baseCols =
+    'id,presentation_id,slide_index,title,bullets,notes,image_suggestion,graph_suggestion';
+  const chunkSize = 80;
+  const merged = [];
+  for (let i = 0; i < presentationIds.length; i += chunkSize) {
+    const chunk = presentationIds.slice(i, i + chunkSize);
+    const run = (cols) =>
+      supabase
+        .from('presentation_slides')
+        .select(cols)
+        .in('presentation_id', chunk)
+        .order('slide_index', { ascending: true })
+        .limit(4000);
+    let r = await run(fullCols);
+    if (r.error) {
+      const e = r.error;
+      const blob = `${e.message || ''} ${e.details || ''} ${e.hint || ''}`;
+      const missingChartBars =
+        String(e.code) === '42703' ||
+        /does not exist|unknown column|chart_bars|schema cache/i.test(blob);
+      if (missingChartBars) {
+        r = await run(baseCols);
+      }
+    }
+    if (r.error) return r;
+    if (r.data?.length) merged.push(...r.data);
+  }
+  return { data: merged, error: null };
+}
+
+async function fetchPresentationRefsScoped(presentationIds) {
+  if (!presentationIds?.length) return { data: [], error: null };
+  const chunkSize = 80;
+  const merged = [];
+  for (let i = 0; i < presentationIds.length; i += chunkSize) {
+    const chunk = presentationIds.slice(i, i + chunkSize);
+    const { data, error } = await supabase
+      .from('presentation_references')
+      .select('id,presentation_id,ref_text,url')
+      .in('presentation_id', chunk)
+      .limit(4000);
+    if (error) return { data: null, error };
+    if (data?.length) merged.push(...data);
+  }
+  return { data: merged, error: null };
+}
+
+/** Large `.in()` lists can fail PostgREST limits; chunk like other library queries. */
+async function fetchSectionsForLibrary(sourceIds) {
+  if (!sourceIds?.length) return { data: [], error: null };
+  const chunkSize = 80;
+  const merged = [];
+  for (let i = 0; i < sourceIds.length; i += chunkSize) {
+    const chunk = sourceIds.slice(i, i + chunkSize);
+    const { data, error } = await supabase
+      .from('sections')
+      .select('id,name,description,progress_percent,status,source_id,created_at,sources(title)')
+      .in('source_id', chunk)
+      .order('created_at', { ascending: false })
+      .limit(300);
+    if (error) return { data: null, error };
+    if (data?.length) merged.push(...data);
+  }
+  return { data: merged, error: null };
+}
+
+const LIBRARY_IN_CHUNK = 80;
+
+async function fetchQuizQuestionsScoped(quizIds) {
+  if (!quizIds?.length) return { data: [], error: null };
+  const merged = [];
+  for (let i = 0; i < quizIds.length; i += LIBRARY_IN_CHUNK) {
+    const chunk = quizIds.slice(i, i + LIBRARY_IN_CHUNK);
+    const { data, error } = await supabase
+      .from('quiz_questions')
+      .select('id,quiz_id,question,options,correct_answer')
+      .in('quiz_id', chunk);
+    if (error) return { data: null, error };
+    if (data?.length) merged.push(...data);
+  }
+  return { data: merged.slice(0, 3000), error: null };
+}
+
+async function fetchTutorMessagesScoped(conversationIds) {
+  if (!conversationIds?.length) return { data: [], error: null };
+  const merged = [];
+  for (let i = 0; i < conversationIds.length; i += LIBRARY_IN_CHUNK) {
+    const chunk = conversationIds.slice(i, i + LIBRARY_IN_CHUNK);
+    const { data, error } = await supabase
+      .from('tutor_messages')
+      .select('id,conversation_id,role,content,created_at')
+      .in('conversation_id', chunk)
+      .order('created_at', { ascending: true });
+    if (error) return { data: null, error };
+    if (data?.length) merged.push(...data);
+  }
+  merged.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+  return { data: merged.slice(-1000), error: null };
+}
+
 app.get('/api/library', async (req, res) => {
   if (!requireSupabase(res)) return;
   const studentId = String(req.query?.studentId || '').trim();
@@ -849,17 +966,12 @@ app.get('/api/library', async (req, res) => {
       { data: flashcardSets, error: flashcardSetsErr },
       { data: flashcardsRows, error: flashcardsErr },
       { data: quizRows, error: quizErr },
-      { data: quizQuestionRows, error: quizQuestionsErr },
       { data: presentationsRows, error: presentationsErr },
-      { data: presentationSlidesRows, error: presentationSlidesErr },
-      { data: presentationRefsRows, error: presentationRefsErr },
       { data: gradesRows, error: gradesErr },
       { data: simRows, error: simErr },
       { data: chatRoomsRows, error: chatRoomsErr },
       { data: chatMessagesRows, error: chatMessagesErr },
       { data: tutorConversationsRows, error: tutorConversationsErr },
-      { data: tutorMessagesRows, error: tutorMessagesErr },
-      { data: sectionsRows, error: sectionsErr },
     ] = await Promise.all([
       supabase
         .from('sources')
@@ -897,25 +1009,12 @@ app.get('/api/library', async (req, res) => {
         .order('created_at', { ascending: false })
         .limit(40),
       supabase
-        .from('quiz_questions')
-        .select('id,quiz_id,question,options,correct_answer')
-        .limit(3000),
-      supabase
         .from('presentations')
         .select('id,title,created_at')
         .eq('owner_id', studentId)
         .is('deleted_at', null)
         .order('created_at', { ascending: false })
         .limit(40),
-      supabase
-        .from('presentation_slides')
-        .select('id,presentation_id,slide_index,title,bullets,notes,image_suggestion,graph_suggestion,chart_bars')
-        .order('slide_index', { ascending: true })
-        .limit(3000),
-      supabase
-        .from('presentation_references')
-        .select('id,presentation_id,ref_text,url')
-        .limit(3000),
       supabase
         .from('grades')
         .select('id,subject,score,weight,recorded_at')
@@ -946,17 +1045,28 @@ app.get('/api/library', async (req, res) => {
         .eq('owner_id', studentId)
         .order('created_at', { ascending: false })
         .limit(20),
-      supabase
-        .from('tutor_messages')
-        .select('id,conversation_id,role,content,created_at')
-        .order('created_at', { ascending: false })
-        .limit(1000),
-      supabase
-        .from('sections')
-        .select('id,name,description,progress_percent,status,source_id,created_at,sources(title)')
-        .order('created_at', { ascending: false })
-        .limit(300),
     ]);
+    const quizIdList = (quizRows || []).map((q) => q.id).filter(Boolean);
+    const qqPack = await fetchQuizQuestionsScoped(quizIdList);
+    const quizQuestionRows = qqPack.data || [];
+    const quizQuestionsErr = qqPack.error;
+
+    const tutorConvIds = (tutorConversationsRows || []).map((c) => c.id).filter(Boolean);
+    const tmPack = await fetchTutorMessagesScoped(tutorConvIds);
+    const tutorMessagesRows = tmPack.data || [];
+    const tutorMessagesErr = tmPack.error;
+
+    const presIds = (presentationsRows || []).map((p) => p.id).filter(Boolean);
+    const slidesPack = await fetchPresentationSlidesScoped(presIds);
+    const refsPack = await fetchPresentationRefsScoped(presIds);
+    const presentationSlidesRows = slidesPack.data || [];
+    const presentationRefsRows = refsPack.data || [];
+    const presentationSlidesErr = slidesPack.error;
+    const presentationRefsErr = refsPack.error;
+    const sourceIdsForSections = (sources || []).map((s) => s.id).filter(Boolean);
+    const secPack = await fetchSectionsForLibrary(sourceIdsForSections);
+    const sectionsRows = secPack.data || [];
+    const sectionsErr = secPack.error;
     if (
       srcErr || mapsErr || notebookErr || flashcardSetsErr || quizErr || quizQuestionsErr ||
       presentationsErr || presentationSlidesErr || presentationRefsErr || gradesErr || simErr || chatRoomsErr ||
@@ -983,11 +1093,17 @@ app.get('/api/library', async (req, res) => {
     /** Nested embed can miss text (RLS/embed quirks); fill from source_contents directly. */
     const missingTextIds = sourcePdfs.filter((p) => !String(p.content || '').trim()).map((p) => p.id);
     if (missingTextIds.length) {
-      const { data: contentRows, error: contentFillErr } = await supabase
-        .from('source_contents')
-        .select('source_id, cleaned_text')
-        .in('source_id', missingTextIds);
-      if (!contentFillErr && contentRows?.length) {
+      const contentRows = [];
+      for (let i = 0; i < missingTextIds.length; i += LIBRARY_IN_CHUNK) {
+        const chunk = missingTextIds.slice(i, i + LIBRARY_IN_CHUNK);
+        const { data: batch, error: contentFillErr } = await supabase
+          .from('source_contents')
+          .select('source_id, cleaned_text')
+          .in('source_id', chunk);
+        if (contentFillErr) throw contentFillErr;
+        if (batch?.length) contentRows.push(...batch);
+      }
+      if (contentRows.length) {
         const bySid = new Map(contentRows.map((r) => [r.source_id, String(r.cleaned_text || '')]));
         sourcePdfs = sourcePdfs.map((p) =>
           String(p.content || '').trim() ? p : { ...p, content: bySid.get(p.id) || '' },
@@ -1000,7 +1116,7 @@ app.get('/api/library', async (req, res) => {
       .eq('student_id', studentId)
       .order('created_at', { ascending: false })
       .limit(1000);
-    if (legacyErr) throw legacyErr;
+    if (legacyErr && String(legacyErr.code) !== '42P01') throw legacyErr;
     const legacyMapped = (legacyPdfs || []).map((p) => ({
       id: p.id,
       name: p.name,
@@ -1265,6 +1381,7 @@ app.post('/api/library/pdf', async (req, res) => {
       .insert({ source_id: source.id, raw_text: content, cleaned_text: content });
     if (contentError) throw contentError;
 
+    let embeddingWarning = '';
     let chunkPartCount = 0;
     try {
       const parts = chunkTextForStore(content);
@@ -1284,13 +1401,16 @@ app.post('/api/library/pdf', async (req, res) => {
         if (chunkInsErr) console.warn('[library/pdf] source_chunks:', chunkInsErr.message);
         else if (insertedChunks?.length) {
           try {
-            await embedAndStoreChunksForSource({
+            const embedWarn = await embedAndStoreChunksForSource({
               ownerId: studentId,
               sourceId: source.id,
               rows: insertedChunks,
             });
+            if (embedWarn) embeddingWarning = embedWarn;
           } catch (e) {
-            console.warn('[library/pdf] embed:', e?.message || e);
+            const msg = e?.message || String(e);
+            console.warn('[library/pdf] embed:', msg);
+            embeddingWarning = `Search index: embedding failed (${msg}).`;
           }
         }
       }
@@ -1309,6 +1429,7 @@ app.post('/api/library/pdf', async (req, res) => {
       id: source?.id || null,
       storageUploaded,
       storageWarning: storageWarning || undefined,
+      embeddingWarning: embeddingWarning || undefined,
     });
   } catch (error) {
     return res.status(500).json(formatSupabaseError(error, 'Could not save PDF.'));
