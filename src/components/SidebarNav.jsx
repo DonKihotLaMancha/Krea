@@ -14,7 +14,7 @@ const icons = {
 };
 
 /** Green rail + low-saturation classic sidebar. */
-export default function SidebarNav({ tabs, tab, onChange, collapsed, onToggleCollapse, isFocusMode }) {
+export default function SidebarNav({ tabs, tab, onChange, collapsed, onToggleCollapse, isFocusMode, accountMenu }) {
   if (isFocusMode) return null;
 
   return (
@@ -22,14 +22,20 @@ export default function SidebarNav({ tabs, tab, onChange, collapsed, onToggleCol
       className={`flex w-full flex-col border-r border-black/15 p-3 text-white md:sticky md:top-0 md:h-screen ${collapsed ? 'md:w-20 md:p-2' : 'md:w-64 md:p-4'}`}
       style={{ backgroundColor: '#2f6f3a', color: '#ffffff' }}
     >
-      <div className={`mb-4 border-b border-white/20 pb-3 ${collapsed ? 'text-center' : ''}`}>
+      <div className="mb-4 border-b border-white/20 pb-3">
         {!collapsed ? (
-          <>
-            <h1 className="text-base font-semibold text-white">Krea</h1>
-            <p className="text-xs font-medium text-white/75">Dashboard</p>
-          </>
+          <div className="space-y-2">
+            <div className="min-w-0">
+              <h1 className="text-base font-semibold text-white">Krea</h1>
+              <p className="text-xs font-medium text-white/75">Dashboard</p>
+            </div>
+            {accountMenu ? <div className="w-full">{accountMenu}</div> : null}
+          </div>
         ) : (
-          <h1 className="text-center text-sm font-semibold text-white">SA</h1>
+          <div className="flex flex-col items-center gap-2">
+            <h1 className="text-center text-sm font-semibold text-white">SA</h1>
+            {accountMenu ? <div className="flex justify-center">{accountMenu}</div> : null}
+          </div>
         )}
       </div>
       <button

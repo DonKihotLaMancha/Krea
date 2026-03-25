@@ -201,34 +201,34 @@ export default function NotebookWorkspace({
 
   return (
     <section className="panel" onMouseUp={handleSelection}>
-      <h3 className="mb-1 text-lg font-semibold">Notebook</h3>
-      <p className="mb-3 text-xs text-muted">Source-grounded workflows with citations, guides, compare, and audio script.</p>
+      <h3 className="mb-0.5 text-base font-semibold">Notebook</h3>
+      <p className="mb-2 text-xs text-muted">Q&A and study tools from your sources.</p>
       {conceptMapData?.nodes?.length ? (
-        <div className="mb-3 rounded-xl border border-border bg-white p-3">
-          <p className="text-xs font-semibold text-muted">Concept Map Snapshot</p>
-          <div className="mt-2 flex flex-wrap gap-2">
-            {conceptMapData.nodes.slice(0, 6).map((n) => (
-              <span key={n.id} className="rounded-full border border-indigo-200 bg-indigo-50 px-2 py-1 text-xs text-indigo-700">
+        <details className="mb-2 rounded-lg border border-border bg-white p-2">
+          <summary className="cursor-pointer text-xs font-semibold text-muted">Mind map preview (from Mind Map tab)</summary>
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {conceptMapData.nodes.slice(0, 4).map((n) => (
+              <span key={n.id} className="rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-xs text-indigo-700">
                 {n.label}
               </span>
             ))}
           </div>
-        </div>
+        </details>
       ) : null}
 
-      <div className="mb-3 rounded-xl border border-border bg-slate-50/80 p-3">
-        <p className="mb-2 text-xs font-semibold text-slate-800">Sources for Notebook (pick up to 5)</p>
+      <div className="mb-2 rounded-lg border border-border bg-slate-50/80 p-2.5">
+        <p className="mb-1 text-xs font-semibold text-slate-800">Sources (up to 5)</p>
         {!chunks.length ? (
-          <p className="text-xs text-muted">Upload a PDF in Ingest first.</p>
+          <p className="text-xs text-muted">Upload in Ingest first.</p>
         ) : (
-          <ul className="max-h-40 space-y-2 overflow-y-auto">
+          <ul className="max-h-32 space-y-1 overflow-y-auto">
             {chunks.map((c) => {
               const checked = selectedChunkIds.includes(c.id);
               return (
-                <li key={c.id} className="flex items-start gap-2">
+                <li key={c.id} className="flex items-start gap-1.5">
                   <input
                     type="checkbox"
-                    className="mt-1 rounded border-border"
+                    className="mt-0.5 rounded border-border"
                     checked={checked}
                     disabled={busy || (!checked && selectedChunkIds.length >= 5)}
                     onChange={() => toggleChunk(c.id)}
@@ -241,25 +241,24 @@ export default function NotebookWorkspace({
         )}
       </div>
 
-      <div className="mb-3 rounded-xl border border-indigo-200 bg-indigo-50/60 p-3">
-        <p className="mb-2 text-xs font-semibold text-indigo-900">Study modes</p>
-        <p className="mb-2 text-[11px] text-indigo-800/90">
-          Structured outputs from your selected sources
-          {studentId && selectedSources.some((s) => s.sourceId) ? ' (RAG on when source IDs are present).' : ''}
-        </p>
-        <input
-          className="input mb-2 py-1.5 text-sm"
-          value={studyTopic}
-          onChange={(e) => setStudyTopic(e.target.value)}
-          placeholder="Topic label (e.g. for storyboard deck)"
-        />
-        <textarea
-          className="input mb-2 min-h-14 py-1.5 text-sm"
-          value={researchQuestion}
-          onChange={(e) => setResearchQuestion(e.target.value)}
-          placeholder="Optional focus question for research map / synthesis"
-        />
-        <div className="flex flex-wrap gap-2">
+      <div className="mb-2 rounded-lg border border-indigo-200 bg-indigo-50/50 p-2.5">
+        <p className="mb-1.5 text-xs font-semibold text-indigo-900">Actions</p>
+        <details className="mb-2 rounded-lg border border-indigo-100 bg-white/90 p-2">
+          <summary className="cursor-pointer text-xs font-semibold text-slate-700">Options (storyboard topic, research focus)</summary>
+          <input
+            className="input mb-1.5 mt-2 py-1.5 text-sm"
+            value={studyTopic}
+            onChange={(e) => setStudyTopic(e.target.value)}
+            placeholder="Storyboard topic label (optional)"
+          />
+          <textarea
+            className="input min-h-12 py-1.5 text-sm"
+            value={researchQuestion}
+            onChange={(e) => setResearchQuestion(e.target.value)}
+            placeholder="Research / synthesis focus question (optional)"
+          />
+        </details>
+        <div className="flex flex-wrap gap-1.5">
           <button
             type="button"
             className="btn-primary !px-2 !py-1 text-xs"
@@ -289,14 +288,6 @@ export default function NotebookWorkspace({
           <button
             type="button"
             className="btn-primary !px-2 !py-1 text-xs"
-            disabled={busy || noSources || !onAnkiCards}
-            onClick={async () => runSection('anki', () => onAnkiCards?.({ sources: selectedSources }), () => null)}
-          >
-            {localLoading === 'anki' ? '…' : 'Anki deck'}
-          </button>
-          <button
-            type="button"
-            className="btn-primary !px-2 !py-1 text-xs"
             disabled={busy || noSources || !onStoryboardPresentation}
             onClick={async () =>
               runSection(
@@ -313,32 +304,46 @@ export default function NotebookWorkspace({
           >
             {localLoading === 'storyboard' ? '…' : 'Storyboard deck'}
           </button>
-          <button
-            type="button"
-            className="btn-ghost !px-2 !py-1 text-xs"
-            disabled={busy || noSources || !onDocumentBottlenecks}
-            onClick={async () =>
-              runSection(
-                'bottlenecks',
-                async () => {
-                  const r = await onDocumentBottlenecks?.({ sources: selectedSources });
-                  if (r?.bottlenecks) setBottlenecks(r.bottlenecks);
-                  return r;
-                },
-                () => null,
-              )
-            }
-          >
-            {localLoading === 'bottlenecks' ? '…' : 'Analyze bottlenecks'}
-          </button>
         </div>
-        <div className="mt-3 rounded-lg border border-indigo-100 bg-white/90 p-2">
-          <p className="mb-1 text-[11px] font-semibold text-slate-700">Socratic chat</p>
+        <details className="mt-1.5 rounded-lg border border-indigo-100 bg-white/90 p-2">
+          <summary className="cursor-pointer text-xs font-semibold text-slate-700">Advanced</summary>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="btn-primary !px-2 !py-1 text-xs"
+              disabled={busy || noSources || !onAnkiCards}
+              onClick={async () => runSection('anki', () => onAnkiCards?.({ sources: selectedSources }), () => null)}
+            >
+              {localLoading === 'anki' ? '…' : 'Anki deck'}
+            </button>
+            <button
+              type="button"
+              className="btn-ghost !px-2 !py-1 text-xs"
+              disabled={busy || noSources || !onDocumentBottlenecks}
+              onClick={async () =>
+                runSection(
+                  'bottlenecks',
+                  async () => {
+                    const r = await onDocumentBottlenecks?.({ sources: selectedSources });
+                    if (r?.bottlenecks) setBottlenecks(r.bottlenecks);
+                    return r;
+                  },
+                  () => null,
+                )
+              }
+            >
+              {localLoading === 'bottlenecks' ? '…' : 'Analyze bottlenecks'}
+            </button>
+          </div>
+        </details>
+        <div className="mt-1.5 rounded-lg border border-indigo-100 bg-white/90 p-2">
+          <p className="mb-1 text-[11px] font-semibold text-slate-700">Socratic</p>
           <textarea
-            className="input mb-1 min-h-16 py-1.5 text-sm"
+            className="input mb-1 min-h-12 py-1.5 text-sm"
             value={socraticQuestion}
             onChange={(e) => setSocraticQuestion(e.target.value)}
-            placeholder="Ask a question — uses bottlenecks if you analyzed them first."
+            title="Uses bottleneck analysis if you ran it first"
+            placeholder="Question (optional: run bottlenecks first)"
           />
           <button
             type="button"
@@ -367,35 +372,42 @@ export default function NotebookWorkspace({
         {errBox('bottlenecks')}
         {errBox('socratic')}
         {researchSynth ? (
-          <div className="mt-2 max-h-48 overflow-auto rounded border border-border bg-white p-2 text-[11px]">
-            <p className="font-semibold text-slate-800">Research synthesis</p>
-            <p className="mt-1 text-slate-700">{researchSynth.answer}</p>
-          </div>
+          <details className="mt-2 rounded border border-border bg-white p-2 text-[11px]" open>
+            <summary className="cursor-pointer font-semibold text-slate-800">Research synthesis</summary>
+            <div className="mt-1 max-h-48 overflow-auto">
+              <p className="text-slate-700">{researchSynth.answer}</p>
+            </div>
+          </details>
         ) : null}
         {cornellNotes?.sections?.length ? (
-          <div className="mt-2 max-h-40 overflow-auto rounded border border-border bg-white p-2 text-[11px]">
-            <p className="font-semibold text-slate-800">Cornell notes</p>
-            {cornellNotes.sections.slice(0, 2).map((s, i) => (
-              <div key={`cn-${i}`} className="mt-1 border-t border-slate-100 pt-1">
-                <p className="font-medium">{s.title}</p>
-                <p className="text-muted">{s.summary}</p>
-              </div>
-            ))}
-          </div>
+          <details className="mt-2 rounded border border-border bg-white p-2 text-[11px]">
+            <summary className="cursor-pointer font-semibold text-slate-800">Cornell notes</summary>
+            <div className="mt-1 max-h-40 overflow-auto">
+              {cornellNotes.sections.slice(0, 2).map((s, i) => (
+                <div key={`cn-${i}`} className="mt-1 border-t border-slate-100 pt-1">
+                  <p className="font-medium">{s.title}</p>
+                  <p className="text-muted">{s.summary}</p>
+                </div>
+              ))}
+            </div>
+          </details>
         ) : null}
         {bottlenecks?.length ? (
-          <ul className="mt-2 space-y-1 text-[11px] text-slate-700">
-            {bottlenecks.map((b, i) => (
-              <li key={`bn-${i}`} className="rounded border border-amber-200 bg-amber-50/80 px-2 py-1">
-                <span className="font-semibold">{b.concept}</span>
-                {b.complexityScore != null ? (
-                  <span className="text-muted"> · difficulty {b.complexityScore}/10</span>
-                ) : null}
-                : {b.whyHard}
-                {b.complexityNote ? <span className="mt-0.5 block text-muted">{b.complexityNote}</span> : null}
-              </li>
-            ))}
-          </ul>
+          <details className="mt-2 rounded border border-amber-200 bg-amber-50/70 p-2 text-[11px] text-slate-700">
+            <summary className="cursor-pointer font-semibold">Bottlenecks</summary>
+            <ul className="mt-1 space-y-1">
+              {bottlenecks.map((b, i) => (
+                <li key={`bn-${i}`} className="rounded border border-amber-200 bg-amber-50/80 px-2 py-1">
+                  <span className="font-semibold">{b.concept}</span>
+                  {b.complexityScore != null ? (
+                    <span className="text-muted"> · difficulty {b.complexityScore}/10</span>
+                  ) : null}
+                  : {b.whyHard}
+                  {b.complexityNote ? <span className="mt-0.5 block text-muted">{b.complexityNote}</span> : null}
+                </li>
+              ))}
+            </ul>
+          </details>
         ) : null}
         {storyboardPreview?.slides?.length ? (
           <p className="mt-2 text-[11px] text-slate-600">
@@ -410,50 +422,55 @@ export default function NotebookWorkspace({
         ) : null}
       </div>
 
-      <div className="rounded-xl border border-border bg-white p-4">
-        <p className="mb-2 text-sm font-semibold">Source-grounded chat</p>
-        <textarea
-          className="input min-h-56 w-full"
-          value={question}
-          onChange={(e) => setQuestion(e.target.value)}
-          placeholder="Ask a question from your selected PDFs..."
-        />
-        <button
-          className="btn-primary mt-2"
-          disabled={busy || noSources || !question.trim()}
-          onClick={async () =>
-            runSection('chat', () => onSourceChat({ question, sources: selectedSources }), setChatResult)
-          }
-        >
-          {localLoading === 'chat' ? 'Working...' : 'Ask with citations'}
-        </button>
-        {errBox('chat')}
-        {chatResult ? (
-          <div className="mt-3 rounded-lg border border-border bg-slate-50 p-3">
-            <p className="text-sm leading-relaxed">{chatResult.answer}</p>
-            <ul className="mt-2 space-y-2">
-              {(chatResult.citations || []).map((c, i) => (
-                <li key={`c-${i}`} className="rounded border border-border bg-white p-2 text-xs">
-                  <button
-                    type="button"
-                    className="text-left"
-                    onClick={() => onCitationSelect?.(c)}
-                    title="Jump to citation source"
-                  >
-                    <p className="font-semibold underline decoration-dotted">{c.source}</p>
-                    {c.passageId ? <p className="text-[10px] text-slate-500">Passage: {c.passageId}</p> : null}
-                    <p className="text-muted">{c.excerpt}</p>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-      </div>
+      <details open className="rounded-lg border border-border bg-white p-3">
+        <summary className="cursor-pointer text-sm font-semibold text-slate-900">Source-grounded chat</summary>
+        <div className="mt-2">
+          <textarea
+            className="input min-h-40 w-full"
+            value={question}
+            onChange={(e) => setQuestion(e.target.value)}
+            placeholder="Ask using your selected sources…"
+          />
+          <button
+            className="btn-primary mt-2"
+            disabled={busy || noSources || !question.trim()}
+            onClick={async () =>
+              runSection('chat', () => onSourceChat({ question, sources: selectedSources }), setChatResult)
+            }
+          >
+            {localLoading === 'chat' ? 'Working...' : 'Ask with citations'}
+          </button>
+          {errBox('chat')}
+          {chatResult ? (
+            <div className="mt-2 rounded-lg border border-border bg-slate-50 p-2.5">
+              <p className="text-sm leading-relaxed">{chatResult.answer}</p>
+              <ul className="mt-2 space-y-1.5">
+                {(chatResult.citations || []).map((c, i) => (
+                  <li key={`c-${i}`} className="rounded border border-border bg-white p-1.5 text-xs">
+                    <button
+                      type="button"
+                      className="text-left"
+                      onClick={() => onCitationSelect?.(c)}
+                      title="Jump to citation source"
+                    >
+                      <p className="font-semibold underline decoration-dotted">{c.source}</p>
+                      {c.passageId ? <p className="text-[10px] text-slate-500">Passage: {c.passageId}</p> : null}
+                      <p className="text-muted">{c.excerpt}</p>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      </details>
 
-      <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
-        <div className="rounded-xl border border-border bg-white p-3">
-          <div className="mb-2 flex items-center justify-between">
+      <details className="mt-2 rounded-lg border border-border bg-white p-3">
+        <summary className="cursor-pointer text-sm font-semibold text-slate-900">Study outputs</summary>
+        <div className="mt-2 space-y-2">
+      <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
+        <div className="rounded-lg border border-border bg-slate-50/50 p-2.5">
+          <div className="mb-1.5 flex items-center justify-between">
             <p className="text-sm font-semibold">Summary</p>
             <button
               className="btn-ghost"
@@ -474,8 +491,8 @@ export default function NotebookWorkspace({
           )}
         </div>
 
-        <div className="rounded-xl border border-border bg-white p-3">
-          <div className="mb-2 flex items-center justify-between">
+        <div className="rounded-lg border border-border bg-slate-50/50 p-2.5">
+          <div className="mb-1.5 flex items-center justify-between">
             <p className="text-sm font-semibold">Study guide</p>
             <button
               className="btn-ghost"
@@ -501,10 +518,10 @@ export default function NotebookWorkspace({
         </div>
       </div>
 
-      <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
-        <div className="rounded-xl border border-border bg-white p-3">
-          <div className="mb-2 flex items-center justify-between">
-            <p className="text-sm font-semibold">Compare sources</p>
+      <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
+        <div className="rounded-lg border border-border bg-slate-50/50 p-2.5">
+          <div className="mb-1.5 flex items-center justify-between">
+            <p className="text-sm font-semibold">Compare</p>
             <button
               className="btn-ghost"
               disabled={busy || selectedSources.length < 2}
@@ -526,8 +543,8 @@ export default function NotebookWorkspace({
           )}
         </div>
 
-        <div className="rounded-xl border border-border bg-white p-3">
-          <div className="mb-2 flex items-center justify-between">
+        <div className="rounded-lg border border-border bg-slate-50/50 p-2.5">
+          <div className="mb-1.5 flex items-center justify-between">
             <p className="text-sm font-semibold">Audio overview</p>
             <button
               className="btn-ghost"
@@ -543,8 +560,8 @@ export default function NotebookWorkspace({
           {audioOverview ? (
             <div className="space-y-2 text-xs">
               <p className="font-semibold">{audioOverview.title}</p>
-              <p className="text-[11px] leading-snug text-muted">
-                Ollama wrote the script below. Playback uses your browser&apos;s built-in voices (not Ollama).
+              <p className="text-[11px] leading-snug text-muted" title="Script from Ollama; voice is browser TTS">
+                Script from model · voice = browser TTS
               </p>
               {audioOverview.audioUrl ? <audio controls src={audioOverview.audioUrl} className="w-full" /> : null}
               {typeof window !== 'undefined' && window.speechSynthesis ? (
@@ -590,6 +607,8 @@ export default function NotebookWorkspace({
           )}
         </div>
       </div>
+        </div>
+      </details>
       {selectionText ? (
         <div
           className="fixed z-40 flex gap-1 rounded-lg border border-border bg-white p-1 shadow-soft"

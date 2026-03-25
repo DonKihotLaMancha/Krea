@@ -11,9 +11,9 @@ export default function SubirArchivoPanel({
   const indexing = selectedChunk?.ingestStatus === 'indexing';
 
   return (
-    <section className="panel mt-4">
-      <h3 className="mb-1 text-lg font-semibold">Document Structure Analyzer</h3>
-      <p className="mb-3 text-xs text-muted">Extract key sections from uploaded materials and start tracking progress.</p>
+    <section className="panel mt-3">
+      <h3 className="mb-0.5 text-base font-semibold">Document Structure Analyzer</h3>
+      <p className="mb-2 text-xs text-muted">Extract sections and track progress.</p>
       <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_auto]">
         <select
           className="input"
@@ -37,8 +37,11 @@ export default function SubirArchivoPanel({
         </button>
       </div>
       {indexing ? (
-        <p className="mt-2 text-xs text-amber-800">
-          Vector embeddings are still indexing for this PDF. Wait ~1 minute (or reload your library), then analyze sections.
+        <p
+          className="mt-2 text-xs text-amber-800"
+          title="Embeddings can take ~1 minute. Reload library if needed, then analyze."
+        >
+          Still indexing — wait a minute, then analyze.
         </p>
       ) : null}
       {apartados.length ? (

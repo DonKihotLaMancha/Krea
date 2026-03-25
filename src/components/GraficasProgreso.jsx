@@ -25,27 +25,28 @@ export default function GraficasProgreso({ apartados }) {
   };
 
   return (
-    <section className="panel mt-4">
-      <h3 className="mb-3 text-lg font-semibold">Progress by Sections</h3>
+    <section className="panel mt-3">
+      <h3 className="mb-2 text-base font-semibold">Progress by sections</h3>
       {!apartados.length ? (
-        <p className="text-sm text-muted">Analyze a document in Ingest to see section progress charts.</p>
+        <p className="text-sm text-muted">Analyze a document in Ingest to see charts.</p>
       ) : (
-        <>
-          <div className="mb-3 rounded-xl border border-border bg-slate-50 p-3">
-            <p className="text-xs text-muted">Total Progress</p>
-            <p className="text-2xl font-semibold">{totalProgreso}%</p>
+        <div className="grid grid-cols-1 gap-2 rounded-lg border border-border bg-white p-2.5 md:grid-cols-[minmax(0,11rem)_1fr] md:items-stretch">
+          <div className="flex flex-col justify-center rounded-md border border-border bg-slate-50 px-3 py-2 md:border-0 md:bg-transparent md:px-2 md:py-0">
+            <p className="text-xs text-muted">Total</p>
+            <p className="text-2xl font-semibold leading-tight">{totalProgreso}%</p>
           </div>
-          <div className="rounded-xl border border-border bg-white p-3">
+          <div className="min-w-0 md:border-l md:border-border md:pl-3">
             <Bar
               data={data}
               options={{
                 responsive: true,
+                maintainAspectRatio: true,
                 plugins: { legend: { position: 'bottom' } },
                 scales: { y: { beginAtZero: true } },
               }}
             />
           </div>
-        </>
+        </div>
       )}
     </section>
   );

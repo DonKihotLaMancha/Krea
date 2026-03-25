@@ -36,14 +36,14 @@ export default function TablaApartados({ apartados, onUpdate }) {
   const monthName = monthStart.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
 
   return (
-    <section className="panel mt-4">
-      <h3 className="mb-1 text-lg font-semibold">Section Tracker</h3>
-      <p className="mb-3 text-xs text-muted">Update progress and mark study days for each section.</p>
+    <section className="panel mt-3">
+      <h3 className="mb-0.5 text-base font-semibold">Section Tracker</h3>
+      <p className="mb-2 text-xs text-muted">Progress and study days per section.</p>
       {!apartados.length ? (
         <p className="text-sm text-muted">Analyze a document first to manage section progress and study dates.</p>
       ) : (
-        <div className="space-y-3">
-          <div className="overflow-x-auto rounded-xl border border-border bg-white">
+        <div className="space-y-2">
+          <div className="overflow-x-auto rounded-lg border border-border bg-white">
             <table className="min-w-full text-sm">
               <thead className="bg-slate-50 text-xs uppercase tracking-wide text-muted">
                 <tr>
@@ -93,7 +93,7 @@ export default function TablaApartados({ apartados, onUpdate }) {
 
           {apartados.map((a) => (
             expandido === a.id ? (
-              <div key={`${a.id}-calendar`} className="rounded-xl border border-border bg-slate-50 p-3">
+              <div key={`${a.id}-calendar`} className="rounded-lg border border-border bg-slate-50 p-2.5">
                 <div className="mb-2 flex items-center justify-between">
                   <p className="text-sm font-semibold">{a.nombre}</p>
                   <p className="text-xs text-muted">{monthName}</p>

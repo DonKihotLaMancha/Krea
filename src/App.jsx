@@ -2123,7 +2123,16 @@ export function StudentApp() {
       modelStatus={modelStatus}
       latestBatchAt={latestBatchAt}
       notice={notice}
-      authPanel={<AuthPanel supabase={supabaseBrowser} session={session} loading={authLoading} onAuthChange={(nextSession) => setSession(nextSession)} />}
+      authPanel={
+        <AuthPanel
+          supabase={supabaseBrowser}
+          session={session}
+          loading={authLoading}
+          onAuthChange={(nextSession) => setSession(nextSession)}
+          variant="sidebar"
+          compact={sidebarCollapsed}
+        />
+      }
       isFocusMode={isFocusMode}
       setIsFocusMode={setIsFocusMode}
       onOpenSearch={() => setIsCommandOpen(true)}
@@ -2163,11 +2172,11 @@ export function StudentApp() {
 
       {tab === 'Flashcards' ? (
         <>
-          <div className="mb-4 flex flex-col gap-3 rounded-xl border border-border bg-slate-50/90 p-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs font-medium text-slate-700">Deck style</span>
+          <div className="mb-2 flex flex-col gap-2 rounded-lg border border-border bg-slate-50/90 p-2.5 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-xs font-medium text-slate-700">Style</span>
               <select
-                className="input max-w-xs py-1.5 text-xs"
+                className="input max-w-[11rem] py-1 text-xs"
                 value={flashcardDeckStyle}
                 onChange={(e) => setFlashcardDeckStyle(e.target.value)}
                 disabled={isGenerating}
@@ -2175,13 +2184,13 @@ export function StudentApp() {
                 <option value="legacy">Classic QA</option>
                 <option value="anki">Anki-style (QA + cloze)</option>
               </select>
-              <span className="text-[11px] text-muted">Applies to Generate below</span>
             </div>
-            <label className="flex min-w-[12rem] max-w-md flex-1 flex-col gap-0.5 text-[11px] text-muted">
-              <span className="font-medium text-slate-700">Feynman interest (optional)</span>
+            <label className="flex min-w-[10rem] max-w-md flex-1 flex-col gap-0.5 text-xs text-muted">
+              <span className="font-medium text-slate-700">Feynman hook (optional)</span>
               <input
-                className="input py-1.5 text-xs"
-                placeholder="e.g. basketball, cooking, video games — for analogy-style prompts"
+                className="input py-1 text-xs"
+                title="Hobbies/topics for analogy-style cards"
+                placeholder="e.g. sports, cooking…"
                 value={flashcardUserInterest}
                 onChange={(e) => setFlashcardUserInterest(e.target.value)}
                 disabled={isGenerating}
@@ -2196,9 +2205,12 @@ export function StudentApp() {
               {isGenerating ? 'Generating…' : 'Generate flashcards'}
             </button>
           </div>
-          <p className="mb-2 px-1 text-[11px] text-muted">
-            Uses the PDF selected in Ingest. A full generate replaces the deck for this document; use “Generate more” on the deck to append.
-          </p>
+          <details className="mb-2 px-0.5 text-xs text-muted">
+            <summary className="cursor-pointer font-medium text-slate-600">How generation works</summary>
+            <p className="mt-1 pl-0.5 text-[11px] leading-snug">
+              Uses the document selected in Ingest. A full generate replaces this document&apos;s deck; use &quot;Generate more&quot; on the deck to append.
+            </p>
+          </details>
           <FlashcardDeck
             cards={deckCards}
             sourceLabel={activeChunk?.name}
@@ -3204,8 +3216,8 @@ function Chat({ room, setRoom, messages, setMessages, studentId, setNotice }) {
   return (
     <section className="panel">
       <h3 className="mb-1 text-lg font-semibold">Discussion Forum</h3>
-      <p className="mb-3 text-xs text-muted">Create structured discussion threads instead of live chat messages.</p>
-      <div className="mb-3 grid grid-cols-1 gap-2 rounded-xl border border-border bg-slate-50/70 p-4">
+      <p className="mb-2 text-xs text-muted">Post topic-based threads for class discussion.</p>
+      <div className="mb-2 grid grid-cols-1 gap-2 rounded-lg border border-border bg-slate-50/70 p-3">
         <label className="text-xs font-medium text-slate-700">Forum board</label>
         <select className="input" value={room} onChange={(e) => setRoom(e.target.value)}>
           <option value="global">Course feed</option>
@@ -3214,14 +3226,14 @@ function Chat({ room, setRoom, messages, setMessages, studentId, setNotice }) {
         </select>
         <label className="text-xs font-medium text-slate-700">Discussion title</label>
         <input
-          className="input w-full py-3"
+          className="input w-full py-2"
           value={topic}
           onChange={(e) => setTopic(e.target.value)}
           placeholder="e.g. Clarifying ArrayList resizing complexity"
         />
         <label className="text-xs font-medium text-slate-700">Post body</label>
         <textarea
-          className="input min-h-44 w-full"
+          className="input min-h-36 w-full"
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder="Write your post with context, evidence, and a direct question for classmates."
@@ -3259,17 +3271,17 @@ function Chat({ room, setRoom, messages, setMessages, studentId, setNotice }) {
           </button>
         </div>
       </div>
-      <ul className="space-y-3">
+      <ul className="space-y-2">
         {roomMessages.map((m) => {
           const [titleLine, ...restLines] = String(m.text || '').split('\n');
           const body = restLines.join('\n').trim() || titleLine;
           const title = restLines.length ? titleLine : 'Untitled discussion';
           return (
-            <li key={m.id} className="rounded-xl border border-border bg-white px-4 py-4 text-sm shadow-sm">
+            <li key={m.id} className="rounded-lg border border-border bg-white px-3 py-3 text-sm">
               <p className="text-[11px] uppercase tracking-wide text-muted">{roomLabel[m.room] || roomLabel[room] || 'Forum'}</p>
               <p className="mt-0.5 font-semibold text-slate-900">{title}</p>
-              <p className="mt-2 whitespace-pre-wrap leading-relaxed text-slate-700">{body}</p>
-              <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted">
+              <p className="mt-1.5 whitespace-pre-wrap leading-relaxed text-slate-700">{body}</p>
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted">
                 <span>Posted by {m.sender || 'User'}</span>
                 {m.createdAt ? <span>{new Date(m.createdAt).toLocaleString()}</span> : null}
               </div>
@@ -4107,19 +4119,19 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, streamingPrev
 
   return (
     <section className="panel">
-      <h3 className="mb-3 text-lg font-semibold">AI Tutor</h3>
-      <p className="mb-2 text-xs text-muted">
+      <h3 className="mb-2 text-lg font-semibold">AI Tutor</h3>
+      <p className="mb-1 text-xs text-muted">
         Powered by Ollama. Uses the PDF currently selected in Ingest for context
         {chunks[0] ? ` (${chunks[0].name})` : ' — upload PDFs in Ingest and select one for source-grounded answers.'}.
       </p>
-      <label className="mb-2 flex cursor-pointer items-center gap-2 text-xs text-slate-700">
+      <label className="mb-1 flex cursor-pointer items-center gap-2 text-xs text-slate-700">
         <input
           type="checkbox"
           className="rounded border-border"
           checked={socraticMode}
           onChange={(e) => setSocraticMode(e.target.checked)}
         />
-        Socratic mode (JSON tutor: grounded reply + challenge question; prefetches bottlenecks when enabled)
+        Socratic mode
       </label>
       {socraticMode ? (
         <p className="mb-2 text-[11px] text-muted">
@@ -4130,13 +4142,13 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, streamingPrev
               : 'Bottlenecks unavailable until a source is selected or analysis completes.'}
         </p>
       ) : null}
-      <p className="mb-2 text-[11px] leading-snug text-muted">
-        Tip: type your question in the box below. Push-to-talk is optional and needs a working mic and network in some browsers.
+      <p className="mb-1 text-[11px] text-muted">
+        Ask concise questions for faster, clearer responses.
       </p>
       {voiceHint ? (
-        <p className="mb-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-800">{voiceHint}</p>
+        <p className="mb-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs text-slate-800">{voiceHint}</p>
       ) : null}
-      <textarea className="input min-h-24" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Ask study guidance..." />
+      <textarea className="input min-h-20" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Ask study guidance..." />
       {isBusy && streamingPreview ? (
         <div
           className="mt-2 max-h-40 overflow-y-auto rounded-lg border border-canvas-primary/30 bg-[#f0f7fc] px-3 py-2 text-sm text-slate-800 whitespace-pre-wrap"
@@ -4147,7 +4159,7 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, streamingPrev
           {streamingPreview}
         </div>
       ) : null}
-      <div className="mt-2 flex flex-wrap gap-2">
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
         <button
           type="button"
           className="btn-primary"
@@ -4200,36 +4212,38 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, streamingPrev
         >
           {isListening ? 'Listening...' : 'Push-to-talk'}
         </button>
-        <button type="button" className="btn-ghost" disabled={!ttsSpeaking || ttsPaused} onClick={pauseSpeech}>
-          Pause
-        </button>
-        <button type="button" className="btn-ghost" disabled={!ttsSpeaking || !ttsPaused} onClick={resumeSpeech}>
-          Play
-        </button>
-        <button type="button" className="btn-ghost" disabled={!ttsSpeaking} onClick={stopSpeech}>
-          Stop
-        </button>
-        <label className="flex items-center gap-2 rounded-lg border border-border bg-white px-2 py-1 text-xs text-slate-700">
-          Volume
-          <input
-            type="range"
-            min="0"
-            max="1"
-            step="0.1"
-            value={ttsVolume}
-            onChange={(e) => setTtsVolume(Number(e.target.value))}
-          />
-          <span>{Math.round(ttsVolume * 100)}%</span>
-        </label>
+        <div className="flex items-center gap-1 rounded-lg border border-border bg-white px-1.5 py-1">
+          <button type="button" className="btn-ghost !px-2 !py-1 text-xs" disabled={!ttsSpeaking || ttsPaused} onClick={pauseSpeech}>
+            Pause
+          </button>
+          <button type="button" className="btn-ghost !px-2 !py-1 text-xs" disabled={!ttsSpeaking || !ttsPaused} onClick={resumeSpeech}>
+            Play
+          </button>
+          <button type="button" className="btn-ghost !px-2 !py-1 text-xs" disabled={!ttsSpeaking} onClick={stopSpeech}>
+            Stop
+          </button>
+          <label className="ml-1 flex items-center gap-1 text-xs text-slate-700">
+            Vol
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.1"
+              value={ttsVolume}
+              onChange={(e) => setTtsVolume(Number(e.target.value))}
+            />
+            <span>{Math.round(ttsVolume * 100)}%</span>
+          </label>
+        </div>
       </div>
-      <ul className="mt-3 space-y-2">
+      <ul className="mt-2 space-y-1.5">
         {tutorMessages.map((m) => (
-          <li key={m.id} className="rounded-xl border border-border bg-white p-3 text-sm">
-            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+          <li key={m.id} className="rounded-lg border border-border bg-white p-2.5 text-sm">
+            <div className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-2">
               <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">You asked</p>
               <p className="mt-1 whitespace-pre-wrap text-slate-800">{m.you}</p>
             </div>
-            <div className="mt-2 rounded-lg border border-emerald-100 bg-emerald-50/40 px-3 py-2">
+            <div className="mt-1.5 rounded-md border border-emerald-100 bg-emerald-50/40 px-2.5 py-2">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-800">Tutor response</p>
                 <button type="button" className="btn-ghost !px-2 !py-1 text-xs" onClick={() => speakText(m.tutor)}>

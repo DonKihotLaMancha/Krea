@@ -29,8 +29,8 @@
 
 @layer components {
   .input {
-    @apply rounded-xl px-3 py-2 text-sm outline-none;
-    border: 1px solid #c7cdd1;
+    @apply rounded-lg px-3 py-2 text-sm outline-none;
+    border: 1px solid #d1d5db;
     background: #ffffff;
     color: #111111;
     box-shadow: none;
@@ -40,7 +40,7 @@
     box-shadow: 0 0 0 2px rgba(3, 116, 183, 0.22);
   }
   .btn {
-    @apply rounded-xl px-4 py-2 text-sm font-medium transition duration-200;
+    @apply rounded-lg px-3 py-1 text-sm font-medium transition duration-200;
   }
   .btn-primary {
     @apply btn text-white disabled:opacity-50;
@@ -57,12 +57,12 @@
     color: #111111;
   }
   .btn-ghost:hover:not(:disabled) {
-    background: #f0f2f4;
+    background: #f3f4f6;
   }
   .panel {
-    @apply p-4;
+    @apply p-2.5;
     border-radius: 6px;
-    border: 1px solid #e0e0e0;
+    border: 1px solid #e5e7eb;
     background: #ffffff;
     box-shadow: none;
     color: #111111;

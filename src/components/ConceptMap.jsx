@@ -1,19 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 /** Pastel branch palette — fallback when categoryTag is missing. */
-const ROOT_FILL = '#fdba74';
-const BRANCH_PALETTES = ['#fde68a', '#bae6fd', '#bbf7d0', '#fecaca', '#e9d5ff', '#fed7aa', '#a5f3fc', '#ddd6fe'];
+const ROOT_FILL = '#e5e7eb';
+const BRANCH_PALETTES = ['#f3f4f6', '#eef2f7', '#f1f5f9', '#f8fafc', '#eef2ff', '#f5f3ff', '#f7fee7', '#f9fafb'];
 
 /** Semantic fills by categoryTag (study-tool convention). */
 const CATEGORY_FILL = {
-  theory: '#bbf7d0',
-  process: '#86efac',
-  action: '#fde68a',
-  definition: '#93c5fd',
-  fact: '#bfdbfe',
-  exam: '#fecaca',
-  risk: '#fca5a5',
-  other: '#e5e7eb',
+  theory: '#e2e8f0',
+  process: '#dcfce7',
+  action: '#fef9c3',
+  definition: '#dbeafe',
+  fact: '#e0f2fe',
+  exam: '#fee2e2',
+  risk: '#ffe4e6',
+  other: '#f3f4f6',
 };
 
 const COL_GAP = 200;
@@ -502,7 +502,7 @@ export default function ConceptMap({
       canvas.width = baseView.w * scale;
       canvas.height = baseView.h * scale;
       const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#f4f4f5';
+      ctx.fillStyle = '#fafafa';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.scale(scale, scale);
       ctx.drawImage(img, 0, 0);
@@ -527,7 +527,7 @@ export default function ConceptMap({
 
   const nodeById = useMemo(() => new Map(allDrawNodes.map((n) => [n.id, n])), [allDrawNodes]);
 
-  const drawEdges = (list, { dashed = false, stroke = '#c4c4c4' }) =>
+  const drawEdges = (list, { dashed = false, stroke = '#d1d5db' }) =>
     list.map((l, i) => {
       const source = nodeById.get(l.source);
       const target = nodeById.get(l.target);
@@ -541,8 +541,8 @@ export default function ConceptMap({
           key={`${dashed ? 'x' : 't'}-${l.source}-${l.target}-${i}`}
           d={edgePathBezier(x1, y1, x2, y2)}
           fill="none"
-          stroke={dashed ? '#64748b' : stroke}
-          strokeWidth={dashed ? 1.25 : 1.5}
+          stroke={dashed ? '#94a3b8' : stroke}
+          strokeWidth={dashed ? 1.1 : 1.25}
           strokeDasharray={dashed ? '7 5' : undefined}
           opacity={dashed ? 0.95 : 1}
         >
@@ -553,28 +553,33 @@ export default function ConceptMap({
 
   return (
     <section className="panel">
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <h3 className="text-lg font-semibold">{conceptMapData?.title || 'Mind Map'}</h3>
-        <div className="flex items-center gap-2">
-          <span className="rounded-full border border-border bg-white px-3 py-1 text-xs text-muted">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-base font-semibold">{conceptMapData?.title || 'Mind Map'}</h3>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="rounded-full border border-border bg-white px-2 py-0.5 text-xs text-muted">
             {allDrawNodes.length} nodes
           </span>
           {allDrawNodes.length ? (
-            <>
-              <button type="button" className="btn-ghost !px-2 !py-1 text-xs" onClick={exportSvg}>
-                Export SVG
-              </button>
-              <button type="button" className="btn-ghost !px-2 !py-1 text-xs" onClick={exportPng}>
-                Export PNG
-              </button>
-              <button type="button" className="btn-ghost !px-2 !py-1 text-xs" onClick={exportHtml}>
-                Export HTML
-              </button>
-            </>
+            <details className="relative rounded-lg border border-border bg-white">
+              <summary className="cursor-pointer list-none px-2 py-1 text-xs font-semibold text-slate-700 [&::-webkit-details-marker]:hidden">
+                Export
+              </summary>
+              <div className="absolute right-0 z-20 mt-1 flex min-w-[9rem] flex-col gap-0.5 rounded-lg border border-border bg-white p-1 shadow-sm">
+                <button type="button" className="btn-ghost w-full !justify-start !px-2 !py-1 text-left text-xs" onClick={exportSvg}>
+                  SVG
+                </button>
+                <button type="button" className="btn-ghost w-full !justify-start !px-2 !py-1 text-left text-xs" onClick={exportPng}>
+                  PNG
+                </button>
+                <button type="button" className="btn-ghost w-full !justify-start !px-2 !py-1 text-left text-xs" onClick={exportHtml}>
+                  HTML
+                </button>
+              </div>
+            </details>
           ) : null}
         </div>
       </div>
-      <div className="mb-3 flex flex-col gap-2">
+      <div className="mb-2 flex flex-col gap-1.5">
         <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_auto]">
           <select
             className="input"
@@ -598,7 +603,10 @@ export default function ConceptMap({
             {isGenerating ? 'Generating map...' : deepDive ? 'Generate deep dive map' : 'Generate map'}
           </button>
         </div>
-        <label className="flex cursor-pointer items-start gap-2 text-xs text-slate-700">
+        <label
+          className="flex cursor-pointer items-start gap-2 text-xs text-slate-700"
+          title="Uses Wikipedia when possible, 24–40 nodes, reading suggestions, more context and time."
+        >
           <input
             type="checkbox"
             className="mt-0.5 rounded border-border"
@@ -607,42 +615,32 @@ export default function ConceptMap({
             disabled={isGenerating}
           />
           <span>
-            <strong className="text-slate-800">Deep dive</strong> — pulls a Wikipedia summary when possible, expands the graph
-            (24–40 nodes), tighter link labels, and suggested books/papers/standards to read next. Slower and uses more context.
+            <strong className="text-slate-800">Deep dive</strong> — richer map (slower, more context)
           </span>
         </label>
       </div>
       {!allDrawNodes.length || !isFromAiMap ? (
-        <div className="mb-3 rounded-lg border border-border bg-slate-50 p-3 text-sm text-muted">
-          No mind map yet. Select an uploaded document and click <b>Generate map</b>.
+        <div className="mb-2 rounded-lg border border-border bg-slate-50 p-2.5 text-sm text-muted">
+          No map yet — pick a document and <b>Generate map</b>.
         </div>
       ) : (
-        <p className="mb-3 text-xs text-muted">
-          Tap a node for details. Solid lines = hierarchy; dashed = cross-links.
-        </p>
+        <p className="mb-2 text-xs text-muted">Tap nodes · solid = tree · dashed = cross-links</p>
       )}
       {null}
 
       {isFromAiMap && allDrawNodes.length ? (
-        <div className="relative overflow-hidden rounded-xl border border-border bg-[#f4f4f5]">
+        <div className="relative overflow-hidden rounded-lg border border-border bg-[#f4f4f5]">
           <button
             type="button"
-            className="absolute right-3 top-3 z-10 flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-300 bg-white text-zinc-700 shadow-sm hover:bg-zinc-50"
-            title="Download PNG"
-            onClick={exportPng}
-            aria-label="Download concept map as PNG"
+            className="absolute left-2 top-2 z-10 flex h-7 w-7 items-center justify-center rounded-md border border-zinc-300 bg-white text-xs font-bold text-zinc-600 shadow-sm hover:bg-zinc-50"
+            title="Pan: drag empty canvas. Zoom: Ctrl + mouse wheel or +/−. Scrollbars when content is large."
+            aria-label="Map navigation help"
           >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
-            </svg>
+            ?
           </button>
-          <p className="absolute left-3 top-11 z-[5] max-w-[min(100%,36rem)] rounded border border-border bg-white/95 px-2 py-1.5 text-[11px] leading-snug text-muted shadow-sm">
-            Drag empty canvas to pan · scrollbars · <kbd className="rounded border border-border bg-slate-50 px-1">Ctrl</kbd> + wheel
-            to zoom · use +/−
-          </p>
           <div
             ref={scrollRef}
-            className="max-h-[78vh] touch-pan-y overflow-auto overscroll-contain p-3 pt-12"
+            className="max-h-[78vh] touch-pan-y overflow-auto overscroll-contain p-2 pt-2"
             onWheel={(e) => {
               if (!e.ctrlKey) return;
               e.preventDefault();
@@ -701,7 +699,7 @@ export default function ConceptMap({
               preserveAspectRatio="xMinYMin meet"
               className="block min-w-0"
             >
-              <rect x="0" y="0" width={baseView.w} height={baseView.h} fill="#f4f4f5" />
+              <rect x="0" y="0" width={baseView.w} height={baseView.h} fill="#fafafa" />
               <g transform={`translate(24, 24)`}>
                 {drawEdges(isFromAiMap ? treeEdges : hubEdges, { dashed: false })}
                 {drawEdges(crossEdges, { dashed: true })}
@@ -721,7 +719,7 @@ export default function ConceptMap({
                     : branchFill.get(n.id) ||
                       (n.level === 0 ? ROOT_FILL : BRANCH_PALETTES[Math.abs(String(n.id).length) % BRANCH_PALETTES.length]);
                   const isHighP = isFromAiMap && highPrioritySet.has(n.id);
-                  const strokeW = isActive ? 2.25 : isHighP ? 2.5 : 1;
+                  const strokeW = isActive ? 2 : isHighP ? 2.25 : 1;
                   const fs = n.level === 0 ? 12.5 : 11;
                   const fsTldr = 9.5;
                   const labelBlockH = labelLineTexts.length * lineHeight;
@@ -742,7 +740,7 @@ export default function ConceptMap({
                         rx={CORNER_RX}
                         ry={CORNER_RX}
                         fill={fill}
-                        stroke={isHighP ? '#b91c1c' : '#171717'}
+                        stroke={isHighP ? '#b91c1c' : '#374151'}
                         strokeWidth={strokeW}
                       />
                       {hasCh ? (
