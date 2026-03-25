@@ -32,3 +32,7 @@
 {"sessionId":"538766","location":"server.js:/api/presentation:success","message":"presentation generated","data":{"hypothesisId":"H1","slideCount":8,"refCount":1},"timestamp":1774442866794}
 {"sessionId":"538766","location":"server.js:/api/library/ingest:entry","message":"ingest","data":{"fileName":"Unit 2.pdf","byteLength":522060,"mimeType":"application/pdf"},"timestamp":1774447517656}
 {"sessionId":"538766","location":"server.js:/api/library/ingest:success","message":"ingest saved","data":{"sourceId":"6ec4fd18-14d1-4762-9a93-6a98a564f805","deduplicated":false,"format":"pdf"},"timestamp":1774447519527}
+{"sessionId":"538766","location":"server.js:/api/presentation:entry","message":"presentation request","data":{"hypothesisId":"H1","topicLen":10,"sourcesLen":1,"requestedSlides":8},"timestamp":1774451922727}
+{"sessionId":"538766","location":"server.js:/api/presentation:success","message":"presentation generated","data":{"hypothesisId":"H1","slideCount":8,"refCount":1},"timestamp":1774451988358}
+{"sessionId":"538766","location":"server.js:/api/library/presentation:entry","message":"save presentation","data":{"hypothesisId":"H4","hasStudentId":true,"slideCount":8,"refCount":1,"titleLen":26},"timestamp":1774451988362}
+{"sessionId":"538766","location":"server.js:/api/library/presentation:catch","message":"save presentation failed","data":{"hypothesisId":"H4","detail":"Could not find the 'chart_bars' column of 'presentation_slides' in the schema cache"},"timestamp":1774451989615}

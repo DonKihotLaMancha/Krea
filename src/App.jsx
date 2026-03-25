@@ -249,6 +249,22 @@ function fallbackCardsFromText(raw) {
     }));
 }
 
+function buildFlashcardCoverageSlice(raw, existingCount = 0, batchSize = 10) {
+  const cleaned = cleanAcademicText(raw);
+  const sentences = (cleaned.match(/[^.!?]+[.!?]/g) || [])
+    .map((s) => s.trim())
+    .filter((s) => s.length > 35 && s.length < 320);
+  if (!sentences.length) return cleaned;
+  const batchIndex = Math.max(0, Math.floor(Number(existingCount || 0) / Math.max(1, batchSize)));
+  const windowSize = Math.min(56, Math.max(24, batchSize * 5));
+  const start = (batchIndex * windowSize) % sentences.length;
+  const picked = [];
+  for (let i = 0; i < Math.min(windowSize, sentences.length); i += 1) {
+    picked.push(sentences[(start + i) % sentences.length]);
+  }
+  return picked.join(' ');
+}
+
 async function generateCardsWithOllama(text, { focusTopic = '', userInterest = '' } = {}) {
   const body = { text };
   if (String(focusTopic || '').trim()) body.focusTopic = String(focusTopic).trim();
@@ -999,6 +1015,22 @@ function tagFlashcardsForChunk(chunk, list, { conceptNodeId = null } = {}) {
   }));
 }
 
+function mergeChunkCardsWithCap(prevCards, chunk, incomingCards, cap = 10) {
+  const sameChunk = (c) =>
+    c?.libraryChunkId === chunk?.id || (chunk?.sourceId && c?.sourceId && String(c.sourceId) === String(chunk.sourceId));
+  const others = (prevCards || []).filter((c) => !sameChunk(c));
+  const same = (prevCards || []).filter((c) => sameChunk(c));
+  const merged = [...same, ...(incomingCards || [])];
+  const seen = new Set();
+  const deduped = merged.filter((c) => {
+    const k = String(c?.question || '').trim().toLowerCase();
+    if (!k || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  return [...others, ...deduped.slice(-cap)];
+}
+
 async function extractPdfText(file, onProgress) {
   const emit = (payload) => {
     if (onProgress) onProgress(payload);
@@ -1516,16 +1548,24 @@ export function StudentApp() {
       let aiCards = [];
       const focus = String(focusTopic || '').trim();
       const interest = String(flashcardUserInterest || '').trim();
+      const existingForChunk = cards.filter(
+        (c) => c?.libraryChunkId === chunk.id || (chunk?.sourceId && c?.sourceId && String(c.sourceId) === String(chunk.sourceId)),
+      ).length;
+      const generationText = buildFlashcardCoverageSlice(
+        chunk.content,
+        append ? existingForChunk : 0,
+        10,
+      );
       if (flashcardDeckStyle === 'anki') {
         const data = await generateAnkiFlashcardsWithOllama({
-          sources: [{ name: chunk.name, content: chunk.content }],
+          sources: [{ name: chunk.name, content: generationText }],
           ...(focus ? { focusTopic: focus } : {}),
           ...(interest ? { userInterest: interest } : {}),
         });
         aiCards = ankiCardsToStudyCards(data.cards || []);
       } else {
         aiCards = await generateCardsWithOllama(
-          chunk.content,
+          generationText,
           {
             ...(focus ? { focusTopic: focus } : {}),
             ...(interest ? { userInterest: interest } : {}),
@@ -1533,10 +1573,10 @@ export function StudentApp() {
         );
       }
       if (aiCards.length) {
-        const normalized = tagFlashcardsForChunk(chunk, normalizeStudyCards(aiCards), {
+        const normalized = tagFlashcardsForChunk(chunk, normalizeStudyCards(aiCards).slice(0, 10), {
           conceptNodeId: conceptNodeId || null,
         });
-        setCards((prev) => (append ? [...prev, ...normalized] : normalized));
+        setCards((prev) => (append ? mergeChunkCardsWithCap(prev, chunk, normalized, 10) : normalized));
         if (studentId) {
           try {
             await saveFlashcardsToLibrary({
@@ -1556,14 +1596,14 @@ export function StudentApp() {
         setGenerationStage('Completed');
         setNotice(
           append
-            ? `Generated ${aiCards.length} more AI flashcards.`
-            : `Generated ${aiCards.length} AI flashcards.`,
+            ? `Generated 10-card refresh from the next content slice.`
+            : `Generated a 10-card AI deck.`,
         );
         return;
       }
-      const fallback = fallbackCardsFromText(chunk.content);
-      const normalizedFallback = tagFlashcardsForChunk(chunk, normalizeStudyCards(fallback));
-      setCards((prev) => (append ? [...prev, ...normalizedFallback] : normalizedFallback));
+      const fallback = fallbackCardsFromText(generationText);
+      const normalizedFallback = tagFlashcardsForChunk(chunk, normalizeStudyCards(fallback).slice(0, 10));
+      setCards((prev) => (append ? mergeChunkCardsWithCap(prev, chunk, normalizedFallback, 10) : normalizedFallback));
       if (studentId) {
         try {
           await saveFlashcardsToLibrary({
@@ -1582,15 +1622,27 @@ export function StudentApp() {
       setGenerationStage('Completed');
       setNotice(
         append
-          ? `AI returned no cards. Added ${fallback.length} backup flashcards.`
-          : `AI returned no cards. Generated ${fallback.length} backup cards.`,
+          ? `AI returned no cards. Loaded a 10-card backup refresh from the next slice.`
+          : `AI returned no cards. Generated a 10-card backup deck.`,
       );
     } catch (error) {
       setGenerationIndeterminate(true);
       setGenerationStage('AI unavailable, switching to backup mode...');
-      const fallback = fallbackCardsFromText(chunk.content);
-      const normalizedFallback = tagFlashcardsForChunk(chunk, normalizeStudyCards(fallback));
-      setCards((prev) => (append ? [...prev, ...normalizedFallback] : normalizedFallback));
+      const fallback = fallbackCardsFromText(
+        buildFlashcardCoverageSlice(
+          chunk.content,
+          append
+            ? cards.filter(
+                (c) =>
+                  c?.libraryChunkId === chunk.id ||
+                  (chunk?.sourceId && c?.sourceId && String(c.sourceId) === String(chunk.sourceId)),
+              ).length
+            : 0,
+          10,
+        ),
+      );
+      const normalizedFallback = tagFlashcardsForChunk(chunk, normalizeStudyCards(fallback).slice(0, 10));
+      setCards((prev) => (append ? mergeChunkCardsWithCap(prev, chunk, normalizedFallback, 10) : normalizedFallback));
       if (studentId) {
         try {
           await saveFlashcardsToLibrary({
@@ -1609,8 +1661,8 @@ export function StudentApp() {
       setGenerationStage('Completed');
       setNotice(
         append
-          ? `AI model offline — added ${fallback.length} backup cards.`
-          : `${error?.message || 'AI model offline'} — using backup mode (${fallback.length} cards).`,
+          ? `AI offline — loaded a 10-card backup refresh from the next slice.`
+          : `${error?.message || 'AI model offline'} — using 10-card backup mode.`,
       );
     } finally {
       setIsGenerating(false);
