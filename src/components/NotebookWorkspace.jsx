@@ -410,10 +410,10 @@ export default function NotebookWorkspace({
         ) : null}
       </div>
 
-      <div className="rounded-xl border border-border bg-white p-3">
+      <div className="rounded-xl border border-border bg-white p-4">
         <p className="mb-2 text-sm font-semibold">Source-grounded chat</p>
         <textarea
-          className="input min-h-20"
+          className="input min-h-56 w-full"
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
           placeholder="Ask a question from your selected PDFs..."
@@ -430,7 +430,7 @@ export default function NotebookWorkspace({
         {errBox('chat')}
         {chatResult ? (
           <div className="mt-3 rounded-lg border border-border bg-slate-50 p-3">
-            <p className="text-sm">{chatResult.answer}</p>
+            <p className="text-sm leading-relaxed">{chatResult.answer}</p>
             <ul className="mt-2 space-y-2">
               {(chatResult.citations || []).map((c, i) => (
                 <li key={`c-${i}`} className="rounded border border-border bg-white p-2 text-xs">

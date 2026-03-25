@@ -36,7 +36,7 @@ try {
   console.warn('[Krea] PDF.js worker URL could not be set:', e);
 }
 
-const tabs = ['Ingest', 'LMS', 'Flashcards', 'Notebook', 'Concept Map', 'Tasks', 'Quizzes', 'Chat', 'Presentations', 'Academics', 'AI Tutor'];
+const tabs = ['Ingest', 'Flashcards', 'Notebook', 'Mind Map', 'Tasks', 'Quizzes', 'Chat', 'Presentations', 'Academics', 'AI Tutor'];
 
 /** Local-only PDF backup (before sign-in). Cleared after successful sync to Supabase. */
 const LOCAL_PDFS_KEY = 'sa_account_pdfs_v1';
@@ -190,13 +190,26 @@ function looksLikeGibberish(text) {
 function fallbackCardsFromText(raw) {
   const cleaned = cleanAcademicText(raw);
   const completeSentences = cleaned.match(/[^.!?]+[.!?]/g) || [];
+  const stemFromSentence = (s, i) => {
+    const text = String(s || '').trim().replace(/[.!?]+$/, '');
+    const short = text.length > 110 ? `${text.slice(0, 110)}...` : text;
+    const templates = [
+      `Why does this matter in practice: "${short}"?`,
+      `How would you explain the mechanism behind: "${short}"?`,
+      `What assumption must be true for this to hold: "${short}"?`,
+      `What is a likely consequence if this is ignored: "${short}"?`,
+      `How does this connect to earlier concepts: "${short}"?`,
+      `What is the core trade-off implied by: "${short}"?`,
+    ];
+    return templates[i % templates.length];
+  };
   return completeSentences
     .map((s) => s.trim())
     .filter((s) => s.length > 45 && s.length < 260)
     .slice(0, 12)
     .map((text, i) => ({
       id: `${Date.now()}-${i}`,
-      question: `What is the key idea of this statement?`,
+      question: stemFromSentence(text, i),
       answer: text,
       right: 0,
       wrong: 0,
@@ -257,7 +270,7 @@ async function generateConceptMapWithOllama({ text, title, deepDive = false }) {
   if (!resp.ok) throw new Error('Concept map API error');
   const data = await resp.json();
   return {
-    title: String(data.title || title || 'Concept Map').trim(),
+    title: String(data.title || title || 'Mind Map').trim(),
     nodes: Array.isArray(data.nodes) ? data.nodes : [],
     links: Array.isArray(data.links) ? data.links : [],
     externalResources: Array.isArray(data.externalResources) ? data.externalResources : [],
@@ -1014,7 +1027,7 @@ export function StudentApp() {
   const [isCommandOpen, setIsCommandOpen] = useState(false);
   const [tab, setTab] = useState('Ingest');
   const [chunks, setChunks] = useState([]);
-  /** Selected library material (chunk id) — drives Flashcards, Notebook, Concept Map, etc. */
+  /** Selected library material (chunk id) — drives Flashcards, Notebook, Mind Map, etc. */
   const [activePdfId, setActivePdfId] = useState('');
   const [sectionCatalog, setSectionCatalog] = useState([]);
   const [conceptMapLibrary, setConceptMapLibrary] = useState([]);
@@ -1207,7 +1220,7 @@ export function StudentApp() {
     if (hit?.map) {
       const m = hit.map;
       setConceptMapData({
-        title: m.title || hit.title || 'Concept Map',
+        title: m.title || hit.title || 'Mind Map',
         nodes: m.nodes || [],
         links: m.links || [],
       });
@@ -2401,7 +2414,7 @@ export function StudentApp() {
           setNotice={setNotice}
         />
       ) : null}
-      {tab === 'Concept Map' ? (
+      {tab === 'Mind Map' ? (
         <Suspense fallback={<section className="panel text-sm text-muted">Loading concept map...</section>}>
           <ConceptMap
             apartados={apartados}
@@ -3180,41 +3193,93 @@ function Quizzes({ config, setConfig, onGenerate, results, isGenerating, activeS
 }
 
 function Chat({ room, setRoom, messages, setMessages, studentId, setNotice }) {
+  const [topic, setTopic] = useState('');
   const [text, setText] = useState('');
-  const rooms = ['global', 'private', 'class-group'];
   const roomMessages = messages.filter((m) => m.room === room);
+  const roomLabel = {
+    global: 'Course feed',
+    private: 'Instructor Q&A',
+    'class-group': 'Study group',
+  };
   return (
     <section className="panel">
-      <h3 className="mb-3 text-lg font-semibold">Class Collaboration Chat</h3>
-      <div className="mb-3 flex flex-wrap gap-2">
-        <select className="input" value={room} onChange={(e) => setRoom(e.target.value)}>{rooms.map((r) => <option key={r}>{r}</option>)}</select>
-        <input className="input" value={text} onChange={(e) => setText(e.target.value)} placeholder="Type message..." />
-        <button
-          className="btn-primary"
-          onClick={async () => {
-            const trimmed = text.trim();
-            if (!trimmed) return;
-            const localMessage = { id: Date.now(), room, text: trimmed, sender: 'You' };
-            setMessages((p) => [...p, localMessage]);
-            setText('');
-            if (studentId) {
-              try {
-                const data = await saveChatMessageToLibrary({ studentId, room, content: trimmed });
-                if (data?.message?.id) {
-                  setMessages((prev) =>
-                    prev.map((m) => (m.id === localMessage.id ? { ...m, id: data.message.id } : m)),
-                  );
+      <h3 className="mb-1 text-lg font-semibold">Discussion Forum</h3>
+      <p className="mb-3 text-xs text-muted">Create structured discussion threads instead of live chat messages.</p>
+      <div className="mb-3 grid grid-cols-1 gap-2 rounded-xl border border-border bg-slate-50/70 p-4">
+        <label className="text-xs font-medium text-slate-700">Forum board</label>
+        <select className="input" value={room} onChange={(e) => setRoom(e.target.value)}>
+          <option value="global">Course feed</option>
+          <option value="private">Instructor Q&A</option>
+          <option value="class-group">Group Study</option>
+        </select>
+        <label className="text-xs font-medium text-slate-700">Discussion title</label>
+        <input
+          className="input w-full py-3"
+          value={topic}
+          onChange={(e) => setTopic(e.target.value)}
+          placeholder="e.g. Clarifying ArrayList resizing complexity"
+        />
+        <label className="text-xs font-medium text-slate-700">Post body</label>
+        <textarea
+          className="input min-h-44 w-full"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="Write your post with context, evidence, and a direct question for classmates."
+        />
+        <div>
+          <button
+            className="btn-primary"
+            onClick={async () => {
+              const trimmed = text.trim();
+              if (!trimmed) return;
+              const localMessage = {
+                id: Date.now(),
+                room,
+                text: `${topic.trim() ? `${topic.trim()}\n\n` : ''}${trimmed}`,
+                sender: 'You',
+              };
+              setMessages((p) => [...p, localMessage]);
+              setText('');
+              setTopic('');
+              if (studentId) {
+                try {
+                  const data = await saveChatMessageToLibrary({ studentId, room, content: localMessage.text });
+                  if (data?.message?.id) {
+                    setMessages((prev) =>
+                      prev.map((m) => (m.id === localMessage.id ? { ...m, id: data.message.id } : m)),
+                    );
+                  }
+                } catch {
+                  setNotice?.('Post saved locally, but forum history could not be synced.');
                 }
-              } catch {
-                setNotice?.('Message sent locally, but failed to persist chat history.');
               }
-            }
-          }}
-        >
-          Send
-        </button>
+            }}
+          >
+            Publish post
+          </button>
+        </div>
       </div>
-      <ul className="space-y-2">{roomMessages.map((m) => <li key={m.id} className="rounded-lg border border-border bg-white px-3 py-2 text-sm"><b>{m.sender}:</b> {m.text}</li>)}</ul>
+      <ul className="space-y-3">
+        {roomMessages.map((m) => {
+          const [titleLine, ...restLines] = String(m.text || '').split('\n');
+          const body = restLines.join('\n').trim() || titleLine;
+          const title = restLines.length ? titleLine : 'Untitled discussion';
+          return (
+            <li key={m.id} className="rounded-xl border border-border bg-white px-4 py-4 text-sm shadow-sm">
+              <p className="text-[11px] uppercase tracking-wide text-muted">{roomLabel[m.room] || roomLabel[room] || 'Forum'}</p>
+              <p className="mt-0.5 font-semibold text-slate-900">{title}</p>
+              <p className="mt-2 whitespace-pre-wrap leading-relaxed text-slate-700">{body}</p>
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted">
+                <span>Posted by {m.sender || 'User'}</span>
+                {m.createdAt ? <span>{new Date(m.createdAt).toLocaleString()}</span> : null}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      {!roomMessages.length ? (
+        <p className="mt-3 text-sm text-muted">No threads yet in this board. Start with a title and a detailed post above.</p>
+      ) : null}
     </section>
   );
 }
@@ -3885,7 +3950,11 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, streamingPrev
   const [prompt, setPrompt] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [voiceHint, setVoiceHint] = useState('');
-  const [voiceInputDisabled, setVoiceInputDisabled] = useState(false);
+  const recognitionRef = useRef(null);
+  const utteranceRef = useRef(null);
+  const [ttsSpeaking, setTtsSpeaking] = useState(false);
+  const [ttsPaused, setTtsPaused] = useState(false);
+  const [ttsVolume, setTtsVolume] = useState(1);
   const [socraticMode, setSocraticMode] = useState(false);
   const [socraticBottlenecks, setSocraticBottlenecks] = useState(null);
   const [bottlenecksBusy, setBottlenecksBusy] = useState(false);
@@ -3926,7 +3995,14 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, streamingPrev
     window.location.hostname === '127.0.0.1';
 
   const startVoiceInput = () => {
-    if (voiceInputDisabled) return;
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {
+        /* ignore */
+      }
+      recognitionRef.current = null;
+    }
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
       const msg =
@@ -3941,30 +4017,36 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, streamingPrev
     setVoiceHint('');
     const rec = new SpeechRecognition();
     rec.lang = 'en-US';
-    rec.interimResults = false;
+    rec.interimResults = true;
+    rec.continuous = false;
     rec.maxAlternatives = 1;
+    recognitionRef.current = rec;
     setIsListening(true);
     rec.onresult = (event) => {
-      const transcript = event.results?.[0]?.[0]?.transcript || '';
-      setPrompt((prev) => `${prev} ${transcript}`.trim());
+      const transcript = Array.from(event.results || [])
+        .map((r) => r?.[0]?.transcript || '')
+        .join(' ')
+        .trim();
+      if (transcript) setPrompt((prev) => `${prev} ${transcript}`.trim());
     };
-    rec.onend = () => setIsListening(false);
+    rec.onend = () => {
+      recognitionRef.current = null;
+      setIsListening(false);
+    };
     rec.onerror = (event) => {
       setIsListening(false);
       const code = event?.error || 'unknown';
       if (code === 'not-allowed') {
-        setVoiceHint('Microphone access was blocked. You can still type your question in the box below.');
-        setVoiceInputDisabled(true);
+        setVoiceHint('Microphone access was blocked. Allow mic permissions, then press Push-to-talk again.');
         return;
       }
       if (code === 'network') {
         setVoiceHint(
-          'Voice recognition could not reach Google’s speech service (network or browser policy). Typing works the same — use the text box below.',
+          'Voice recognition had a network issue. You can retry Push-to-talk or continue typing.',
         );
-        setVoiceInputDisabled(true);
         return;
       }
-      setVoiceHint(`Voice input paused (${code}). Type below instead, or refresh the page to try again.`);
+      setVoiceHint(`Voice input paused (${code}). Press Push-to-talk to retry.`);
     };
     try {
       rec.start();
@@ -3974,13 +4056,53 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, streamingPrev
     }
   };
 
+  useEffect(() => () => {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+  }, []);
+
   const speakText = (text) => {
-    if (!('speechSynthesis' in window) || !text) return;
+    if (typeof window === 'undefined' || !('speechSynthesis' in window) || !text) return;
     window.speechSynthesis.cancel();
-    const utter = new SpeechSynthesisUtterance(String(text).slice(0, 1200));
+    const utter = new SpeechSynthesisUtterance(String(text).slice(0, 2400));
     utter.rate = 1;
     utter.pitch = 1;
+    utter.volume = Math.max(0, Math.min(1, Number(ttsVolume) || 1));
+    utter.onstart = () => {
+      setTtsSpeaking(true);
+      setTtsPaused(false);
+    };
+    utter.onend = () => {
+      setTtsSpeaking(false);
+      setTtsPaused(false);
+      utteranceRef.current = null;
+    };
+    utter.onerror = () => {
+      setTtsSpeaking(false);
+      setTtsPaused(false);
+      utteranceRef.current = null;
+    };
+    utteranceRef.current = utter;
     window.speechSynthesis.speak(utter);
+  };
+
+  const pauseSpeech = () => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+    window.speechSynthesis.pause();
+    setTtsPaused(true);
+  };
+
+  const resumeSpeech = () => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+    window.speechSynthesis.resume();
+    setTtsPaused(false);
+  };
+
+  const stopSpeech = () => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    setTtsSpeaking(false);
+    setTtsPaused(false);
+    utteranceRef.current = null;
   };
 
   return (
@@ -4074,18 +4196,48 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, streamingPrev
           type="button"
           className="btn-ghost"
           onClick={startVoiceInput}
-          disabled={isListening || isBusy || voiceInputDisabled}
-          title={voiceInputDisabled ? 'Voice input disabled after an error; refresh to retry.' : undefined}
+          disabled={isListening || isBusy}
         >
-          {voiceInputDisabled ? 'Voice off' : isListening ? 'Listening...' : 'Push-to-talk'}
+          {isListening ? 'Listening...' : 'Push-to-talk'}
         </button>
+        <button type="button" className="btn-ghost" disabled={!ttsSpeaking || ttsPaused} onClick={pauseSpeech}>
+          Pause
+        </button>
+        <button type="button" className="btn-ghost" disabled={!ttsSpeaking || !ttsPaused} onClick={resumeSpeech}>
+          Play
+        </button>
+        <button type="button" className="btn-ghost" disabled={!ttsSpeaking} onClick={stopSpeech}>
+          Stop
+        </button>
+        <label className="flex items-center gap-2 rounded-lg border border-border bg-white px-2 py-1 text-xs text-slate-700">
+          Volume
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.1"
+            value={ttsVolume}
+            onChange={(e) => setTtsVolume(Number(e.target.value))}
+          />
+          <span>{Math.round(ttsVolume * 100)}%</span>
+        </label>
       </div>
       <ul className="mt-3 space-y-2">
         {tutorMessages.map((m) => (
-          <li key={m.id} className="rounded-lg border border-border bg-white px-3 py-2 text-sm">
-            <b>You:</b> {m.you}
-            <br />
-            <b>Tutor:</b> {m.tutor}
+          <li key={m.id} className="rounded-xl border border-border bg-white p-3 text-sm">
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">You asked</p>
+              <p className="mt-1 whitespace-pre-wrap text-slate-800">{m.you}</p>
+            </div>
+            <div className="mt-2 rounded-lg border border-emerald-100 bg-emerald-50/40 px-3 py-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-800">Tutor response</p>
+                <button type="button" className="btn-ghost !px-2 !py-1 text-xs" onClick={() => speakText(m.tutor)}>
+                  Play response
+                </button>
+              </div>
+              <p className="mt-1 whitespace-pre-wrap leading-relaxed text-slate-800">{m.tutor}</p>
+            </div>
           </li>
         ))}
       </ul>

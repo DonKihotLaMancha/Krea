@@ -1,11 +1,10 @@
-import { BookOpen, ClipboardList, FileQuestion, GitBranch, GraduationCap, Library, MessageSquare, Presentation, Upload } from 'lucide-react';
+import { BookOpen, ClipboardList, FileQuestion, GitBranch, GraduationCap, MessageSquare, Presentation, Upload } from 'lucide-react';
 
 const icons = {
   Ingest: Upload,
-  LMS: Library,
   Flashcards: BookOpen,
   Notebook: BookOpen,
-  'Concept Map': GitBranch,
+  'Mind Map': GitBranch,
   Tasks: ClipboardList,
   Quizzes: FileQuestion,
   Chat: MessageSquare,

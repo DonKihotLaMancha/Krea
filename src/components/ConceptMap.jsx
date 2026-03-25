@@ -517,11 +517,11 @@ export default function ConceptMap({
   const exportHtml = () => {
     const exportLinks = isFromAiMap ? conceptMapData?.links || [] : hubEdges;
     const payload = JSON.stringify({
-      title: conceptMapData?.title || 'Concept Map',
+      title: conceptMapData?.title || 'Mind Map',
       nodes: allDrawNodes,
       links: exportLinks,
     });
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Concept Map</title></head><body><h2>Concept Map Export</h2><pre id="data"></pre><script>const data=${payload};document.getElementById('data').textContent=JSON.stringify(data,null,2);</script></body></html>`;
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Mind Map</title></head><body><h2>Mind Map Export</h2><pre id="data"></pre><script>const data=${payload};document.getElementById('data').textContent=JSON.stringify(data,null,2);</script></body></html>`;
     downloadBlob('concept-map.html', new Blob([html], { type: 'text/html' }));
   };
 
@@ -554,7 +554,7 @@ export default function ConceptMap({
   return (
     <section className="panel">
       <div className="mb-3 flex items-center justify-between gap-2">
-        <h3 className="text-lg font-semibold">{conceptMapData?.title || 'Concept Map'}</h3>
+        <h3 className="text-lg font-semibold">{conceptMapData?.title || 'Mind Map'}</h3>
         <div className="flex items-center gap-2">
           <span className="rounded-full border border-border bg-white px-3 py-1 text-xs text-muted">
             {allDrawNodes.length} nodes
@@ -612,54 +612,18 @@ export default function ConceptMap({
           </span>
         </label>
       </div>
-      {!allDrawNodes.length ? (
+      {!allDrawNodes.length || !isFromAiMap ? (
         <div className="mb-3 rounded-lg border border-border bg-slate-50 p-3 text-sm text-muted">
-          No concept map yet. Select an uploaded document and click <b>Generate map</b>.
+          No mind map yet. Select an uploaded document and click <b>Generate map</b>.
         </div>
       ) : (
         <p className="mb-3 text-xs text-muted">
-          Tap a node for details. Solid lines = hierarchy; dashed = cross-links. Colors follow category tags (see legend).
+          Tap a node for details. Solid lines = hierarchy; dashed = cross-links.
         </p>
       )}
+      {null}
+
       {isFromAiMap && allDrawNodes.length ? (
-        <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted">
-          <span className="font-semibold text-slate-600">Legend:</span>
-          {Object.entries(CATEGORY_FILL).map(([k, col]) => (
-            <span key={k} className="inline-flex items-center gap-1">
-              <span className="inline-block h-2.5 w-2.5 rounded-sm border border-slate-300" style={{ background: col }} />
-              {k}
-            </span>
-          ))}
-        </div>
-      ) : null}
-
-      {isFromAiMap && allDrawNodes.length && onGenerateFlashcardsFromTopic && selectedChunk ? (
-        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-white px-3 py-2 shadow-sm">
-          <span className="text-xs text-muted">Map toolbar</span>
-          <span className="max-w-[min(100%,18rem)] truncate text-sm font-medium text-slate-800" title={selected?.nombre}>
-            {selected?.nombre || 'Select a node'}
-          </span>
-          <button
-            type="button"
-            className="btn-primary ml-auto text-sm"
-            disabled={!selected?.id}
-            onClick={() =>
-              selected &&
-              onGenerateFlashcardsFromTopic({
-                nodeId: selected.id,
-                label: selected.nombre,
-                tldr: selected.tldr,
-                description: selected.descripcion,
-                categoryTag: selected.categoryTag,
-              })
-            }
-          >
-            Generate flashcards for this topic
-          </button>
-        </div>
-      ) : null}
-
-      {allDrawNodes.length ? (
         <div className="relative overflow-hidden rounded-xl border border-border bg-[#f4f4f5]">
           <button
             type="button"
@@ -678,7 +642,7 @@ export default function ConceptMap({
           </p>
           <div
             ref={scrollRef}
-            className="max-h-[78vh] cursor-grab touch-pan-y overflow-auto overscroll-contain p-3 pt-12 active:cursor-grabbing"
+            className="max-h-[78vh] touch-pan-y overflow-auto overscroll-contain p-3 pt-12"
             onWheel={(e) => {
               if (!e.ctrlKey) return;
               e.preventDefault();
@@ -922,23 +886,7 @@ export default function ConceptMap({
             <p className="mt-1 text-sm text-slate-800">{selected.tldr}</p>
           ) : null}
           <p className="mt-1 text-sm text-muted">{selected.descripcion || 'No description available.'}</p>
-          {isFromAiMap && onGenerateFlashcardsFromTopic && selectedChunk ? (
-            <button
-              type="button"
-              className="btn-primary mt-3 text-sm"
-              onClick={() =>
-                onGenerateFlashcardsFromTopic({
-                  nodeId: selected.id,
-                  label: selected.nombre,
-                  tldr: selected.tldr,
-                  description: selected.descripcion,
-                  categoryTag: selected.categoryTag,
-                })
-              }
-            >
-              Generate flashcards for this topic
-            </button>
-          ) : null}
+          {null}
         </div>
       ) : null}
     </section>

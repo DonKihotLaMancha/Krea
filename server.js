@@ -4146,6 +4146,9 @@ SEMANTICS:
 LINKS:
 - Tree links (parent→child hierarchy): set "crossLink": false. Label the relationship (includes, part-of, prerequisite, etc.).
 - Cross-links (distant ideas that interact): set "crossLink": true and a precise "label" (e.g. "Direct impact", "Constrains", "Feeds into"). Use 2–8 cross-links only where the text justifies them.
+- Coherence guardrail (strict): never connect two nodes unless there is an explicit shared mechanism, dependency, or cause/effect in SOURCE_JSON.
+- For every cross-link, ensure both nodes are semantically close (same subsystem, workflow step, or dependency chain). Avoid decorative or weak links.
+- Prefer fewer high-quality links over many weak links; if uncertain, omit the link.
 
 Return strict JSON only:
 {
@@ -4169,6 +4172,7 @@ You are a Senior Information Architect in DEEP DIVE mode. Merge SOURCE_JSON with
 STRUCTURE:
 - Same tree rules as standard mode but 24–40 nodes: 3–5 level-1 super-nodes, deep grouping, four-branch rule with mid-tier buckets, prune redundancy.
 - Rich cross-links (crossLink true) between sections that causally interact across the document.
+- Link quality rule: every cross-link must represent a concrete dependency/causal relation traceable to SOURCE_JSON phrases, not topic similarity alone.
 
 SEMANTICS:
 - Every node: "tldr", "description", "categoryTag" as in standard mode.

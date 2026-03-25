@@ -1,6 +1,4 @@
 import SidebarNav from './SidebarNav';
-import TopbarStatus from './TopbarStatus';
-import NoticeBanner from './NoticeBanner';
 
 export default function AppShell({
   tabs,
@@ -36,19 +34,6 @@ export default function AppShell({
         style={{ backgroundColor: '#ffffff', color: '#0f172a' }}
       >
         <div className="mx-auto w-full max-w-[1320px]">
-          <div className="mb-4 grid grid-cols-1 gap-2 lg:grid-cols-[1fr_auto]">
-            <TopbarStatus
-              title={tab}
-              modelStatus={modelStatus}
-              latestBatchAt={latestBatchAt}
-              isFocusMode={isFocusMode}
-              setIsFocusMode={setIsFocusMode}
-              onOpenSearch={onOpenSearch}
-              onOpenLocalLog={onOpenLocalLog}
-            />
-            <div className="flex items-start justify-end">{authPanel}</div>
-          </div>
-          {!isFocusMode ? <NoticeBanner text={notice} /> : null}
           <div className="space-y-4">{children}</div>
         </div>
       </main>
