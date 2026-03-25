@@ -221,11 +221,13 @@ async function generateSectionsWithOllama({ text, title }) {
   return Array.isArray(data.apartados) ? data.apartados : [];
 }
 
-async function generatePresentationWithOllama({ topic, promptText, sources = [], slides = 8 }) {
+async function generatePresentationWithOllama({ topic, promptText, sources = [], slides = 8, format }) {
+  const body = { topic, promptText, sources, slides };
+  if (format) body.format = format;
   const resp = await fetchWithTimeout('/api/presentation', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topic, promptText, sources, slides }),
+    body: JSON.stringify(body),
   }, AI_REQUEST_TIMEOUT_MS);
   if (!resp.ok) throw new Error('Presentation API error');
   const data = await resp.json();
@@ -233,6 +235,7 @@ async function generatePresentationWithOllama({ topic, promptText, sources = [],
     title: String(data.title || topic).trim(),
     slides: Array.isArray(data.slides) ? data.slides : [],
     references: Array.isArray(data.references) ? data.references : [],
+    format: data.format || format || 'default',
   };
 }
 
@@ -332,6 +335,66 @@ async function tutorChatWithOllama({ prompt, sources }) {
     body: JSON.stringify({ prompt, sources }),
   }, AI_REQUEST_TIMEOUT_MS);
   if (!resp.ok) throw new Error('Tutor API error');
+  return await resp.json();
+}
+
+async function researchSynthesisWithOllama({ sources, studentId, question }) {
+  const payload = { sources, question };
+  if (studentId) {
+    payload.studentId = studentId;
+    if (sources.some((s) => s.sourceId)) payload.useRag = true;
+  }
+  const resp = await fetchWithTimeout('/api/research-synthesis', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }, AI_REQUEST_TIMEOUT_MS);
+  if (!resp.ok) throw new Error('Research synthesis API error');
+  return await resp.json();
+}
+
+async function cornellNotesWithOllama({ sources }) {
+  const resp = await fetchWithTimeout('/api/cornell-notes', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sources }),
+  }, AI_REQUEST_TIMEOUT_MS);
+  if (!resp.ok) throw new Error('Cornell notes API error');
+  return await resp.json();
+}
+
+async function documentBottlenecksWithOllama({ sources }) {
+  const resp = await fetchWithTimeout('/api/document-bottlenecks', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sources }),
+  }, AI_REQUEST_TIMEOUT_MS);
+  if (!resp.ok) throw new Error('Bottlenecks API error');
+  return await resp.json();
+}
+
+async function tutorSocraticWithOllama({ prompt, sources, studentId, bottlenecks = [] }) {
+  const payload = { prompt, sources, bottlenecks };
+  if (studentId) {
+    payload.studentId = studentId;
+    if (sources.some((s) => s.sourceId)) payload.useRag = true;
+  }
+  const resp = await fetchWithTimeout('/api/tutor-socratic', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }, AI_REQUEST_TIMEOUT_MS);
+  if (!resp.ok) throw new Error('Socratic tutor API error');
+  return await resp.json();
+}
+
+async function generateAnkiFlashcardsWithOllama({ sources }) {
+  const resp = await fetchWithTimeout('/api/flashcards', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ format: 'anki', sources }),
+  }, AI_REQUEST_TIMEOUT_MS);
+  if (!resp.ok) throw new Error('Anki flashcards API error');
   return await resp.json();
 }
 
@@ -819,6 +882,30 @@ async function fetchSlideHeroImageUrl(deckTitle, slideIndex, slide) {
   return slideImageFallbackUrl(deckTitle, slideIndex, slideTitle);
 }
 
+function ankiCardsToStudyCards(list) {
+  return (list || []).map((c) => {
+    if (c.type === 'cloze') {
+      const raw = String(c.clozeText || c.front || '');
+      const question = raw
+        .replace(/\{\{c\d+::[^}]+\}\}/g, '______')
+        .replace(/\{\{blank\}\}/gi, '______');
+      return {
+        ...c,
+        question,
+        answer: c.back || '',
+        type: 'cloze',
+        clozeText: raw,
+      };
+    }
+    return {
+      ...c,
+      question: c.front || c.question || 'Question',
+      answer: c.back || c.answer || '',
+      type: 'qa',
+    };
+  });
+}
+
 function normalizeStudyCards(cardsInput) {
   const base = new Date();
   base.setHours(0, 0, 0, 0);
@@ -936,6 +1023,8 @@ export function StudentApp() {
   const [generationIndeterminate, setGenerationIndeterminate] = useState(false);
   const [isAnalyzingSections, setIsAnalyzingSections] = useState(false);
   const [deckSessionGrades, setDeckSessionGrades] = useState({ right: 0, wrong: 0 });
+  /** `legacy` = original /api/flashcards; `anki` = QA + cloze with word caps */
+  const [flashcardDeckStyle, setFlashcardDeckStyle] = useState('legacy');
   const [conceptMapData, setConceptMapData] = useState(null);
   const [isGeneratingConceptMap, setIsGeneratingConceptMap] = useState(false);
   const [isNotebookBusy, setIsNotebookBusy] = useState(false);
@@ -1336,7 +1425,15 @@ export function StudentApp() {
     setGenerationStage('AI is generating flashcards...');
     setNotice('Generating your study set...');
     try {
-      const aiCards = await generateCardsWithOllama(chunk.content);
+      let aiCards = [];
+      if (flashcardDeckStyle === 'anki') {
+        const data = await generateAnkiFlashcardsWithOllama({
+          sources: [{ name: chunk.name, content: chunk.content }],
+        });
+        aiCards = ankiCardsToStudyCards(data.cards || []);
+      } else {
+        aiCards = await generateCardsWithOllama(chunk.content);
+      }
       if (aiCards.length) {
         const normalized = tagFlashcardsForChunk(chunk, normalizeStudyCards(aiCards));
         setCards((prev) => (append ? [...prev, ...normalized] : normalized));
@@ -1654,7 +1751,7 @@ export function StudentApp() {
     }
   };
 
-  const generatePresentation = async ({ topic, promptText, chunkIds }) => {
+  const generatePresentation = async ({ topic, promptText, chunkIds, format }) => {
     setIsGeneratingPresentation(true);
     setNotice('Generating your presentation...');
     const sourceChunks = (Array.isArray(chunkIds) && chunkIds.length)
@@ -1690,6 +1787,7 @@ export function StudentApp() {
         promptText,
         sources,
         slides: 8,
+        ...(format ? { format } : {}),
       });
       if (generated.slides.length) {
         const presentation = { id: Date.now(), ...generated };
@@ -1968,6 +2066,17 @@ export function StudentApp() {
 
       {tab === 'Flashcards' ? (
         <>
+          <div className="mb-2 flex flex-wrap items-center gap-2 px-1">
+            <span className="text-xs text-muted">Deck style (Ingest generate)</span>
+            <select
+              className="input max-w-xs py-1 text-xs"
+              value={flashcardDeckStyle}
+              onChange={(e) => setFlashcardDeckStyle(e.target.value)}
+            >
+              <option value="legacy">Classic QA</option>
+              <option value="anki">Anki-style (QA + cloze)</option>
+            </select>
+          </div>
           <FlashcardDeck
             cards={deckCards}
             sourceLabel={activeChunk?.name}
@@ -1996,6 +2105,7 @@ export function StudentApp() {
         <NotebookWorkspace
           chunks={chunks}
           activePdfId={activePdfId}
+          studentId={studentId}
           isBusy={isNotebookBusy}
           onError={(msg) => setNotice(msg)}
           conceptMapData={conceptMapData}
@@ -2062,6 +2172,81 @@ export function StudentApp() {
               () => generateAudioOverviewWithOllama({ sources }),
               'Audio overview generation',
               'audio-overview',
+              sources,
+            )
+          }
+          onResearchSynthesis={({ sources, question }) =>
+            runNotebookAction(
+              () => researchSynthesisWithOllama({ sources, studentId, question }),
+              'Research synthesis',
+              'research-synthesis',
+              sources,
+            )
+          }
+          onCornellNotes={({ sources }) =>
+            runNotebookAction(
+              () => cornellNotesWithOllama({ sources }),
+              'Cornell notes',
+              'cornell-notes',
+              sources,
+            )
+          }
+          onAnkiCards={async ({ sources }) => {
+            const result = await runNotebookAction(
+              () => generateAnkiFlashcardsWithOllama({ sources }),
+              'Anki deck',
+              'anki-v2',
+              sources,
+            );
+            const primary = chunks.find((c) => c.name === sources[0]?.name) || activeChunk;
+            if (primary && result?.cards?.length) {
+              const merged = tagFlashcardsForChunk(
+                primary,
+                normalizeStudyCards(ankiCardsToStudyCards(result.cards)),
+              );
+              setCards((prev) => [...merged, ...prev]);
+              setTab('Flashcards');
+            }
+            return result;
+          }}
+          onStoryboardPresentation={async ({ sources, topic, promptText }) => {
+            const t =
+              (topic || '').trim() ||
+              (sources[0]?.name || '').replace(/\.[^.]+$/, '') ||
+              'Topic';
+            const result = await runNotebookAction(
+              async () => {
+                const generated = await generatePresentationWithOllama({
+                  topic: t,
+                  promptText: promptText || 'Storyboard walkthrough grounded in sources.',
+                  sources,
+                  slides: 8,
+                  format: 'storyboard',
+                });
+                if (generated.slides?.length) {
+                  setPresentations((prev) => [{ id: Date.now(), ...generated }, ...prev]);
+                }
+                return generated;
+              },
+              'Storyboard deck',
+              'storyboard-presentation',
+              sources,
+            );
+            return result;
+          }}
+          onDocumentBottlenecks={({ sources }) =>
+            runNotebookAction(
+              () => documentBottlenecksWithOllama({ sources }),
+              'Bottleneck analysis',
+              'document-bottlenecks',
+              sources,
+            )
+          }
+          onSocraticTutor={({ sources, prompt, bottlenecks }) =>
+            runNotebookAction(
+              () => tutorSocraticWithOllama({ prompt, sources, studentId, bottlenecks }),
+              'Socratic tutor',
+              'socratic-session',
               sources,
             )
           }
@@ -3087,14 +3272,14 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
           disabled={!hasChunks}
           size={Math.min(6, Math.max(3, chunks.length))}
         >
-          {!hasChunks ? <option value="">Upload a PDF in Ingest first</option> : null}
+          {!hasChunks ? <option value="">Upload a document in Ingest first</option> : null}
           {chunks.map((c) => (
             <option key={c.id} value={c.id}>
               {c.name}
             </option>
           ))}
         </select>
-        {hasChunks ? <p className="text-xs text-muted">Select one or more uploaded PDFs as references.</p> : null}
+        {hasChunks ? <p className="text-xs text-muted">Select one or more uploaded materials as references.</p> : null}
         <input className="input" value={topic} onChange={(e) => setTopic(e.target.value)} />
         <textarea
           className="input min-h-24"
@@ -3102,23 +3287,44 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
           onChange={(e) => setPromptText(e.target.value)}
           placeholder="Prompt example: Build 8 slides for second-year students, include a comparison graph and practical examples."
         />
-        <button
-          className="btn-primary w-fit"
-          disabled={isGenerating || !hasChunks}
-          onClick={() => onGenerate({
-            topic: topic.trim() || (selectedChunks[0] ? selectedChunks[0].name.replace(/\.[^.]+$/, '') : ''),
-            promptText,
-            chunkIds: selectedChunkIds.length
-              ? selectedChunkIds
-              : activeChunkId && chunks.some((c) => c.id === activeChunkId)
-                ? [activeChunkId]
-                : chunks[0]
-                  ? [chunks[0].id]
-                  : [],
-          })}
-        >
-          {isGenerating ? 'Generating presentation...' : 'Generate outline'}
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            className="btn-primary w-fit"
+            disabled={isGenerating || !hasChunks}
+            onClick={() => onGenerate({
+              topic: topic.trim() || (selectedChunks[0] ? selectedChunks[0].name.replace(/\.[^.]+$/, '') : ''),
+              promptText,
+              chunkIds: selectedChunkIds.length
+                ? selectedChunkIds
+                : activeChunkId && chunks.some((c) => c.id === activeChunkId)
+                  ? [activeChunkId]
+                  : chunks[0]
+                    ? [chunks[0].id]
+                    : [],
+            })}
+          >
+            {isGenerating ? 'Generating presentation...' : 'Generate outline'}
+          </button>
+          <button
+            type="button"
+            className="btn-ghost w-fit border border-amber-200 bg-amber-50/80"
+            disabled={isGenerating || !hasChunks}
+            onClick={() => onGenerate({
+              format: 'storyboard',
+              topic: topic.trim() || (selectedChunks[0] ? selectedChunks[0].name.replace(/\.[^.]+$/, '') : ''),
+              promptText: promptText || 'Storyboard: rule of three, one ELI5 slide, grounded in sources.',
+              chunkIds: selectedChunkIds.length
+                ? selectedChunkIds
+                : activeChunkId && chunks.some((c) => c.id === activeChunkId)
+                  ? [activeChunkId]
+                  : chunks[0]
+                    ? [chunks[0].id]
+                    : [],
+            })}
+          >
+            Storyboard (≤3 bullets + ELI5)
+          </button>
+        </div>
       </div>
       <ul className="space-y-2">
         {presentations.map((p) => (
@@ -3159,20 +3365,37 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
               <button className="btn-primary" onClick={() => exportPptx(previewPresentation)}>Export .pptx</button>
             </div>
           </div>
-          <div className="max-h-[76vh] space-y-3 overflow-y-auto pr-1">
+          <div className="max-h-[82vh] space-y-4 overflow-y-auto pr-1">
             {previewPresentation.slides.map((s, idx) => {
               const slideChartData = buildSlideChartJsData(s);
+              const isEli5 = s.storyKind === 'eli5' || /eli5/i.test(s.title || '');
               return (
-              <div key={`${previewPresentation.id}-preview-${idx}`} className="rounded-xl border border-border bg-white p-3 shadow-sm">
-                <p className="text-base font-semibold">{idx + 1}. {s.title}</p>
+              <div
+                key={`${previewPresentation.id}-preview-${idx}`}
+                className={`rounded-xl border p-4 shadow-sm ${isEli5 ? 'border-amber-300 bg-amber-50/50' : 'border-border bg-white'}`}
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="text-base font-semibold">{idx + 1}. {s.title}</p>
+                  {isEli5 ? (
+                    <span className="rounded-full bg-amber-200 px-2 py-0.5 text-[10px] font-semibold uppercase text-amber-900">
+                      ELI5
+                    </span>
+                  ) : null}
+                </div>
                 <ul className="mt-2 list-disc pl-5 text-sm text-muted">
                   {(s.bullets || []).map((b, i) => <li key={`${previewPresentation.id}-${idx}-b-${i}`}>{b}</li>)}
                 </ul>
-                <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
-                  <div className="rounded-lg border border-border bg-slate-50 p-2">
+                {s.vizSuggestion ? (
+                  <p className="mt-2 text-xs text-slate-600">
+                    <span className="font-medium text-slate-700">Viz idea: </span>
+                    {s.vizSuggestion}
+                  </p>
+                ) : null}
+                <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
+                  <div className="rounded-lg border border-border bg-slate-50 p-3">
                     <p className="mb-1 text-xs font-medium text-muted">Visual (illustrative)</p>
                     {slideThumbsLoading && !slideThumbByIndex[idx] ? (
-                      <div className="flex h-44 w-full items-center justify-center rounded-md border border-border bg-slate-100 text-xs text-muted">
+                      <div className="flex h-64 w-full items-center justify-center rounded-md border border-border bg-slate-100 text-xs text-muted">
                         Loading image…
                       </div>
                     ) : (
@@ -3180,7 +3403,7 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
                         src={slideThumbByIndex[idx] || slideHeroImageUrl(previewPresentation.title, idx, s.title)}
                         alt=""
                         loading="lazy"
-                        className="h-44 w-full rounded-md border border-border object-cover"
+                        className="h-64 w-full rounded-md border border-border object-cover"
                       />
                     )}
                     <p className="mt-1 text-[11px] leading-snug text-muted">
@@ -3188,11 +3411,11 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
                       {s.imageSuggestion || '—'}
                     </p>
                   </div>
-                  <div className="rounded-lg border border-border bg-slate-50 p-2">
+                  <div className="rounded-lg border border-border bg-slate-50 p-3">
                     <p className="mb-1 text-xs font-medium text-muted">Graph</p>
                     {slideChartData ? (
                       <>
-                        <div className="h-44">
+                        <div className="h-64">
                           <Bar
                             data={slideChartData}
                             options={{
@@ -3250,8 +3473,11 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
       ) : null}
 
       {editingId && draft ? (
-        <div className="mt-4 rounded-xl border border-border bg-slate-50 p-3">
-          <p className="text-sm font-semibold">Edit presentation</p>
+        <div className="mt-4 rounded-xl border border-border bg-slate-50 p-4">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-semibold">Edit presentation</p>
+            <p className="text-xs text-muted">Tip: keep bullets concise (one point per line).</p>
+          </div>
           <input
             className="input mt-2"
             value={draft.title}
@@ -3264,9 +3490,10 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
             onChange={(e) => setDraft((d) => ({ ...d, referencesText: e.target.value }))}
             placeholder="References (one per line). Optional format: Title | URL"
           />
-          <div className="mt-2 space-y-3">
+          <div className="mt-3 space-y-4">
             {draft.slides.map((s, idx) => (
-              <div key={`edit-slide-${idx}`} className="rounded-lg border border-border bg-white p-2">
+              <div key={`edit-slide-${idx}`} className="rounded-lg border border-border bg-white p-3">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Slide {idx + 1}</p>
                 <input
                   className="input mb-2"
                   value={s.title}
@@ -3279,7 +3506,7 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
                   placeholder={`Slide ${idx + 1} title`}
                 />
                 <textarea
-                  className="input mb-2 min-h-20"
+                  className="input mb-2 min-h-28"
                   value={s.bulletsText}
                   onChange={(e) =>
                     setDraft((d) => ({
@@ -3290,7 +3517,7 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
                   placeholder="One bullet per line"
                 />
                 <textarea
-                  className="input min-h-16"
+                  className="input min-h-24"
                   value={s.notes}
                   onChange={(e) =>
                     setDraft((d) => ({
@@ -3481,6 +3708,38 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, streamingPrev
   const [isListening, setIsListening] = useState(false);
   const [voiceHint, setVoiceHint] = useState('');
   const [voiceInputDisabled, setVoiceInputDisabled] = useState(false);
+  const [socraticMode, setSocraticMode] = useState(false);
+  const [socraticBottlenecks, setSocraticBottlenecks] = useState(null);
+  const [bottlenecksBusy, setBottlenecksBusy] = useState(false);
+
+  useEffect(() => {
+    if (!socraticMode || !chunks[0]?.content) {
+      setSocraticBottlenecks(null);
+      return undefined;
+    }
+    let cancelled = false;
+    setBottlenecksBusy(true);
+    (async () => {
+      try {
+        const sources = [
+          {
+            name: chunks[0].name,
+            content: chunks[0].content,
+            ...(chunks[0].sourceId ? { sourceId: chunks[0].sourceId } : {}),
+          },
+        ];
+        const r = await documentBottlenecksWithOllama({ sources });
+        if (!cancelled) setSocraticBottlenecks(r?.bottlenecks || null);
+      } catch {
+        if (!cancelled) setSocraticBottlenecks(null);
+      } finally {
+        if (!cancelled) setBottlenecksBusy(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [socraticMode, chunks[0]?.id, chunks[0]?.name, chunks[0]?.content, chunks[0]?.sourceId]);
 
   const voiceHttpsOk =
     typeof window === 'undefined' ||
@@ -3553,6 +3812,24 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, streamingPrev
         Powered by Ollama. Uses the PDF currently selected in Ingest for context
         {chunks[0] ? ` (${chunks[0].name})` : ' — upload PDFs in Ingest and select one for source-grounded answers.'}.
       </p>
+      <label className="mb-2 flex cursor-pointer items-center gap-2 text-xs text-slate-700">
+        <input
+          type="checkbox"
+          className="rounded border-border"
+          checked={socraticMode}
+          onChange={(e) => setSocraticMode(e.target.checked)}
+        />
+        Socratic mode (JSON tutor: grounded reply + challenge question; prefetches bottlenecks when enabled)
+      </label>
+      {socraticMode ? (
+        <p className="mb-2 text-[11px] text-muted">
+          {bottlenecksBusy
+            ? 'Analyzing learning bottlenecks…'
+            : socraticBottlenecks?.length
+              ? `Ready: ${socraticBottlenecks.length} bottleneck concepts for prompts.`
+              : 'Bottlenecks unavailable until a source is selected or analysis completes.'}
+        </p>
+      ) : null}
       <p className="mb-2 text-[11px] leading-snug text-muted">
         Tip: type your question in the box below. Push-to-talk is optional and needs a working mic and network in some browsers.
       </p>
@@ -3574,12 +3851,33 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, streamingPrev
         <button
           type="button"
           className="btn-primary"
-          disabled={isBusy}
+          disabled={isBusy || (socraticMode && (bottlenecksBusy || !chunks[0]))}
           onClick={async () => {
             if (!prompt.trim()) return;
             const you = prompt;
             setPrompt('');
-            const tutor = await onAsk(you);
+            let tutor;
+            if (socraticMode && chunks[0]) {
+              try {
+                const data = await tutorSocraticWithOllama({
+                  prompt: you,
+                  sources: [
+                    {
+                      name: chunks[0].name,
+                      content: chunks[0].content,
+                      ...(chunks[0].sourceId ? { sourceId: chunks[0].sourceId } : {}),
+                    },
+                  ],
+                  studentId,
+                  bottlenecks: socraticBottlenecks || [],
+                });
+                tutor = `${data.reply}\n\nChallenge: ${data.challengeQuestion}`;
+              } catch (e) {
+                tutor = e?.message || 'Socratic tutor request failed.';
+              }
+            } else {
+              tutor = await onAsk(you);
+            }
             const localPair = { id: Date.now(), you, tutor };
             setTutorMessages((prev) => [...prev, localPair]);
             if (studentId) {

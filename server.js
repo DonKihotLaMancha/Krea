@@ -1809,7 +1809,19 @@ app.post('/api/library/notebook', async (req, res) => {
   try {
     await ensureProfile(studentId);
     const sessionId = await createDefaultNotebookSession(studentId);
-    const allowedTypes = new Set(['source-chat', 'summary', 'study-guide', 'source-compare', 'audio-overview']);
+    const allowedTypes = new Set([
+      'source-chat',
+      'summary',
+      'study-guide',
+      'source-compare',
+      'audio-overview',
+      'research-synthesis',
+      'cornell-notes',
+      'anki-v2',
+      'storyboard-presentation',
+      'document-bottlenecks',
+      'socratic-session',
+    ]);
     const safeType = allowedTypes.has(outputType) ? outputType : 'summary';
     const { data, error } = await supabase
       .from('notebook_outputs')
@@ -3617,6 +3629,50 @@ app.post('/api/ai-job', async (req, res) => {
 });
 
 app.post('/api/flashcards', async (req, res) => {
+  const format = String(req.body?.format || '').toLowerCase();
+  if (format === 'anki') {
+    const sources = Array.isArray(req.body?.sources) ? req.body.sources : [];
+    let text = String(req.body?.text || '').trim();
+    if (sources.length) {
+      text = sources
+        .map((s) => `${String(s?.name || 'source').trim()}\n${String(s?.content || '').trim()}`)
+        .join('\n\n')
+        .trim();
+    }
+    if (!text) {
+      return res.status(400).json({ error: 'Missing text or sources.' });
+    }
+    const sourceJson = buildSourceJson(text);
+    const prompt = `
+You are an Anki-style flashcard generator.
+Use ONLY SOURCE_JSON. Prefer "why" and "how" mechanisms, not just definitions.
+- type "qa": short question on front, answer on back.
+- type "cloze": clozeText must contain exactly one {{blank}} (or {{c1::hidden}}) for the hidden term; back is the revealed text or brief explanation.
+- HARD LIMITS: front ≤ 35 words, back ≤ 45 words (≈10 second read). If too long, split meaning into two cards in the next array entries.
+- evidence: exact short phrase from SOURCE_JSON.
+Return JSON only:
+{"cards":[{"type":"qa"|"cloze","front":"...","back":"...","clozeText":"...","evidence":"..."}]}
+
+SOURCE_JSON:
+${JSON.stringify(sourceJson)}
+`;
+    try {
+      let cards = await generateAnkiCardsWithOllama(prompt);
+      if (cards.length < 4) {
+        const fallbackPrompt = `
+Return 8 flashcards from SOURCE_JSON.facts only.
+JSON only: {"cards":[{"type":"qa","front":"...","back":"...","evidence":"..."}]}
+SOURCE_JSON:
+${JSON.stringify(sourceJson)}
+`;
+        cards = await generateAnkiCardsWithOllama(fallbackPrompt);
+      }
+      return res.json({ format: 'anki', cards });
+    } catch (error) {
+      return res.status(500).json({ error: 'Could not generate Anki cards.', details: String(error) });
+    }
+  }
+
   const text = String(req.body?.text || '').trim();
   if (!text) {
     return res.status(400).json({ error: 'Missing text.' });
@@ -3701,7 +3757,58 @@ app.post('/api/presentation', async (req, res) => {
   const mergedSourceText = sourceText || selectedSources.map((s) => `${s.name}\n${s.content}`).join('\n\n');
   const sourceJson = buildSourceJson(mergedSourceText || `${topic}. ${promptText}`);
   const sourceList = selectedSources.map((s) => s.name);
-  const prompt = `
+  const isStoryboard = String(req.body?.format || '').toLowerCase() === 'storyboard';
+
+  const prompt = isStoryboard
+    ? `
+You are a university presentation assistant (STORYBOARD mode).
+Create a concise, accurate slide deck in strict JSON only.
+
+Rules:
+- Use topic + PROMPT as priorities; ground content in SOURCE_JSON when possible.
+- Rule of Three: at most 3 bullets per slide (short, concrete).
+- Include exactly ONE slide with "storyKind":"eli5" whose title starts with "ELI5:" — explain the core idea in plain language for a curious beginner (analogy welcome).
+- All other slides use "storyKind":"content".
+- When a slide mentions numbers, percentages, trends, or comparisons, add "vizSuggestion": one short sentence suggesting a chart/table/diagram type (no invented data).
+- Add image suggestions and graph/chart suggestions when useful.
+- Add short speaker notes (1-2 sentences).
+- Add references and Google Scholar links when available.
+- Unique slide titles; no repeated bullets.
+- Optional per-slide "chartBars" only when numbers are explicit in SOURCE_JSON or bullets (same rules as default mode).
+- Required per-slide "imageSearchQuery" (4–14 words, Wikimedia-oriented keywords from THIS slide only).
+- Return JSON only with this exact shape:
+{
+  "title":"...",
+  "references":[{"text":"...","url":"https://scholar.google.com/scholar?q=..."}],
+  "slides":[
+    {
+      "title":"ELI5: ...",
+      "storyKind":"eli5",
+      "bullets":["...","...","..."],
+      "notes":"...",
+      "imageSuggestion":"...",
+      "graphSuggestion":"...",
+      "vizSuggestion":"optional — when numeric ideas appear",
+      "imageSearchQuery":"...",
+      "chartBars":[]
+    }
+  ]
+}
+- Generate exactly ${requestedSlides} slides.
+
+TOPIC:
+${topic}
+
+PROMPT:
+${promptText || 'No extra prompt provided.'}
+
+UPLOADED_SOURCES:
+${JSON.stringify(sourceList)}
+
+SOURCE_JSON:
+${JSON.stringify(sourceJson)}
+`
+    : `
 You are a university presentation assistant.
 Create a concise, accurate slide deck in strict JSON only.
 
@@ -3751,7 +3858,7 @@ ${JSON.stringify(sourceJson)}
 `;
 
   try {
-    let presentation = await generatePresentationWithOllama(prompt);
+    let presentation = await generatePresentationWithOllama(prompt, { storyboard: isStoryboard });
     if (presentation.slides.length < Math.max(3, requestedSlides - 2)) {
       // #region agent log
       {
@@ -3772,7 +3879,22 @@ ${JSON.stringify(sourceJson)}
         }).catch(() => {});
       }
       // #endregion
-      const fallbackPrompt = `
+      const fallbackPrompt = isStoryboard
+        ? `
+Return strict JSON only:
+{
+  "title":"${topic.replace(/"/g, '\\"')}",
+  "references":[
+    {"text":"Primary source from uploaded material","url":"https://scholar.google.com/scholar?q=${encodeURIComponent(topic)}"}
+  ],
+  "slides":[
+    {"title":"ELI5: Core idea","storyKind":"eli5","bullets":["Simple analogy","Why it matters"],"notes":"...","imageSuggestion":"...","graphSuggestion":"...","vizSuggestion":"","imageSearchQuery":"topic keywords diagram","chartBars":[]},
+    {"title":"Slide 2","storyKind":"content","bullets":["...","...","..."], "notes":"...", "imageSuggestion":"...", "graphSuggestion":"...", "imageSearchQuery":"topic keywords diagram", "chartBars":[]}
+  ]
+}
+Create exactly ${requestedSlides} slides.
+`
+        : `
 Return strict JSON only:
 {
   "title":"${topic}",
@@ -3785,7 +3907,7 @@ Return strict JSON only:
 }
 Create exactly ${requestedSlides} slides.
 `;
-      presentation = await generatePresentationWithOllama(fallbackPrompt);
+      presentation = await generatePresentationWithOllama(fallbackPrompt, { storyboard: isStoryboard });
     }
     // #region agent log
     {
@@ -3899,7 +4021,9 @@ Rules:
 - Return 8 to 20 nodes.
 - Each node has "level": 0 (central theme), 1 (major subtopics), 2 (details/examples), 3 (optional fine points).
 - Keep labels concise (max 6 words). descriptions: one short sentence.
-- Links connect parent concepts to children; cross-links allowed with clear labels.
+- Links must reflect real logical relationships from source content (cause/effect, part-of, process step, prerequisite, contrast, evidence).
+- Every non-root node must have at least one incoming logical link from a parent or prerequisite node.
+- Prefer parent->child direction (broader to narrower); include a few cross-links only when justified by content.
 - Return strict JSON only:
 {
   "title":"...",
@@ -3934,46 +4058,7 @@ app.post('/api/source-chat', async (req, res) => {
   if (!question) return res.status(400).json({ error: 'Missing question.' });
   if (!sources.length) return res.status(400).json({ error: 'Missing sources.' });
 
-  const passages = buildPassagesFromSources(sources);
-  let ranked = null;
-  if (useRag && supabase && studentId && isUuid(studentId)) {
-    const sourceIds = extractSourceIdsFromSources(sources);
-    if (sourceIds.length) {
-      const qEmb = await fetchOllamaEmbedding(question);
-      if (Array.isArray(qEmb) && qEmb.length === OLLAMA_EMBED_DIM) {
-        const { data: rows, error: ragErr } = await supabase
-          .from('source_embeddings_ollama')
-          .select('source_id, content, embedding')
-          .eq('owner_id', studentId)
-          .in('source_id', sourceIds)
-          .limit(500);
-        if (!ragErr && rows?.length) {
-          const titleMap = buildSourceIdTitleMap(sources);
-          const scored = rows
-            .map((r) => {
-              const v = parseEmbeddingVector(r.embedding);
-              if (!v || v.length !== OLLAMA_EMBED_DIM) return null;
-              const score = cosineSimilarity(qEmb, v);
-              return {
-                source: titleMap.get(r.source_id) || 'source',
-                excerpt: String(r.content || '').slice(0, 1200),
-                page: null,
-                score,
-              };
-            })
-            .filter(Boolean)
-            .sort((a, b) => b.score - a.score)
-            .slice(0, 8);
-          if (scored.length) {
-            ranked = scored.map(({ score: _s, ...rest }) => rest);
-          }
-        }
-      }
-    }
-  }
-  if (!ranked) {
-    ranked = rankPassages(question, passages).slice(0, 6);
-  }
+  const ranked = await getRankedPassagesForQuestion(question, sources, studentId, useRag, useRag ? 8 : 6);
   const prompt = `
 You are a source-grounded academic assistant.
 Answer only using the provided PASSAGES.
@@ -3983,7 +4068,7 @@ Return strict JSON:
 {
   "answer":"...",
   "citations":[
-    {"source":"...","excerpt":"...","page":null}
+    {"source":"...","passageId":"...","excerpt":"...","page":null,"approxLocation":"early|mid|late"}
   ]
 }
 
@@ -4000,15 +4085,173 @@ ${JSON.stringify(ranked)}
     const citations = normalizeCitations(parsed?.citations, ranked);
     return res.json({ answer, citations });
   } catch {
-    const fallback = ranked.slice(0, 3).map((p) => ({
-      source: p.source,
-      excerpt: p.excerpt,
-      page: p.page ?? null,
-    }));
+    const fallback = ranked.slice(0, 3).map((p) => passageCitationFields(p));
     return res.json({
       answer: 'AI is unavailable right now. Here are the most relevant excerpts from your selected PDFs.',
       citations: fallback,
     });
+  }
+});
+
+app.post('/api/research-synthesis', async (req, res) => {
+  const sources = Array.isArray(req.body?.sources) ? req.body.sources : [];
+  const studentId = String(req.body?.studentId || '').trim();
+  const useRag = Boolean(req.body?.useRag);
+  const question = String(req.body?.question || req.body?.topic || '').trim() || 'What are the main themes, causal relationships, and tensions across these sources?';
+  if (!sources.length) return res.status(400).json({ error: 'Missing sources.' });
+  try {
+    const ranked = await getRankedPassagesForQuestion(question, sources, studentId, useRag, 28);
+    const prompt = `
+You are an expert researcher. Synthesize across MULTIPLE passages — do not answer from a single sentence alone.
+Every factual claim in "answer" must be supported by at least one citation entry copying a short excerpt from PASSAGES.
+Return strict JSON only:
+{
+  "argumentOutline":["main claim","supporting claim 1","..."],
+  "answer":"integrated synthesis (multiple passages)",
+  "reasoningSteps":["step 1","step 2"],
+  "themes":["..."],
+  "contradictions":["..."],
+  "causalLinks":[{"cause":"...","effect":"..."}],
+  "citations":[{"source":"...","passageId":"...","excerpt":"...","page":null,"approxLocation":"early|mid|late"}]
+}
+
+QUESTION:
+${question}
+
+PASSAGES:
+${JSON.stringify(ranked)}
+`;
+    const data = await callOllama(prompt);
+    const parsed = safeParseModelJson(String(data.response || '').trim());
+    return res.json(normalizeResearchSynthesis(parsed, ranked));
+  } catch (error) {
+    return res.status(500).json({ error: 'Could not generate research synthesis.', details: String(error) });
+  }
+});
+
+app.post('/api/cornell-notes', async (req, res) => {
+  const sources = Array.isArray(req.body?.sources) ? req.body.sources : [];
+  if (!sources.length) return res.status(400).json({ error: 'Missing sources.' });
+  const passages = buildPassagesFromSources(sources).slice(0, 36);
+  const prompt = `
+You are a study-skills coach. Build Cornell-style notes from PASSAGES only.
+Use markdown in notesMarkdown (headings allowed). Include cue words/phrases in cues[] for each section.
+If a small comparison table helps, add GitHub-flavored markdown tables in tablesMarkdown[] (optional).
+Return strict JSON only:
+{
+  "sections":[
+    {
+      "title":"section title",
+      "cues":["cue 1","cue 2"],
+      "notesMarkdown":"...",
+      "summary":"1-3 sentences",
+      "tablesMarkdown":["|h1|h2|\\n|---|---|..."]
+    }
+  ]
+}
+
+PASSAGES:
+${JSON.stringify(passages)}
+`;
+  try {
+    const data = await callOllama(prompt);
+    const parsed = safeParseModelJson(String(data.response || '').trim());
+    const out = normalizeCornellNotes(parsed);
+    if (!out.sections.length) {
+      return res.json({
+        sections: passages.slice(0, 4).map((p, i) => ({
+          title: `Section ${i + 1}`,
+          cues: ['Recall', 'Why it matters'],
+          notesMarkdown: p.excerpt,
+          summary: p.excerpt.slice(0, 200),
+          tablesMarkdown: [],
+        })),
+      });
+    }
+    return res.json(out);
+  } catch (error) {
+    return res.status(500).json({ error: 'Could not generate Cornell notes.', details: String(error) });
+  }
+});
+
+app.post('/api/document-bottlenecks', async (req, res) => {
+  const sources = Array.isArray(req.body?.sources) ? req.body.sources : [];
+  if (!sources.length) return res.status(400).json({ error: 'Missing sources.' });
+  const passages = buildPassagesFromSources(sources).slice(0, 40);
+  const prompt = `
+You identify learning bottlenecks for university material.
+From PASSAGES only, pick exactly 3 bottlenecks: concepts that are dense, prerequisite-heavy, or easy to confuse.
+Return strict JSON only:
+{
+  "bottlenecks":[
+    {"concept":"...","whyHard":"...","fix":"active recall / analogy / worked example"}
+  ]
+}
+
+PASSAGES:
+${JSON.stringify(passages)}
+`;
+  try {
+    const data = await callOllama(prompt);
+    const parsed = safeParseModelJson(String(data.response || '').trim());
+    let out = normalizeBottlenecks(parsed);
+    if (!out.bottlenecks.length) {
+      out = {
+        bottlenecks: passages.slice(0, 3).map((p, i) => ({
+          concept: `Key idea ${i + 1}`,
+          whyHard: 'Requires careful reading of the source.',
+          fix: 'Explain it without looking, then check against the excerpt.',
+        })),
+      };
+    }
+    return res.json(out);
+  } catch (error) {
+    return res.status(500).json({ error: 'Could not analyze bottlenecks.', details: String(error) });
+  }
+});
+
+app.post('/api/tutor-socratic', async (req, res) => {
+  const promptText = String(req.body?.prompt || '').trim();
+  const sources = Array.isArray(req.body?.sources) ? req.body.sources : [];
+  const studentId = String(req.body?.studentId || '').trim();
+  const useRag = Boolean(req.body?.useRag);
+  const bottlenecksIn = Array.isArray(req.body?.bottlenecks) ? req.body.bottlenecks : [];
+  if (!promptText) return res.status(400).json({ error: 'Missing prompt.' });
+  if (!sources.length) return res.status(400).json({ error: 'Missing sources.' });
+  try {
+    const ranked = await getRankedPassagesForQuestion(promptText, sources, studentId, useRag, 24);
+    const bn = bottlenecksIn
+      .slice(0, 5)
+      .map((b) => ({
+        concept: String(b?.concept || '').trim(),
+        whyHard: String(b?.whyHard || '').trim(),
+      }))
+      .filter((b) => b.concept);
+    const prompt = `
+You are a Socratic tutor. Ground every factual statement in PASSAGES; cite with passageId when possible.
+Do NOT give a lecture-only answer: include a short helpful explanation AND a probing challenge question.
+If BOTTLENECKS are provided, relate at least one to the student's question.
+Return strict JSON only:
+{
+  "reply":"...",
+  "challengeQuestion":"one sharp question for the student",
+  "citations":[{"source":"...","passageId":"...","excerpt":"...","page":null,"approxLocation":"early|mid|late"}]
+}
+
+STUDENT_QUESTION:
+${promptText}
+
+BOTTLENECKS:
+${JSON.stringify(bn)}
+
+PASSAGES:
+${JSON.stringify(ranked)}
+`;
+    const data = await callOllama(prompt);
+    const parsed = safeParseModelJson(String(data.response || '').trim());
+    return res.json(normalizeSocraticTutor(parsed, ranked));
+  } catch (error) {
+    return res.status(500).json({ error: 'Could not run Socratic tutor.', details: String(error) });
   }
 });
 
@@ -4255,6 +4498,62 @@ ${JSON.stringify({ target, finalWeight, avg, reqScore })}
   }
 });
 
+function normalizeAnkiCards(cards) {
+  const seen = new Set();
+  return cards
+    .filter((c) => {
+      if (c.type === 'cloze') {
+        const t = String(c.clozeText || c.front || '');
+        return t.length >= 8 && (/\{\{[^}]+\}\}/.test(t) || /\{\{blank\}\}/i.test(t));
+      }
+      return c.front && c.back && c.front.length >= 6;
+    })
+    .filter((c) => {
+      const k = `${c.type}:${c.front}`.toLowerCase();
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    })
+    .slice(0, 16);
+}
+
+function normalizeStoryboardSlides(slides) {
+  const seenTitle = new Set();
+  return slides.filter((s) => {
+    const k = s.title.toLowerCase();
+    if (seenTitle.has(k)) return false;
+    seenTitle.add(k);
+    const n = (s.bullets || []).length;
+    return n >= 1 && n <= 3;
+  });
+}
+
+function ensureStoryboardPresentationShape(deck) {
+  const slides = (deck.slides || []).map((s) => {
+    const bullets = (s.bullets || []).slice(0, 3);
+    const textProof = [s.title, ...bullets].join(' ');
+    let vizSuggestion = s.vizSuggestion;
+    if (!vizSuggestion && slideTextSuggestsNumericData(textProof)) {
+      vizSuggestion = String(s.graphSuggestion || '').trim() || 'Chart or table comparing the numbers named on this slide.';
+    }
+    const base = { ...s, bullets };
+    return vizSuggestion ? { ...base, vizSuggestion } : base;
+  });
+  const hasEli5 = slides.some((s) => s.storyKind === 'eli5' || /eli5/i.test(s.title));
+  if (!hasEli5 && slides.length) {
+    const mid = Math.floor(slides.length / 2);
+    const s = slides[mid];
+    const nb = (s.bullets || []).slice(0, 2);
+    slides[mid] = {
+      ...s,
+      storyKind: 'eli5',
+      title: /eli5/i.test(s.title) ? s.title : `ELI5: ${s.title}`,
+      bullets: nb.length ? nb : ['Plain-language analogy for the core idea.', 'One takeaway you can remember.'],
+    };
+  }
+  return { ...deck, slides };
+}
+
 async function generateCardsWithOllama(prompt) {
   const data = await callOllama(prompt);
   const raw = String(data.response || '').trim();
@@ -4275,7 +4574,34 @@ async function generateCardsWithOllama(prompt) {
   return normalizeCards(cards);
 }
 
-async function generatePresentationWithOllama(prompt) {
+async function generateAnkiCardsWithOllama(prompt) {
+  const data = await callOllama(prompt);
+  const raw = String(data.response || '').trim();
+  const parsed = safeParseModelJson(raw);
+  const list = Array.isArray(parsed.cards) ? parsed.cards : [];
+  const cards = list.slice(0, 20).map((c, i) => {
+    const type = String(c?.type || 'qa').toLowerCase() === 'cloze' ? 'cloze' : 'qa';
+    let clozeText = String(c?.clozeText || '').trim();
+    const front = String(c?.front || c?.question || '').trim();
+    const back = String(c?.back || c?.answer || '').trim();
+    if (type === 'cloze' && !clozeText && front) clozeText = front;
+    const f = type === 'cloze' ? clozeText || front : front;
+    const frontLimit = type === 'cloze' ? 45 : 35;
+    return {
+      id: `${Date.now()}-${i}`,
+      type,
+      front: truncateWords(f, frontLimit),
+      back: truncateWords(back, 45),
+      clozeText: type === 'cloze' ? truncateWords(clozeText || f, 45) : undefined,
+      evidence: String(c?.evidence || '').trim(),
+      right: 0,
+      wrong: 0,
+    };
+  });
+  return normalizeAnkiCards(cards);
+}
+
+async function generatePresentationWithOllama(prompt, { storyboard = false } = {}) {
   const data = await callOllama(prompt);
   const raw = String(data.response || '').trim();
   const parsed = safeParseModelJson(raw);
@@ -4290,18 +4616,22 @@ async function generatePresentationWithOllama(prompt) {
         .filter((r) => r.text)
         .slice(0, 12)
     : [];
+  const maxBullets = storyboard ? 3 : 6;
   const slides = Array.isArray(parsed?.slides)
     ? parsed.slides
         .filter((s) => s?.title && Array.isArray(s?.bullets) && s.bullets.length)
         .slice(0, 20)
         .map((s) => {
-          const bullets = s.bullets.map((b) => String(b).trim()).filter(Boolean).slice(0, 6);
+          const bullets = s.bullets.map((b) => String(b).trim()).filter(Boolean).slice(0, maxBullets);
           const textProof = [String(s.title || ''), ...bullets].join(' ');
           const chartBars = normalizeChartBarsInput(s.chartBars, textProof);
           const imageSearchQuery = String(s.imageSearchQuery || '')
             .trim()
             .replace(/\s+/g, ' ')
             .slice(0, 220);
+          const vizSuggestion = String(s.vizSuggestion || s.graphSuggestion || '').trim();
+          const sk = String(s.storyKind || '').toLowerCase();
+          const storyKind = sk === 'eli5' || sk === 'content' ? sk : undefined;
           const base = {
             title: String(s.title).trim(),
             bullets,
@@ -4309,13 +4639,17 @@ async function generatePresentationWithOllama(prompt) {
             imageSuggestion: String(s.imageSuggestion || '').trim(),
             graphSuggestion: String(s.graphSuggestion || '').trim(),
             ...(imageSearchQuery ? { imageSearchQuery } : {}),
+            ...(storyboard && vizSuggestion ? { vizSuggestion } : {}),
+            ...(storyboard && storyKind ? { storyKind } : {}),
           };
           return chartBars ? { ...base, chartBars } : base;
         })
     : [];
-  const normalizedSlides = normalizeSlides(slides);
-  const finalReferences = references.length ? references : buildScholarReferencesFromSlides(title, normalizedSlides);
-  return { title, slides: normalizedSlides, references: finalReferences };
+  const normalizedSlides = storyboard ? normalizeStoryboardSlides(slides) : normalizeSlides(slides);
+  let deck = { title, slides: normalizedSlides, references };
+  if (storyboard) deck = ensureStoryboardPresentationShape(deck);
+  const finalReferences = deck.references.length ? deck.references : buildScholarReferencesFromSlides(deck.title, deck.slides);
+  return { title: deck.title, slides: deck.slides, references: finalReferences, format: storyboard ? 'storyboard' : 'default' };
 }
 
 async function generateSectionsWithOllama(prompt) {
@@ -4505,6 +4839,94 @@ function assignConceptLevels(nodes, links) {
   }
 }
 
+function conceptTokens(text) {
+  return new Set(
+    String(text || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length >= 4),
+  );
+}
+
+function linkKey(a, b) {
+  return `${a}::${b}`;
+}
+
+/**
+ * Ensure map has coherent parent-child links even when model output is sparse/noisy.
+ * Uses level constraints + lexical overlap to infer missing logical connections.
+ */
+function inferConceptLinksFromNodes(nodes, links) {
+  const out = [...links];
+  const idToNode = new Map(nodes.map((n) => [n.id, n]));
+  const hasIn = new Set(links.map((l) => l.target));
+  const edgeSet = new Set(links.map((l) => linkKey(l.source, l.target)));
+
+  const rootId =
+    nodes.find((n) => Number(n.level) === 0)?.id ||
+    nodes.find((n) => /main|central|topic|root/i.test(String(n.label || '')))?.id ||
+    nodes[0]?.id;
+  if (!rootId) return out;
+
+  const tokenById = new Map(
+    nodes.map((n) => [n.id, conceptTokens(`${n.label || ''} ${n.description || ''}`)]),
+  );
+
+  function bestParentFor(child) {
+    const childTokens = tokenById.get(child.id) || new Set();
+    let best = { id: rootId, score: -1 };
+    for (const cand of nodes) {
+      if (cand.id === child.id) continue;
+      const lc = Number(cand.level);
+      const ln = Number(child.level);
+      if (!(lc < ln || (lc === 0 && ln > 0))) continue;
+      const t = tokenById.get(cand.id) || new Set();
+      let overlap = 0;
+      for (const w of childTokens) if (t.has(w)) overlap += 1;
+      // prefer closer parents by level distance
+      const levelBonus = Math.max(0, 3 - Math.abs(ln - lc));
+      const score = overlap * 3 + levelBonus;
+      if (score > best.score) best = { id: cand.id, score };
+    }
+    return best.id || rootId;
+  }
+
+  // guarantee incoming edge for every non-root node
+  for (const n of nodes) {
+    if (n.id === rootId) continue;
+    if (hasIn.has(n.id)) continue;
+    const parent = bestParentFor(n);
+    if (parent && parent !== n.id && !edgeSet.has(linkKey(parent, n.id))) {
+      out.push({ source: parent, target: n.id, label: 'supports' });
+      edgeSet.add(linkKey(parent, n.id));
+      hasIn.add(n.id);
+    }
+  }
+
+  // add limited sibling cross-links when strongly related
+  const maxCrossLinks = Math.min(8, Math.max(2, Math.floor(nodes.length / 3)));
+  let addedCross = 0;
+  for (let i = 0; i < nodes.length && addedCross < maxCrossLinks; i += 1) {
+    for (let j = i + 1; j < nodes.length && addedCross < maxCrossLinks; j += 1) {
+      const a = nodes[i];
+      const b = nodes[j];
+      if (Math.abs(Number(a.level) - Number(b.level)) > 1) continue;
+      const ta = tokenById.get(a.id) || new Set();
+      const tb = tokenById.get(b.id) || new Set();
+      let overlap = 0;
+      for (const w of ta) if (tb.has(w)) overlap += 1;
+      if (overlap < 2) continue;
+      const dir = Number(a.level) <= Number(b.level) ? [a.id, b.id] : [b.id, a.id];
+      if (edgeSet.has(linkKey(dir[0], dir[1])) || edgeSet.has(linkKey(dir[1], dir[0]))) continue;
+      out.push({ source: dir[0], target: dir[1], label: 'related' });
+      edgeSet.add(linkKey(dir[0], dir[1]));
+      addedCross += 1;
+    }
+  }
+  return out.slice(0, 64);
+}
+
 function normalizeConceptMap(map) {
   const seenNode = new Set();
   const nodes = (map.nodes || [])
@@ -4524,7 +4946,7 @@ function normalizeConceptMap(map) {
     .slice(0, 22);
 
   const validIds = new Set(nodes.map((n) => n.id));
-  const links = (map.links || [])
+  let links = (map.links || [])
     .map((l) => ({
       source: String(l?.source || '').trim(),
       target: String(l?.target || '').trim(),
@@ -4535,6 +4957,7 @@ function normalizeConceptMap(map) {
     .slice(0, 40);
 
   assignConceptLevels(nodes, links);
+  links = inferConceptLinksFromNodes(nodes, links);
 
   return { title: map.title || 'Concept Map', nodes, links };
 }
@@ -4569,18 +4992,97 @@ function buildLocalConceptMapFallback(title, sourceJson) {
   return { title: title || 'Concept Map', nodes, links };
 }
 
+function slugifyPassageSourceId(name) {
+  return String(name || 'source')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 48) || 'source';
+}
+
+function approxLocationFromIndex(i, total) {
+  if (total <= 1) return 'mid';
+  const t = i / Math.max(1, total - 1);
+  if (t < 0.33) return 'early';
+  if (t > 0.66) return 'late';
+  return 'mid';
+}
+
+/** Sentence-window passages with stable ids for citations (page unknown until per-page ingest). */
 function buildPassagesFromSources(sources) {
   const passages = [];
   for (const source of sources) {
     const name = String(source?.name || 'source').trim();
+    const sid = source?.sourceId ? String(source.sourceId).trim() : '';
+    const baseSlug = slugifyPassageSourceId(name);
     const content = String(source?.content || '').trim().slice(0, 80000);
     const sentences = extractStudySentences(content, 48);
-    for (const s of sentences) {
+    const total = sentences.length || 1;
+    sentences.forEach((s, idx) => {
       const excerpt = s.length > 520 ? `${s.slice(0, 520)}…` : s;
-      passages.push({ source: name, excerpt, page: null });
-    }
+      const passageId = `${baseSlug}-p${idx + 1}`;
+      passages.push({
+        source: name,
+        sourceId: sid || undefined,
+        passageId,
+        excerpt,
+        page: null,
+        approxLocation: approxLocationFromIndex(idx, total),
+      });
+    });
   }
   return passages;
+}
+
+/** Rank passages for a question; optionally uses embedding RAG like /api/source-chat. */
+async function getRankedPassagesForQuestion(question, sources, studentId, useRag, topN = 24) {
+  const passages = buildPassagesFromSources(sources);
+  let ranked = null;
+  const q = String(question || '').trim();
+  if (useRag && supabase && studentId && isUuid(studentId)) {
+    const sourceIds = extractSourceIdsFromSources(sources);
+    if (sourceIds.length && q) {
+      const qEmb = await fetchOllamaEmbedding(q);
+      if (Array.isArray(qEmb) && qEmb.length === OLLAMA_EMBED_DIM) {
+        const { data: rows, error: ragErr } = await supabase
+          .from('source_embeddings_ollama')
+          .select('source_id, content, embedding')
+          .eq('owner_id', studentId)
+          .in('source_id', sourceIds)
+          .limit(500);
+        if (!ragErr && rows?.length) {
+          const titleMap = buildSourceIdTitleMap(sources);
+          const scored = rows
+            .map((r, i) => {
+              const v = parseEmbeddingVector(r.embedding);
+              if (!v || v.length !== OLLAMA_EMBED_DIM) return null;
+              const score = cosineSimilarity(qEmb, v);
+              const srcName = titleMap.get(r.source_id) || 'source';
+              const ex = String(r.content || '').slice(0, 1200);
+              return {
+                source: srcName,
+                sourceId: r.source_id,
+                passageId: `emb-${r.source_id}-${i}`,
+                excerpt: ex,
+                page: null,
+                approxLocation: 'mid',
+                score,
+              };
+            })
+            .filter(Boolean)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, topN);
+          if (scored.length) {
+            ranked = scored.map(({ score: _s, ...rest }) => rest);
+          }
+        }
+      }
+    }
+  }
+  if (!ranked) {
+    ranked = rankPassages(q, passages).slice(0, topN);
+  }
+  return ranked;
 }
 
 function rankPassages(query, passages) {
@@ -4603,18 +5105,146 @@ function rankPassages(query, passages) {
     .sort((a, b) => b.score - a.score);
 }
 
+function passageCitationFields(p) {
+  return {
+    source: p.source,
+    passageId: p.passageId ?? null,
+    excerpt: p.excerpt,
+    page: p.page ?? null,
+    approxLocation: p.approxLocation ?? null,
+  };
+}
+
+function findPassageIdForExcerpt(source, excerpt, rankedPassages) {
+  const ex = String(excerpt || '').trim().slice(0, 200);
+  const src = String(source || '').trim().toLowerCase();
+  for (const p of rankedPassages) {
+    if (String(p.source || '').trim().toLowerCase() !== src) continue;
+    const pe = String(p.excerpt || '');
+    if (!ex) return p.passageId ?? null;
+    if (pe.startsWith(ex.slice(0, Math.min(80, ex.length))) || ex.startsWith(pe.slice(0, Math.min(80, pe.length)))) {
+      return p.passageId ?? null;
+    }
+  }
+  for (const p of rankedPassages) {
+    const pe = String(p.excerpt || '');
+    if (pe.includes(ex.slice(0, 40)) || ex.includes(pe.slice(0, 40))) return p.passageId ?? null;
+  }
+  return null;
+}
+
 function normalizeCitations(rawCitations, rankedPassages) {
-  const fallback = rankedPassages.slice(0, 3).map((p) => ({ source: p.source, excerpt: p.excerpt, page: p.page ?? null }));
+  const fallback = rankedPassages.slice(0, 3).map((p) => passageCitationFields(p));
   if (!Array.isArray(rawCitations)) return fallback;
   const rows = rawCitations
-    .map((c) => ({
-      source: String(c?.source || '').trim(),
-      excerpt: String(c?.excerpt || '').trim(),
-      page: c?.page ?? null,
-    }))
+    .map((c) => {
+      const source = String(c?.source || '').trim();
+      const excerpt = String(c?.excerpt || '').trim();
+      const passageIdRaw = String(c?.passageId || '').trim();
+      const pid = passageIdRaw || findPassageIdForExcerpt(source, excerpt, rankedPassages);
+      return {
+        source,
+        passageId: pid,
+        excerpt,
+        page: c?.page ?? null,
+        approxLocation: c?.approxLocation ?? null,
+      };
+    })
     .filter((c) => c.source && c.excerpt)
     .slice(0, 8);
   return rows.length ? rows : fallback;
+}
+
+function wordCount(s) {
+  return String(s || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean).length;
+}
+
+function truncateWords(s, maxWords) {
+  const words = String(s || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (words.length <= maxWords) return words.join(' ');
+  return `${words.slice(0, maxWords).join(' ')} …`;
+}
+
+function normalizeResearchSynthesis(parsed, rankedPassages) {
+  const argumentOutline = Array.isArray(parsed?.argumentOutline)
+    ? parsed.argumentOutline.map((x) => String(x).trim()).filter(Boolean).slice(0, 12)
+    : [];
+  const answer = String(parsed?.answer || '').trim();
+  const reasoningSteps = Array.isArray(parsed?.reasoningSteps)
+    ? parsed.reasoningSteps.map((x) => String(x).trim()).filter(Boolean).slice(0, 12)
+    : [];
+  const themes = Array.isArray(parsed?.themes) ? parsed.themes.map((x) => String(x).trim()).filter(Boolean).slice(0, 10) : [];
+  const contradictions = Array.isArray(parsed?.contradictions)
+    ? parsed.contradictions.map((x) => String(x).trim()).filter(Boolean).slice(0, 8)
+    : [];
+  const causalLinks = Array.isArray(parsed?.causalLinks)
+    ? parsed.causalLinks
+        .map((l) => ({
+          cause: String(l?.cause || '').trim(),
+          effect: String(l?.effect || '').trim(),
+        }))
+        .filter((l) => l.cause && l.effect)
+        .slice(0, 10)
+    : [];
+  const citations = normalizeCitations(parsed?.citations, rankedPassages);
+  return {
+    argumentOutline: argumentOutline.length ? argumentOutline : ['Review passages for the main thesis and supporting claims.'],
+    answer: answer || 'Synthesize the passages below; the model returned an empty answer.',
+    reasoningSteps: reasoningSteps.length ? reasoningSteps : ['Identify claims across passages.', 'Compare evidence.', 'State the strongest conclusion supported.'],
+    themes: themes.length ? themes : [],
+    contradictions,
+    causalLinks,
+    citations,
+  };
+}
+
+function normalizeCornellNotes(parsed) {
+  const sections = Array.isArray(parsed?.sections)
+    ? parsed.sections
+        .map((s) => ({
+          title: String(s?.title || '').trim(),
+          cues: Array.isArray(s?.cues) ? s.cues.map((x) => String(x).trim()).filter(Boolean).slice(0, 20) : [],
+          notesMarkdown: String(s?.notesMarkdown || s?.notes || '').trim(),
+          summary: String(s?.summary || '').trim(),
+          tablesMarkdown: Array.isArray(s?.tablesMarkdown)
+            ? s.tablesMarkdown.map((x) => String(x).trim()).filter(Boolean).slice(0, 6)
+            : [],
+        }))
+        .filter((s) => s.title && (s.notesMarkdown || s.summary))
+        .slice(0, 12)
+    : [];
+  return { sections };
+}
+
+function normalizeBottlenecks(parsed) {
+  const bottlenecks = Array.isArray(parsed?.bottlenecks)
+    ? parsed.bottlenecks
+        .map((b) => ({
+          concept: String(b?.concept || b?.title || '').trim(),
+          whyHard: String(b?.whyHard || b?.description || '').trim(),
+          fix: String(b?.fix || b?.remediation || '').trim(),
+        }))
+        .filter((b) => b.concept)
+        .slice(0, 5)
+    : [];
+  return { bottlenecks: bottlenecks.slice(0, 3) };
+}
+
+function normalizeSocraticTutor(parsed, rankedPassages) {
+  const reply = String(parsed?.reply || '').trim();
+  const challengeQuestion = String(parsed?.challengeQuestion || parsed?.challenge || '').trim();
+  const citations = normalizeCitations(parsed?.citations, rankedPassages);
+  return {
+    reply: reply || 'What part of the source feels most unclear when you try to explain it aloud?',
+    challengeQuestion: challengeQuestion || 'Which definition would you use to test whether you really understand this idea?',
+    citations,
+  };
 }
 
 function normalizeSummary(parsed, passages) {

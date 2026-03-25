@@ -5,11 +5,18 @@ const TTS_VOICE_STORAGE_KEY = 'sa-notebook-tts-voice-uri';
 export default function NotebookWorkspace({
   chunks,
   activePdfId = '',
+  studentId = '',
   onSourceChat,
   onSummary,
   onStudyGuide,
   onCompare,
   onAudioOverview,
+  onResearchSynthesis,
+  onCornellNotes,
+  onAnkiCards,
+  onStoryboardPresentation,
+  onDocumentBottlenecks,
+  onSocraticTutor,
   conceptMapData,
   onCitationSelect,
   onCreateFlashcardFromSelection,
@@ -34,7 +41,21 @@ export default function NotebookWorkspace({
     studyGuide: '',
     compare: '',
     audio: '',
+    research: '',
+    cornell: '',
+    anki: '',
+    storyboard: '',
+    bottlenecks: '',
+    socratic: '',
   });
+  const [studyTopic, setStudyTopic] = useState('');
+  const [researchQuestion, setResearchQuestion] = useState('');
+  const [socraticQuestion, setSocraticQuestion] = useState('');
+  const [bottlenecks, setBottlenecks] = useState(null);
+  const [researchSynth, setResearchSynth] = useState(null);
+  const [cornellNotes, setCornellNotes] = useState(null);
+  const [storyboardPreview, setStoryboardPreview] = useState(null);
+  const [socraticTurn, setSocraticTurn] = useState(null);
   const [ttsVoices, setTtsVoices] = useState([]);
   const [ttsVoiceUri, setTtsVoiceUri] = useState(() => {
     try {
@@ -220,6 +241,170 @@ export default function NotebookWorkspace({
         )}
       </div>
 
+      <div className="mb-3 rounded-xl border border-indigo-200 bg-indigo-50/60 p-3">
+        <p className="mb-2 text-xs font-semibold text-indigo-900">Study modes</p>
+        <p className="mb-2 text-[11px] text-indigo-800/90">
+          Structured outputs from your selected sources
+          {studentId && selectedSources.some((s) => s.sourceId) ? ' (RAG on when source IDs are present).' : ''}
+        </p>
+        <input
+          className="input mb-2 py-1.5 text-sm"
+          value={studyTopic}
+          onChange={(e) => setStudyTopic(e.target.value)}
+          placeholder="Topic label (e.g. for storyboard deck)"
+        />
+        <textarea
+          className="input mb-2 min-h-14 py-1.5 text-sm"
+          value={researchQuestion}
+          onChange={(e) => setResearchQuestion(e.target.value)}
+          placeholder="Optional focus question for research map / synthesis"
+        />
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            className="btn-primary !px-2 !py-1 text-xs"
+            disabled={busy || noSources || !onResearchSynthesis}
+            onClick={async () =>
+              runSection(
+                'research',
+                () =>
+                  onResearchSynthesis?.({
+                    sources: selectedSources,
+                    question: researchQuestion.trim(),
+                  }),
+                setResearchSynth,
+              )
+            }
+          >
+            {localLoading === 'research' ? '…' : 'Research map'}
+          </button>
+          <button
+            type="button"
+            className="btn-primary !px-2 !py-1 text-xs"
+            disabled={busy || noSources || !onCornellNotes}
+            onClick={async () => runSection('cornell', () => onCornellNotes?.({ sources: selectedSources }), setCornellNotes)}
+          >
+            {localLoading === 'cornell' ? '…' : 'Cornell notes'}
+          </button>
+          <button
+            type="button"
+            className="btn-primary !px-2 !py-1 text-xs"
+            disabled={busy || noSources || !onAnkiCards}
+            onClick={async () => runSection('anki', () => onAnkiCards?.({ sources: selectedSources }), () => null)}
+          >
+            {localLoading === 'anki' ? '…' : 'Anki deck'}
+          </button>
+          <button
+            type="button"
+            className="btn-primary !px-2 !py-1 text-xs"
+            disabled={busy || noSources || !onStoryboardPresentation}
+            onClick={async () =>
+              runSection(
+                'storyboard',
+                () =>
+                  onStoryboardPresentation?.({
+                    sources: selectedSources,
+                    topic: studyTopic.trim(),
+                    promptText: 'Storyboard: rule of three, one ELI5 slide, grounded in sources.',
+                  }),
+                setStoryboardPreview,
+              )
+            }
+          >
+            {localLoading === 'storyboard' ? '…' : 'Storyboard deck'}
+          </button>
+          <button
+            type="button"
+            className="btn-ghost !px-2 !py-1 text-xs"
+            disabled={busy || noSources || !onDocumentBottlenecks}
+            onClick={async () =>
+              runSection(
+                'bottlenecks',
+                async () => {
+                  const r = await onDocumentBottlenecks?.({ sources: selectedSources });
+                  if (r?.bottlenecks) setBottlenecks(r.bottlenecks);
+                  return r;
+                },
+                () => null,
+              )
+            }
+          >
+            {localLoading === 'bottlenecks' ? '…' : 'Analyze bottlenecks'}
+          </button>
+        </div>
+        <div className="mt-3 rounded-lg border border-indigo-100 bg-white/90 p-2">
+          <p className="mb-1 text-[11px] font-semibold text-slate-700">Socratic chat</p>
+          <textarea
+            className="input mb-1 min-h-16 py-1.5 text-sm"
+            value={socraticQuestion}
+            onChange={(e) => setSocraticQuestion(e.target.value)}
+            placeholder="Ask a question — uses bottlenecks if you analyzed them first."
+          />
+          <button
+            type="button"
+            className="btn-primary !px-2 !py-1 text-xs"
+            disabled={busy || noSources || !socraticQuestion.trim() || !onSocraticTutor}
+            onClick={async () =>
+              runSection(
+                'socratic',
+                () =>
+                  onSocraticTutor?.({
+                    sources: selectedSources,
+                    prompt: socraticQuestion.trim(),
+                    bottlenecks: bottlenecks || [],
+                  }),
+                setSocraticTurn,
+              )
+            }
+          >
+            {localLoading === 'socratic' ? '…' : 'Socratic chat'}
+          </button>
+        </div>
+        {errBox('research')}
+        {errBox('cornell')}
+        {errBox('anki')}
+        {errBox('storyboard')}
+        {errBox('bottlenecks')}
+        {errBox('socratic')}
+        {researchSynth ? (
+          <div className="mt-2 max-h-48 overflow-auto rounded border border-border bg-white p-2 text-[11px]">
+            <p className="font-semibold text-slate-800">Research synthesis</p>
+            <p className="mt-1 text-slate-700">{researchSynth.answer}</p>
+          </div>
+        ) : null}
+        {cornellNotes?.sections?.length ? (
+          <div className="mt-2 max-h-40 overflow-auto rounded border border-border bg-white p-2 text-[11px]">
+            <p className="font-semibold text-slate-800">Cornell notes</p>
+            {cornellNotes.sections.slice(0, 2).map((s, i) => (
+              <div key={`cn-${i}`} className="mt-1 border-t border-slate-100 pt-1">
+                <p className="font-medium">{s.title}</p>
+                <p className="text-muted">{s.summary}</p>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {bottlenecks?.length ? (
+          <ul className="mt-2 space-y-1 text-[11px] text-slate-700">
+            {bottlenecks.map((b, i) => (
+              <li key={`bn-${i}`} className="rounded border border-amber-200 bg-amber-50/80 px-2 py-1">
+                <span className="font-semibold">{b.concept}</span>: {b.whyHard}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {storyboardPreview?.slides?.length ? (
+          <p className="mt-2 text-[11px] text-slate-600">
+            Storyboard saved: {storyboardPreview.title} ({storyboardPreview.slides.length} slides). Open the Presentations tab to preview.
+          </p>
+        ) : null}
+        {socraticTurn ? (
+          <div className="mt-2 rounded border border-border bg-white p-2 text-[11px]">
+            <p className="text-slate-800">{socraticTurn.reply}</p>
+            <p className="mt-1 font-medium text-indigo-800">Challenge: {socraticTurn.challengeQuestion}</p>
+          </div>
+        ) : null}
+      </div>
+
       <div className="rounded-xl border border-border bg-white p-3">
         <p className="mb-2 text-sm font-semibold">Source-grounded chat</p>
         <textarea
@@ -251,6 +436,7 @@ export default function NotebookWorkspace({
                     title="Jump to citation source"
                   >
                     <p className="font-semibold underline decoration-dotted">{c.source}</p>
+                    {c.passageId ? <p className="text-[10px] text-slate-500">Passage: {c.passageId}</p> : null}
                     <p className="text-muted">{c.excerpt}</p>
                   </button>
                 </li>

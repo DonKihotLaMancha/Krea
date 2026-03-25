@@ -446,7 +446,7 @@ export default function ConceptMap({
           onChange={(e) => onSelectPdf?.(e.target.value)}
           disabled={!chunks.length || isGenerating}
         >
-          {!chunks.length ? <option value="">Upload a PDF first</option> : null}
+          {!chunks.length ? <option value="">Upload a document first</option> : null}
           {chunks.map((c) => (
             <option key={c.id} value={c.id}>
               {c.name}
@@ -459,12 +459,12 @@ export default function ConceptMap({
           disabled={!selectedChunk || isGenerating}
           onClick={() => selectedChunk && onGenerate(selectedChunk.id)}
         >
-          {isGenerating ? 'Generating map...' : 'Generate from PDF'}
+          {isGenerating ? 'Generating map...' : 'Generate map'}
         </button>
       </div>
       {!allDrawNodes.length ? (
         <div className="mb-3 rounded-lg border border-border bg-slate-50 p-3 text-sm text-muted">
-          No concept map yet. Select an uploaded PDF and click <b>Generate from PDF</b>.
+          No concept map yet. Select an uploaded document and click <b>Generate map</b>.
         </div>
       ) : (
         <p className="mb-3 text-xs text-muted">

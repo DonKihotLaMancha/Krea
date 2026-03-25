@@ -119,6 +119,12 @@ export default function FlashcardDeck({
       setShowAnswer(true);
       acted = true;
     }
+    // Treat a near-zero drag as a tap so flip works reliably
+    // across mouse/touch and doesn't depend on synthetic click firing.
+    if (!acted && Math.abs(dx) < 10) {
+      toggleFlip();
+      acted = true;
+    }
     if (acted) suppressClickUntil.current = Date.now() + 320;
   };
 
@@ -209,7 +215,7 @@ export default function FlashcardDeck({
                     toggleFlip();
                   }}
                   className={`relative mx-auto cursor-pointer select-none outline-none focus-visible:ring-2 focus-visible:ring-[#4257b2] focus-visible:ring-offset-2 rounded-2xl transition-shadow duration-200 ${cardShellClass}`}
-                  aria-label={showAnswer ? 'Show term (flip card)' : 'Show definition (flip card)'}
+                  aria-label={showAnswer ? 'Flip card to show question' : 'Flip card to show answer'}
                 >
                   <div
                     className="relative h-[min(20rem,52vh)] w-full transition-transform duration-500 ease-out [transform-style:preserve-3d]"
@@ -220,20 +226,19 @@ export default function FlashcardDeck({
                     <div
                       className="absolute inset-0 flex flex-col justify-center overflow-hidden rounded-2xl border-2 border-slate-200 bg-white px-6 py-8 shadow-[0_12px_40px_-12px_rgba(15,23,42,0.18)] [backface-visibility:hidden]"
                     >
-                      <span className="mb-3 text-xs font-semibold uppercase tracking-wider text-[#4257b2]">
-                        Term
-                      </span>
+                      {currentCard.type === 'cloze' ? (
+                        <p className="mb-2 text-center text-[11px] font-medium uppercase tracking-wide text-violet-600">
+                          Cloze
+                        </p>
+                      ) : null}
                       <p className="text-center text-lg font-medium leading-relaxed text-slate-900 sm:text-xl">
                         {currentCard.question}
                       </p>
-                      <span className="mt-6 text-center text-xs text-slate-400">Click or press Space to flip</span>
+                      <span className="mt-6 text-center text-xs text-slate-400">Click the card to see the answer</span>
                     </div>
                     <div
                       className="absolute inset-0 flex flex-col justify-center overflow-hidden rounded-2xl border-2 border-slate-200 bg-[#f6f7fb] px-6 py-8 shadow-[0_12px_40px_-12px_rgba(15,23,42,0.18)] [backface-visibility:hidden] [transform:rotateY(180deg)]"
                     >
-                      <span className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-500">
-                        Definition
-                      </span>
                       <p className="text-center text-base leading-relaxed text-slate-800 sm:text-lg">
                         {currentCard.answer}
                       </p>

@@ -48,11 +48,41 @@ This document maps current endpoints to normalized Supabase schema and defines t
   - optional compatibility write to legacy `concept_maps`
 
 ### `POST /api/library/notebook`
-- Request: `{ studentId, sourceNames, outputType, output }`
+- Request: `{ studentId, sourceNames?, sourceIds?, outputType, output }`
+- `outputType` must be one of:
+  - `source-chat`, `summary`, `study-guide`, `source-compare`, `audio-overview`
+  - `research-synthesis`, `cornell-notes`, `anki-v2`, `storyboard-presentation`, `document-bottlenecks`, `socratic-session`
 - Writes:
   - `notebook_sessions` (auto-create default session)
   - `notebook_outputs`
   - optional compatibility write to legacy `notebook_outputs`
+
+## Pedagogy / Ollama routes
+
+### `POST /api/research-synthesis`
+- Request: `{ sources: [{ name, content, sourceId? }], question?: string, studentId?: string, useRag?: boolean }`
+- Uses ranked passages (embedding RAG when `studentId` + `sourceId`s + `useRag` path applies).
+- Response: `{ argumentOutline[], answer, reasoningSteps[], themes[], contradictions[], causalLinks[], citations[] }` — citations include `passageId`, `approxLocation` when known.
+
+### `POST /api/cornell-notes`
+- Request: `{ sources }`
+- Response: `{ sections: [{ title, cues[], notesMarkdown, summary, tablesMarkdown[] }] }`
+
+### `POST /api/document-bottlenecks`
+- Request: `{ sources }`
+- Response: `{ bottlenecks: [{ concept, whyHard, fix }] }` (three items when possible).
+
+### `POST /api/tutor-socratic`
+- Request: `{ prompt, sources, bottlenecks?: [...], studentId?, useRag? }`
+- Response: `{ reply, challengeQuestion, citations[] }`
+
+### `POST /api/flashcards`
+- Default (legacy): `{ text }` → `{ cards: [{ question, answer, evidence? }] }`
+- Anki mode: `{ format: 'anki', sources }` or `{ format: 'anki', text }` → `{ format: 'anki', cards: [{ type: 'qa'|'cloze', front, back, clozeText?, evidence? }] }` with server-side word caps.
+
+### `POST /api/presentation`
+- Additional body field: `format: 'storyboard'` — enforces ≤3 bullets/slide, one ELI5 slide, optional `vizSuggestion` / `storyKind` on slides.
+- Response may include `format: 'storyboard'|'default'`.
 
 ## V2 Routes
 
