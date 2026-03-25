@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 
 export default function FlashcardDeck({
   cards,
+  sourceLabel = '',
   showAnswer,
   setShowAnswer,
   onRight,
@@ -36,7 +37,11 @@ export default function FlashcardDeck({
         {latestBatchAt ? <span className="text-xs text-muted">Last generated: {latestBatchAt}</span> : null}
       </div>
       {!currentCard ? (
-        <p className="text-sm text-muted">No cards yet. Upload material in Ingest.</p>
+        <p className="text-sm text-muted">
+          {sourceLabel
+            ? `No flashcards yet for “${sourceLabel}”. Generate from Ingest or another tab for this document.`
+            : 'No cards yet. Upload material in Ingest and select a PDF.'}
+        </p>
       ) : (
         <>
           {urgent.length ? (
@@ -57,9 +62,16 @@ export default function FlashcardDeck({
               )}
             </div>
           ) : null}
-          <p className="mb-2 text-xs text-muted">Card 1 of {cards.length}</p>
-          <div className="mb-3 h-2 w-full rounded-full bg-slate-100">
-            <div className="h-2 rounded-full bg-gradient-to-r from-indigo-600 via-violet-600 to-cyan-500" style={{ width: `${Math.max(8, (1 / cards.length) * 100)}%` }} />
+          <p className="mb-2 text-xs text-muted">
+            Next in queue · {cards.length} card{cards.length === 1 ? '' : 's'} in this deck
+          </p>
+          <p className="mb-3 text-[11px] leading-snug text-muted">
+            Spaced repetition: <span className="font-medium text-slate-600">Got it right</span> schedules the card later;{' '}
+            <span className="font-medium text-slate-600">Wrong</span> brings it back sooner. The top card is always the
+            one due now.
+          </p>
+          <div className="mb-3 h-1 w-full overflow-hidden rounded-full bg-slate-100" aria-hidden>
+            <div className="h-full w-full animate-pulse bg-gradient-to-r from-indigo-200/80 via-violet-200/80 to-cyan-200/80" />
           </div>
           <div className="rounded-xl border border-indigo-100 bg-gradient-to-br from-white to-indigo-50/60 p-4">
             <p className="font-medium leading-relaxed">{currentCard.question}</p>

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist';
 import { Bar, Doughnut, Line } from 'react-chartjs-2';
 import {
@@ -529,7 +529,7 @@ function buildSlideGraphData(slide) {
     labels: labels.length ? labels : ['Point 1', 'Point 2', 'Point 3'],
     datasets: [
       {
-        label: 'Relative emphasis',
+        label: 'Words per bullet (illustrative)',
         data: values.length ? values : [4, 6, 5],
         backgroundColor: 'rgba(37,99,235,0.45)',
         borderColor: '#2563eb',
@@ -537,6 +537,24 @@ function buildSlideGraphData(slide) {
       },
     ],
   };
+}
+
+function slideImageFallbackUrl(deckTitle, slideIndex, slideTitle) {
+  return slideHeroImageUrl(deckTitle, slideIndex, slideTitle);
+}
+
+async function fetchSlideHeroImageUrl(deckTitle, slideIndex, slideTitle) {
+  const q = `${deckTitle || ''} ${slideTitle || ''}`.trim();
+  if (!q) return slideImageFallbackUrl(deckTitle, slideIndex, slideTitle);
+  try {
+    const resp = await fetch(`${apiUrl('/api/slide-image')}?q=${encodeURIComponent(q)}`);
+    if (!resp.ok) throw new Error('bad status');
+    const data = await resp.json();
+    if (data?.url && typeof data.url === 'string') return data.url;
+  } catch {
+    /* use fallback */
+  }
+  return slideImageFallbackUrl(deckTitle, slideIndex, slideTitle);
 }
 
 function normalizeStudyCards(cardsInput) {
@@ -558,6 +576,15 @@ function normalizeStudyCards(cardsInput) {
       veces_mal: Number(c.veces_mal || 0),
     };
   });
+}
+
+function tagFlashcardsForChunk(chunk, list) {
+  if (!chunk) return list;
+  return list.map((c) => ({
+    ...c,
+    sourceId: chunk.sourceId || c.sourceId || null,
+    libraryChunkId: chunk.id,
+  }));
 }
 
 async function extractPdfText(file, onProgress) {
@@ -613,6 +640,10 @@ export function StudentApp() {
   const [isCommandOpen, setIsCommandOpen] = useState(false);
   const [tab, setTab] = useState('Ingest');
   const [chunks, setChunks] = useState([]);
+  /** Selected library PDF (chunk id) — drives Flashcards, Notebook, Concept Map, etc. */
+  const [activePdfId, setActivePdfId] = useState('');
+  const [sectionCatalog, setSectionCatalog] = useState([]);
+  const [conceptMapLibrary, setConceptMapLibrary] = useState([]);
   const [cards, setCards] = useState([]);
   const [showAnswer, setShowAnswer] = useState(false);
   const [tasks, setTasks] = useState([]);
@@ -651,6 +682,131 @@ export function StudentApp() {
   const [isTutorBusy, setIsTutorBusy] = useState(false);
   const [tutorStreamPreview, setTutorStreamPreview] = useState('');
   const [isAcademicsAiBusy, setIsAcademicsAiBusy] = useState(false);
+  const [libraryReloadBusy, setLibraryReloadBusy] = useState(false);
+
+  /** Apply GET /api/library JSON to client state (bootstrap + manual refresh). */
+  const applyLibraryData = useCallback((data) => {
+    const dbChunks = Array.isArray(data?.pdfs) ? data.pdfs.map(mapLibraryPdfToChunk) : [];
+    setChunks(dbChunks);
+    const dbSections = Array.isArray(data?.sections)
+      ? data.sections.map((s) => ({
+          ...s,
+          estado: s.estado === 'completed' ? 'completado' : s.estado === 'in_progress' ? 'en_progreso' : s.estado || 'pendiente',
+        }))
+      : [];
+    setSectionCatalog(dbSections);
+    const dbMaps = Array.isArray(data?.maps) ? data.maps : [];
+    setConceptMapLibrary(
+      dbMaps
+        .filter((m) => m.sourceId && m.map)
+        .map((m) => ({
+          sourceId: m.sourceId,
+          title: m.title || '',
+          map: m.map,
+        })),
+    );
+    const fcSets = Array.isArray(data?.flashcards?.sets) ? data.flashcards.sets : [];
+    const setIdToSourceId = new Map(fcSets.map((s) => [s.id, s.sourceId || null]));
+    const dbFlashcards = Array.isArray(data?.flashcards?.cards) ? data.flashcards.cards : [];
+    if (dbFlashcards.length) {
+      setCards(
+        normalizeStudyCards(
+          dbFlashcards.map((c) => {
+            const sid = c.setId ? setIdToSourceId.get(c.setId) || null : null;
+            let chunk = sid ? dbChunks.find((ch) => ch.sourceId === sid) : null;
+            if (!chunk && dbChunks.length === 1) chunk = dbChunks[0];
+            return {
+              question: c.question,
+              answer: c.answer,
+              id: c.id,
+              setId: c.setId,
+              sourceId: sid,
+              libraryChunkId: chunk?.id || null,
+            };
+          }),
+        ),
+      );
+    }
+    if (Array.isArray(data?.quizzes) && data.quizzes.length) setQuizResults(data.quizzes);
+    if (Array.isArray(data?.presentations) && data.presentations.length) setPresentations(data.presentations);
+    if (Array.isArray(data?.academics?.grades)) setGrades(data.academics.grades);
+    if (Array.isArray(data?.academics?.simulations)) setSimulations(data.academics.simulations);
+    if (Array.isArray(data?.chat?.messages)) setMessages(data.chat.messages);
+    if (Array.isArray(data?.tutor?.messages)) setTutorMessages(data.tutor.messages);
+  }, []);
+
+  const reloadLibraryFromAccount = useCallback(async () => {
+    if (!studentId) {
+      setNotice('Sign in to load PDFs from your account.');
+      return;
+    }
+    setLibraryReloadBusy(true);
+    try {
+      const data = await loadLibrary(studentId);
+      applyLibraryData(data);
+      const n = Array.isArray(data?.pdfs) ? data.pdfs.length : 0;
+      setNotice(n ? `Loaded ${n} PDF${n === 1 ? '' : 's'} from your account.` : 'Your account has no saved PDFs yet — upload one below.');
+    } catch {
+      setNotice('Could not refresh library from your account. Check your connection and try again.');
+    } finally {
+      setLibraryReloadBusy(false);
+    }
+  }, [studentId, applyLibraryData]);
+
+  const activeChunk = useMemo(() => {
+    if (!chunks.length) return null;
+    const match = chunks.find((c) => c.id === activePdfId);
+    return match || chunks[0];
+  }, [chunks, activePdfId]);
+
+  useEffect(() => {
+    if (!chunks.length) {
+      setActivePdfId('');
+      return;
+    }
+    setActivePdfId((prev) => (prev && chunks.some((c) => c.id === prev) ? prev : chunks[0].id));
+  }, [chunks]);
+
+  const deckCards = useMemo(() => {
+    if (!activeChunk) return [];
+    return cards.filter((c) => {
+      if (activeChunk.sourceId) {
+        if (c.sourceId) return c.sourceId === activeChunk.sourceId;
+        if (c.libraryChunkId) return c.libraryChunkId === activeChunk.id;
+        return false;
+      }
+      if (c.libraryChunkId) return c.libraryChunkId === activeChunk.id;
+      if (!c.sourceId && !c.libraryChunkId) return chunks.length === 1;
+      return false;
+    });
+  }, [cards, activeChunk, chunks.length]);
+
+  useEffect(() => {
+    if (!activeChunk?.name) {
+      setApartados([]);
+      return;
+    }
+    const rows = sectionCatalog.filter((s) => (s.sourceName || '') === activeChunk.name);
+    setApartados(rows);
+  }, [activeChunk?.id, activeChunk?.name, sectionCatalog]);
+
+  useEffect(() => {
+    if (!activeChunk?.sourceId) {
+      setConceptMapData(null);
+      return;
+    }
+    const hit = conceptMapLibrary.find((m) => m.sourceId === activeChunk.sourceId);
+    if (hit?.map) {
+      const m = hit.map;
+      setConceptMapData({
+        title: m.title || hit.title || 'Concept Map',
+        nodes: m.nodes || [],
+        links: m.links || [],
+      });
+    } else {
+      setConceptMapData(null);
+    }
+  }, [activeChunk?.sourceId, conceptMapLibrary]);
 
   useEffect(() => {
     if (!supabaseBrowser) {
@@ -753,27 +909,7 @@ export function StudentApp() {
         }
         const data = await loadLibrary(studentId);
         if (!mounted) return;
-        const dbChunks = Array.isArray(data?.pdfs) ? data.pdfs.map(mapLibraryPdfToChunk) : [];
-        setChunks(dbChunks);
-        const dbSections = Array.isArray(data?.sections)
-          ? data.sections.map((s) => ({
-              ...s,
-              estado: s.estado === 'completed' ? 'completado' : s.estado === 'in_progress' ? 'en_progreso' : s.estado || 'pendiente',
-            }))
-          : [];
-        if (dbSections.length) setApartados(dbSections);
-        const dbMaps = Array.isArray(data?.maps) ? data.maps : [];
-        if (dbMaps[0]?.map) setConceptMapData(dbMaps[0].map);
-        const dbFlashcards = Array.isArray(data?.flashcards?.cards) ? data.flashcards.cards : [];
-        if (dbFlashcards.length) {
-          setCards(normalizeStudyCards(dbFlashcards.map((c) => ({ question: c.question, answer: c.answer, id: c.id }))));
-        }
-        if (Array.isArray(data?.quizzes) && data.quizzes.length) setQuizResults(data.quizzes);
-        if (Array.isArray(data?.presentations) && data.presentations.length) setPresentations(data.presentations);
-        if (Array.isArray(data?.academics?.grades)) setGrades(data.academics.grades);
-        if (Array.isArray(data?.academics?.simulations)) setSimulations(data.academics.simulations);
-        if (Array.isArray(data?.chat?.messages)) setMessages(data.chat.messages);
-        if (Array.isArray(data?.tutor?.messages)) setTutorMessages(data.tutor.messages);
+        applyLibraryData(data);
       } catch {
         // Keep app usable even if DB bootstrap fails.
       }
@@ -782,7 +918,7 @@ export function StudentApp() {
     return () => {
       mounted = false;
     };
-  }, [studentId, session?.user]);
+  }, [studentId, session?.user, applyLibraryData]);
 
   const offlinePdfHydratedRef = useRef(false);
   const offlinePdfSizeWarnedRef = useRef(false);
@@ -836,7 +972,7 @@ export function StudentApp() {
   }, [chunks, studentId, setNotice]);
 
   useEffect(() => {
-    const head = chunks[0];
+    const head = activeChunk;
     if (!studentId || !apartados.length || (!head?.name && !head?.sourceId)) return undefined;
     const id = setTimeout(() => {
       saveSectionsToLibrary({
@@ -847,7 +983,7 @@ export function StudentApp() {
       }).catch(() => {});
     }, 900);
     return () => clearTimeout(id);
-  }, [apartados, studentId, chunks]);
+  }, [apartados, studentId, activeChunk]);
 
   const avg = useMemo(() => {
     const w = grades.reduce((s, g) => s + g.weight, 0);
@@ -881,7 +1017,7 @@ export function StudentApp() {
     try {
       const aiCards = await generateCardsWithOllama(chunk.content);
       if (aiCards.length) {
-        const normalized = normalizeStudyCards(aiCards);
+        const normalized = tagFlashcardsForChunk(chunk, normalizeStudyCards(aiCards));
         setCards((prev) => (append ? [...prev, ...normalized] : normalized));
         if (studentId) {
           try {
@@ -908,7 +1044,7 @@ export function StudentApp() {
         return;
       }
       const fallback = fallbackCardsFromText(chunk.content);
-      const normalizedFallback = normalizeStudyCards(fallback);
+      const normalizedFallback = tagFlashcardsForChunk(chunk, normalizeStudyCards(fallback));
       setCards((prev) => (append ? [...prev, ...normalizedFallback] : normalizedFallback));
       if (studentId) {
         try {
@@ -935,7 +1071,7 @@ export function StudentApp() {
       setGenerationIndeterminate(true);
       setGenerationStage('AI unavailable, switching to backup mode...');
       const fallback = fallbackCardsFromText(chunk.content);
-      const normalizedFallback = normalizeStudyCards(fallback);
+      const normalizedFallback = tagFlashcardsForChunk(chunk, normalizeStudyCards(fallback));
       setCards((prev) => (append ? [...prev, ...normalizedFallback] : normalizedFallback));
       if (studentId) {
         try {
@@ -1040,19 +1176,22 @@ export function StudentApp() {
     }
   };
 
-  const markCard = (ok) => {
-    const currentCard = cards[0];
-    if (!currentCard) return;
+  const markCard = useCallback((ok) => {
+    const top = deckCards[0];
+    if (!top) return;
     setCards((prev) => {
-      const [head, ...rest] = prev;
+      const idx = prev.findIndex((c) => c.id === top.id);
+      if (idx < 0) return prev;
+      const head = prev[idx];
+      const rest = prev.filter((_, i) => i !== idx);
       const updated = { ...head, right: head.right + (ok ? 1 : 0), wrong: head.wrong + (!ok ? 1 : 0) };
       return ok ? [...rest, updated] : [updated, ...rest];
     });
     setShowAnswer(false);
-  };
+  }, [deckCards]);
 
   const analyzeChunkSections = async (chunkId) => {
-    const chunk = chunkId ? chunks.find((c) => c.id === chunkId) : chunks[0];
+    const chunk = chunkId ? chunks.find((c) => c.id === chunkId) : activeChunk;
     if (!chunk) {
       setNotice('Upload a document first, then analyze sections.');
       return;
@@ -1071,7 +1210,12 @@ export function StudentApp() {
         porcentaje: 0,
         estado: 'pendiente',
         fechas_trabajo: [],
+        sourceName: chunk.name,
       }));
+      setSectionCatalog((prev) => {
+        const rest = prev.filter((s) => (s.sourceName || '') !== chunk.name);
+        return [...rest, ...normalized];
+      });
       setApartados(normalized);
       if (studentId) {
         try {
@@ -1099,7 +1243,12 @@ export function StudentApp() {
           porcentaje: 0,
           estado: 'pendiente',
           fechas_trabajo: [],
+          sourceName: chunk.name,
         }));
+      setSectionCatalog((prev) => {
+        const rest = prev.filter((s) => (s.sourceName || '') !== chunk.name);
+        return [...rest, ...fallback];
+      });
       setApartados(fallback);
       if (studentId && fallback.length) {
         try {
@@ -1124,7 +1273,7 @@ export function StudentApp() {
     setNotice('Generating your presentation...');
     const sourceChunks = (Array.isArray(chunkIds) && chunkIds.length)
       ? chunks.filter((c) => chunkIds.includes(c.id))
-      : (chunks[0] ? [chunks[0]] : []);
+      : (activeChunk ? [activeChunk] : []);
     if (!sourceChunks.length) {
       setNotice('Upload a PDF first, then generate a presentation from it.');
       setIsGeneratingPresentation(false);
@@ -1202,7 +1351,7 @@ export function StudentApp() {
   };
 
   const generateConceptMap = async (chunkId) => {
-    const chunk = chunkId ? chunks.find((c) => c.id === chunkId) : chunks[0];
+    const chunk = chunkId ? chunks.find((c) => c.id === chunkId) : activeChunk;
     if (!chunk?.content?.trim()) {
       setNotice('Upload a PDF first, then generate a concept map.');
       return;
@@ -1216,6 +1365,23 @@ export function StudentApp() {
       });
       if (generated.nodes.length) {
         setConceptMapData(generated);
+        if (chunk.sourceId) {
+          setConceptMapLibrary((prev) => {
+            const rest = prev.filter((m) => m.sourceId !== chunk.sourceId);
+            return [
+              ...rest,
+              {
+                sourceId: chunk.sourceId,
+                title: generated.title || chunk.name.replace(/\.[^.]+$/, ''),
+                map: {
+                  title: generated.title || chunk.name.replace(/\.[^.]+$/, ''),
+                  nodes: generated.nodes,
+                  links: generated.links || [],
+                },
+              },
+            ];
+          });
+        }
         try {
           await saveConceptMapToLibrary({
             studentId,
@@ -1275,7 +1441,7 @@ export function StudentApp() {
   };
 
   const generateQuiz = async () => {
-    const sources = (chunks.length ? [chunks[0]] : []).map((c) => ({ name: c.name, content: c.content }));
+    const sources = (activeChunk ? [activeChunk] : []).map((c) => ({ name: c.name, content: c.content }));
     if (!sources.length) {
       setNotice('Upload a PDF first to generate AI quizzes.');
       return;
@@ -1289,13 +1455,16 @@ export function StudentApp() {
         count: Number(quizConfig.count),
         sources,
       });
-      setQuizResults((prev) => [result, ...prev]);
+      setQuizResults((prev) => [
+        { ...result, sourceId: activeChunk?.sourceId || null, sourceName: activeChunk?.name || '' },
+        ...prev,
+      ]);
       if (studentId) {
         try {
           await saveQuizToLibrary({
             studentId,
-            sourceName: chunks[0]?.name || '',
-            sourceId: chunks[0]?.sourceId,
+            sourceName: activeChunk?.name || '',
+            sourceId: activeChunk?.sourceId,
             mode: quizConfig.mode,
             difficulty: quizConfig.difficulty,
             result,
@@ -1365,15 +1534,22 @@ export function StudentApp() {
         <>
           <UploadCard
             onFile={onFileUpload}
-            onGenerateLatest={() => chunks[0] && generateForChunk(chunks[0])}
+            onGenerateLatest={() => activeChunk && generateForChunk(activeChunk)}
             chunks={chunks}
+            activePdfId={activePdfId}
+            onSelectPdf={setActivePdfId}
             isGenerating={isGenerating}
             progress={generationProgress}
             progressLabel={generationStage}
             isIndeterminate={generationIndeterminate}
+            isSignedIn={!!studentId}
+            onReloadLibrary={reloadLibraryFromAccount}
+            libraryReloadBusy={libraryReloadBusy}
           />
           <SubirArchivoPanel
             chunks={chunks}
+            activePdfId={activePdfId}
+            onSelectActivePdf={setActivePdfId}
             apartados={apartados}
             setApartados={setApartados}
             isAnalyzing={isAnalyzingSections}
@@ -1386,20 +1562,22 @@ export function StudentApp() {
       {tab === 'Flashcards' ? (
         <>
           <FlashcardDeck
-            cards={cards}
+            cards={deckCards}
+            sourceLabel={activeChunk?.name}
             showAnswer={showAnswer}
             setShowAnswer={setShowAnswer}
             onRight={() => markCard(true)}
             onWrong={() => markCard(false)}
             latestBatchAt={latestBatchAt}
-            onGenerateMore={() => chunks[0] && generateForChunk(chunks[0], { append: true })}
+            onGenerateMore={() => activeChunk && generateForChunk(activeChunk, { append: true })}
             onClear={() => {
-              setCards([]);
+              const drop = new Set(deckCards.map((c) => c.id));
+              setCards((prev) => prev.filter((c) => !drop.has(c.id)));
               setLatestBatchAt(null);
               setStudyMode(null);
             }}
           />
-          {cards.length ? (
+          {deckCards.length ? (
             <section className="panel mt-4">
               <h3 className="mb-3 text-lg font-semibold">Study Session (Spaced Repetition)</h3>
               {!studyMode ? (
@@ -1410,7 +1588,7 @@ export function StudentApp() {
               ) : (
                 <Suspense fallback={<section className="panel mt-2 text-sm text-muted">Loading study session...</section>}>
                   <SesionEstudio
-                    tarjetas={cards}
+                    tarjetas={deckCards}
                     soloRepaso={studyMode === 'review'}
                     onGuardar={(updates) =>
                       setCards((prev) =>
@@ -1425,9 +1603,14 @@ export function StudentApp() {
           ) : null}
         </>
       ) : null}
-      {tab === 'Notebook' ? (
+      <div
+        className={tab === 'Notebook' ? 'contents' : 'hidden'}
+        inert={tab !== 'Notebook'}
+        aria-hidden={tab !== 'Notebook'}
+      >
         <NotebookWorkspace
           chunks={chunks}
+          activePdfId={activePdfId}
           isBusy={isNotebookBusy}
           onError={(msg) => setNotice(msg)}
           conceptMapData={conceptMapData}
@@ -1435,8 +1618,11 @@ export function StudentApp() {
             if (citation?.source) setNotice(`Citation selected: ${citation.source}`);
           }}
           onCreateFlashcardFromSelection={(text) => {
-            if (!text?.trim()) return;
-            const generated = normalizeStudyCards([{ question: `Explain this highlighted idea`, answer: text.trim() }]);
+            if (!text?.trim() || !activeChunk) return;
+            const generated = tagFlashcardsForChunk(
+              activeChunk,
+              normalizeStudyCards([{ question: `Explain this highlighted idea`, answer: text.trim() }]),
+            );
             setCards((prev) => [...generated, ...prev]);
             setTab('Flashcards');
             setNotice('Flashcard created from selected text.');
@@ -1495,7 +1681,7 @@ export function StudentApp() {
             )
           }
         />
-      ) : null}
+      </div>
       {tab === 'LMS' ? (
         <LmsWorkspace studentId={studentId} setNotice={setNotice} />
       ) : null}
@@ -1509,6 +1695,7 @@ export function StudentApp() {
           setConfig={setQuizConfig}
           onGenerate={generateQuiz}
           results={quizResults}
+          activeSourceId={activeChunk?.sourceId || null}
           isGenerating={isGeneratingQuiz}
         />
       ) : null}
@@ -1529,6 +1716,7 @@ export function StudentApp() {
           onGenerate={generatePresentation}
           isGenerating={isGeneratingPresentation}
           chunks={chunks}
+          activeChunkId={activePdfId}
         />
       ) : null}
       {tab === 'Concept Map' ? (
@@ -1536,6 +1724,8 @@ export function StudentApp() {
           <ConceptMap
             apartados={apartados}
             chunks={chunks}
+            activePdfId={activePdfId}
+            onSelectPdf={setActivePdfId}
             conceptMapData={conceptMapData}
             isGenerating={isGeneratingConceptMap}
             onGenerate={generateConceptMap}
@@ -1613,7 +1803,7 @@ export function StudentApp() {
         <AiTutor
           tutorMessages={tutorMessages}
           setTutorMessages={setTutorMessages}
-          chunks={chunks}
+          chunks={activeChunk ? [activeChunk] : []}
           studentId={studentId}
           isBusy={isTutorBusy}
           streamingPreview={tutorStreamPreview}
@@ -1625,7 +1815,9 @@ export function StudentApp() {
             const controller = new AbortController();
             const kill = setTimeout(() => controller.abort(), 300000);
             try {
-              const sources = chunks.slice(0, 5).map((c) => ({ name: c.name, content: c.content }));
+              const sources = activeChunk
+                ? [{ name: activeChunk.name, content: activeChunk.content }]
+                : [];
               const reply = await streamTutorChat({
                 prompt,
                 sources,
@@ -2008,9 +2200,14 @@ function LmsWorkspace({ studentId, setNotice }) {
   );
 }
 
-function Quizzes({ config, setConfig, onGenerate, results, isGenerating }) {
+function Quizzes({ config, setConfig, onGenerate, results, isGenerating, activeSourceId = null }) {
   const [answers, setAnswers] = useState({});
   const [submitted, setSubmitted] = useState({});
+
+  const visibleResults = useMemo(() => {
+    if (!activeSourceId) return results;
+    return results.filter((r) => !r.sourceId || r.sourceId === activeSourceId);
+  }, [results, activeSourceId]);
 
   const answerKey = (quizId, qi) => `${quizId}-${qi}`;
   const setAnswer = (quizId, qi, choiceIdx) => {
@@ -2046,7 +2243,7 @@ function Quizzes({ config, setConfig, onGenerate, results, isGenerating }) {
         </button>
       </div>
       <ul className="space-y-4">
-        {results.map((r) => {
+        {visibleResults.map((r) => {
           const qs = Array.isArray(r.questions) ? r.questions : [];
           const done = submitted[r.id];
           return (
@@ -2115,7 +2312,13 @@ function Quizzes({ config, setConfig, onGenerate, results, isGenerating }) {
           );
         })}
       </ul>
-      {!results.length ? <p className="text-sm text-muted">Generate a quiz from your latest uploaded PDF content.</p> : null}
+      {!visibleResults.length ? (
+        <p className="text-sm text-muted">
+          {results.length && activeSourceId
+            ? 'No quizzes saved for the PDF selected in Ingest. Generate one below.'
+            : 'Generate a quiz from the PDF selected in Ingest.'}
+        </p>
+      ) : null}
     </section>
   );
 }
@@ -2160,17 +2363,54 @@ function Chat({ room, setRoom, messages, setMessages, studentId, setNotice }) {
   );
 }
 
-function Presentations({ presentations, setPresentations, onGenerate, isGenerating, chunks }) {
+function Presentations({ presentations, setPresentations, onGenerate, isGenerating, chunks, activeChunkId = '' }) {
   const [topic, setTopic] = useState('My Project');
   const [promptText, setPromptText] = useState('Create a classroom-ready deck with examples and references.');
   const [selectedChunkIds, setSelectedChunkIds] = useState([]);
   const [previewId, setPreviewId] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [draft, setDraft] = useState(null);
+  const [slideThumbByIndex, setSlideThumbByIndex] = useState({});
+  const [slideThumbsLoading, setSlideThumbsLoading] = useState(false);
   const hasChunks = chunks.length > 0;
+
+  useEffect(() => {
+    if (!activeChunkId || !chunks.some((c) => c.id === activeChunkId)) return;
+    setSelectedChunkIds([activeChunkId]);
+  }, [activeChunkId, chunks]);
+
+  useEffect(() => {
+    const pres = presentations.find((p) => p.id === previewId);
+    if (!pres?.slides?.length) {
+      setSlideThumbByIndex({});
+      setSlideThumbsLoading(false);
+      return;
+    }
+    let cancelled = false;
+    const deck = pres.title || '';
+    setSlideThumbsLoading(true);
+    setSlideThumbByIndex({});
+    (async () => {
+      const next = {};
+      for (let idx = 0; idx < pres.slides.length; idx += 1) {
+        if (cancelled) return;
+        const s = pres.slides[idx];
+        next[idx] = await fetchSlideHeroImageUrl(deck, idx, s.title);
+      }
+      if (!cancelled) {
+        setSlideThumbByIndex(next);
+        setSlideThumbsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [previewId, presentations]);
+
+  const fallbackChunk = chunks.find((c) => c.id === activeChunkId) || chunks[0];
   const selectedChunks = selectedChunkIds.length
     ? chunks.filter((c) => selectedChunkIds.includes(c.id))
-    : (chunks[0] ? [chunks[0]] : []);
+    : (fallbackChunk ? [fallbackChunk] : []);
   const previewPresentation = presentations.find((p) => p.id === previewId) || null;
 
   const downloadTextFile = (filename, content, type = 'text/plain') => {
@@ -2310,7 +2550,13 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
           onClick={() => onGenerate({
             topic: topic.trim() || (selectedChunks[0] ? selectedChunks[0].name.replace(/\.[^.]+$/, '') : ''),
             promptText,
-            chunkIds: selectedChunkIds.length ? selectedChunkIds : [chunks[0].id],
+            chunkIds: selectedChunkIds.length
+              ? selectedChunkIds
+              : activeChunkId && chunks.some((c) => c.id === activeChunkId)
+                ? [activeChunkId]
+                : chunks[0]
+                  ? [chunks[0].id]
+                  : [],
           })}
         >
           {isGenerating ? 'Generating presentation...' : 'Generate outline'}
@@ -2365,30 +2611,51 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
                 <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
                   <div className="rounded-lg border border-border bg-slate-50 p-2">
                     <p className="mb-1 text-xs font-medium text-muted">Visual (illustrative)</p>
-                    <img
-                      src={slideHeroImageUrl(previewPresentation.title, idx, s.title)}
-                      alt=""
-                      loading="lazy"
-                      className="h-44 w-full rounded-md border border-border object-cover"
-                    />
+                    {slideThumbsLoading && !slideThumbByIndex[idx] ? (
+                      <div className="flex h-44 w-full items-center justify-center rounded-md border border-border bg-slate-100 text-xs text-muted">
+                        Loading image…
+                      </div>
+                    ) : (
+                      <img
+                        src={slideThumbByIndex[idx] || slideHeroImageUrl(previewPresentation.title, idx, s.title)}
+                        alt=""
+                        loading="lazy"
+                        className="h-44 w-full rounded-md border border-border object-cover"
+                      />
+                    )}
                     <p className="mt-1 text-[11px] leading-snug text-muted">
-                      Placeholder photo from Picsum (seeded by slide). AI suggestion: {s.imageSuggestion || '—'}
+                      Image from Wikimedia Commons when available, else keyword-based placeholder. AI suggestion:{' '}
+                      {s.imageSuggestion || '—'}
                     </p>
                   </div>
                   <div className="rounded-lg border border-border bg-slate-50 p-2">
                     <p className="mb-1 text-xs font-medium text-muted">Graph</p>
                     {(s.bullets || []).length >= 2 ? (
-                      <div className="h-44">
-                        <Bar
-                          data={buildSlideGraphData(s)}
-                          options={{
-                            responsive: true,
-                            maintainAspectRatio: false,
-                            plugins: { legend: { display: false } },
-                            scales: { y: { beginAtZero: true, ticks: { stepSize: 2 } } },
-                          }}
-                        />
-                      </div>
+                      <>
+                        <div className="h-44">
+                          <Bar
+                            data={buildSlideGraphData(s)}
+                            options={{
+                              responsive: true,
+                              maintainAspectRatio: false,
+                              plugins: {
+                                legend: { display: false },
+                                title: {
+                                  display: true,
+                                  text: 'Word-count proxy per bullet (not real metrics)',
+                                  font: { size: 11 },
+                                  color: '#64748b',
+                                  padding: { bottom: 4 },
+                                },
+                              },
+                              scales: { y: { beginAtZero: true, ticks: { stepSize: 2 } } },
+                            }}
+                          />
+                        </div>
+                        <p className="mt-1 text-[11px] leading-snug text-muted">
+                          Bar heights reflect bullet length only (illustrative layout aid).
+                        </p>
+                      </>
                     ) : (
                       <p className="py-6 text-center text-xs text-muted">Add at least two bullet points to show a simple emphasis chart.</p>
                     )}
@@ -2645,14 +2912,25 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, streamingPrev
   const [prompt, setPrompt] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [voiceHint, setVoiceHint] = useState('');
+  const [voiceInputDisabled, setVoiceInputDisabled] = useState(false);
+
+  const voiceHttpsOk =
+    typeof window === 'undefined' ||
+    window.location.protocol === 'https:' ||
+    window.location.hostname === 'localhost' ||
+    window.location.hostname === '127.0.0.1';
 
   const startVoiceInput = () => {
+    if (voiceInputDisabled) return;
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
       const msg =
         'Voice input is not available in this browser. Use Chrome or Edge on desktop, or ensure the page is served over HTTPS (localhost is OK).';
       setVoiceHint(msg);
-      onNotify?.(msg);
+      return;
+    }
+    if (!voiceHttpsOk) {
+      setVoiceHint('Voice input usually requires HTTPS (except on localhost). Type your question below instead.');
       return;
     }
     setVoiceHint('');
@@ -2669,20 +2947,25 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, streamingPrev
     rec.onerror = (event) => {
       setIsListening(false);
       const code = event?.error || 'unknown';
-      const msg =
-        code === 'not-allowed'
-          ? 'Microphone permission denied — allow mic for this site in browser settings.'
-          : `Speech recognition error: ${code}`;
-      setVoiceHint(msg);
-      onNotify?.(msg);
+      if (code === 'not-allowed') {
+        setVoiceHint('Microphone access was blocked. You can still type your question in the box below.');
+        setVoiceInputDisabled(true);
+        return;
+      }
+      if (code === 'network') {
+        setVoiceHint(
+          'Voice recognition could not reach Google’s speech service (network or browser policy). Typing works the same — use the text box below.',
+        );
+        setVoiceInputDisabled(true);
+        return;
+      }
+      setVoiceHint(`Voice input paused (${code}). Type below instead, or refresh the page to try again.`);
     };
     try {
       rec.start();
     } catch (e) {
       setIsListening(false);
-      const msg = e?.message || 'Could not start speech recognition.';
-      setVoiceHint(msg);
-      onNotify?.(msg);
+      setVoiceHint(e?.message || 'Could not start speech recognition. Type your question below.');
     }
   };
 
@@ -2699,10 +2982,15 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, streamingPrev
     <section className="panel">
       <h3 className="mb-3 text-lg font-semibold">AI Tutor</h3>
       <p className="mb-2 text-xs text-muted">
-        Powered by Ollama. Uses up to {Math.min(5, chunks.length || 0)} uploaded PDF{chunks.length === 1 ? '' : 's'} for context
-        {chunks.length ? ` (${chunks.slice(0, 5).map((c) => c.name).join(', ')})` : ' — upload PDFs in Ingest for source-grounded answers.'}.
+        Powered by Ollama. Uses the PDF currently selected in Ingest for context
+        {chunks[0] ? ` (${chunks[0].name})` : ' — upload PDFs in Ingest and select one for source-grounded answers.'}.
       </p>
-      {voiceHint ? <p className="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-950">{voiceHint}</p> : null}
+      <p className="mb-2 text-[11px] leading-snug text-muted">
+        Tip: type your question in the box below. Push-to-talk is optional and needs a working mic and network in some browsers.
+      </p>
+      {voiceHint ? (
+        <p className="mb-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-800">{voiceHint}</p>
+      ) : null}
       <textarea className="input min-h-24" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Ask study guidance..." />
       {isBusy && streamingPreview ? (
         <div
@@ -2738,8 +3026,14 @@ function AiTutor({ tutorMessages, setTutorMessages, onAsk, isBusy, streamingPrev
         >
           {isBusy ? 'Thinking...' : 'Ask Tutor'}
         </button>
-        <button type="button" className="btn-ghost" onClick={startVoiceInput} disabled={isListening || isBusy}>
-          {isListening ? 'Listening...' : 'Push-to-talk'}
+        <button
+          type="button"
+          className="btn-ghost"
+          onClick={startVoiceInput}
+          disabled={isListening || isBusy || voiceInputDisabled}
+          title={voiceInputDisabled ? 'Voice input disabled after an error; refresh to retry.' : undefined}
+        >
+          {voiceInputDisabled ? 'Voice off' : isListening ? 'Listening...' : 'Push-to-talk'}
         </button>
       </div>
       <ul className="mt-3 space-y-2">

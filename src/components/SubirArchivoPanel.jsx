@@ -1,18 +1,31 @@
-import { useState } from 'react';
-
-export default function SubirArchivoPanel({ chunks, apartados, setApartados, isAnalyzing, onAnalizar }) {
-  const [selectedChunkId, setSelectedChunkId] = useState('');
-  const selectedChunk = selectedChunkId ? chunks.find((c) => c.id === selectedChunkId) : chunks[0];
+export default function SubirArchivoPanel({
+  chunks,
+  apartados,
+  setApartados,
+  isAnalyzing,
+  onAnalizar,
+  activePdfId = '',
+  onSelectActivePdf,
+}) {
+  const selectedChunk = chunks.find((c) => c.id === activePdfId) || chunks[0];
 
   return (
     <section className="panel mt-4">
       <h3 className="mb-1 text-lg font-semibold">Document Structure Analyzer</h3>
       <p className="mb-3 text-xs text-muted">Extract key sections from uploaded materials and start tracking progress.</p>
       <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_auto]">
-        <select className="input" value={selectedChunkId} onChange={(e) => setSelectedChunkId(e.target.value)} disabled={!chunks.length}>
+        <select
+          className="input"
+          value={activePdfId || ''}
+          onChange={(e) => onSelectActivePdf?.(e.target.value)}
+          disabled={!chunks.length}
+        >
           {!chunks.length ? <option value="">Upload a PDF first</option> : null}
-          {chunks.length ? <option value="">Latest upload ({chunks[0].name})</option> : null}
-          {chunks.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          {chunks.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+            </option>
+          ))}
         </select>
         <button
           className="btn-primary"

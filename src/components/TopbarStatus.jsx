@@ -22,8 +22,22 @@ export default function TopbarStatus({
         <p className="text-xs text-slate-600">{latestBatchAt ? `Last generated: ${latestBatchAt}` : 'Upload a PDF to start.'}</p>
       </div>
       <div className="flex flex-wrap items-center gap-2 text-sm text-slate-900">
-        <button type="button" className="btn-ghost !px-3 !py-1.5 text-xs" onClick={onOpenSearch}>
-          Search (Ctrl/Cmd+K)
+        <button
+          type="button"
+          className="btn-ghost !inline-flex !items-center !gap-1.5 !px-3 !py-1.5 text-xs"
+          aria-label="Open search (Command K or Control K)"
+          onClick={onOpenSearch}
+        >
+          <span>Search</span>
+          <kbd className="rounded border border-slate-200 bg-slate-50 px-1 font-mono text-[10px] text-slate-700 shadow-sm">
+            ⌘K
+          </kbd>
+          <span className="text-slate-400" aria-hidden>
+            /
+          </span>
+          <kbd className="rounded border border-slate-200 bg-slate-50 px-1 font-mono text-[10px] text-slate-700 shadow-sm">
+            Ctrl+K
+          </kbd>
         </button>
         {onOpenLocalLog ? (
           <button type="button" className="btn-ghost !px-3 !py-1.5 text-xs" onClick={onOpenLocalLog}>

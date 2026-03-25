@@ -1,7 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+
+const TTS_VOICE_STORAGE_KEY = 'sa-notebook-tts-voice-uri';
 
 export default function NotebookWorkspace({
   chunks,
+  activePdfId = '',
   onSourceChat,
   onSummary,
   onStudyGuide,
@@ -32,21 +35,89 @@ export default function NotebookWorkspace({
     compare: '',
     audio: '',
   });
+  const [ttsVoices, setTtsVoices] = useState([]);
+  const [ttsVoiceUri, setTtsVoiceUri] = useState(() => {
+    try {
+      return localStorage.getItem(TTS_VOICE_STORAGE_KEY) || '';
+    } catch {
+      return '';
+    }
+  });
+  const [ttsSpeaking, setTtsSpeaking] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return undefined;
+    const load = () => setTtsVoices(window.speechSynthesis.getVoices());
+    load();
+    window.speechSynthesis.addEventListener('voiceschanged', load);
+    return () => {
+      window.speechSynthesis.removeEventListener('voiceschanged', load);
+      window.speechSynthesis.cancel();
+    };
+  }, []);
+
+  const pickUtteranceVoice = useCallback(() => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return null;
+    const list = window.speechSynthesis.getVoices();
+    if (!list.length) return null;
+    if (ttsVoiceUri) {
+      const hit = list.find((v) => v.voiceURI === ttsVoiceUri);
+      if (hit) return hit;
+    }
+    return list.find((v) => /^en(-|$)/i.test(v.lang || '')) || list[0];
+  }, [ttsVoiceUri]);
+
+  const stopTts = useCallback(() => {
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    setTtsSpeaking(false);
+  }, []);
+
+  const playTts = useCallback(
+    (text) => {
+      if (typeof window === 'undefined' || !window.speechSynthesis || !String(text || '').trim()) return;
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(String(text).slice(0, 32000));
+      const v = pickUtteranceVoice();
+      if (v) u.voice = v;
+      u.onend = () => setTtsSpeaking(false);
+      u.onerror = () => setTtsSpeaking(false);
+      setTtsSpeaking(true);
+      window.speechSynthesis.speak(u);
+    },
+    [pickUtteranceVoice],
+  );
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return undefined;
+    return () => window.speechSynthesis.cancel();
+  }, []);
+
+  useEffect(() => {
+    if (!ttsVoiceUri) return;
+    try {
+      localStorage.setItem(TTS_VOICE_STORAGE_KEY, ttsVoiceUri);
+    } catch {
+      /* ignore */
+    }
+  }, [ttsVoiceUri]);
 
   useEffect(() => {
     if (!chunks.length) {
       setSelectedChunkIds([]);
       return;
     }
+    if (activePdfId && chunks.some((c) => c.id === activePdfId)) {
+      setSelectedChunkIds([activePdfId]);
+      return;
+    }
     setSelectedChunkIds((prev) => {
-      if (prev.length) {
-        const valid = new Set(chunks.map((c) => c.id));
-        const next = prev.filter((id) => valid.has(id));
-        return next.length ? next : [chunks[0].id];
-      }
-      return [chunks[0].id];
+      const valid = new Set(chunks.map((c) => c.id));
+      const next = prev.filter((id) => valid.has(id));
+      return next.length ? next : [chunks[0].id];
     });
-  }, [chunks]);
+  }, [chunks, activePdfId]);
 
   const toggleChunk = (id) => {
     setSelectedChunkIds((prev) => {
@@ -281,13 +352,47 @@ export default function NotebookWorkspace({
           {audioOverview ? (
             <div className="space-y-2 text-xs">
               <p className="font-semibold">{audioOverview.title}</p>
-              {audioOverview.audioUrl ? (
-                <audio controls src={audioOverview.audioUrl} className="w-full" />
+              <p className="text-[11px] leading-snug text-muted">
+                Ollama wrote the script below. Playback uses your browser&apos;s built-in voices (not Ollama).
+              </p>
+              {audioOverview.audioUrl ? <audio controls src={audioOverview.audioUrl} className="w-full" /> : null}
+              {typeof window !== 'undefined' && window.speechSynthesis ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="flex min-w-0 flex-1 items-center gap-1">
+                    <span className="shrink-0 text-muted">Voice</span>
+                    <select
+                      className="input min-w-0 flex-1 py-1 text-xs"
+                      value={ttsVoiceUri}
+                      onChange={(e) => setTtsVoiceUri(e.target.value)}
+                    >
+                      <option value="">Default (English if available)</option>
+                      {ttsVoices.map((v) => (
+                        <option key={v.voiceURI} value={v.voiceURI}>
+                          {v.name} ({v.lang || '?'})
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {ttsSpeaking ? (
+                    <button type="button" className="btn-ghost !px-2 !py-1 text-xs" onClick={stopTts}>
+                      Stop
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn-primary !px-2 !py-1 text-xs"
+                      onClick={() => playTts(audioOverview.script)}
+                    >
+                      Play overview
+                    </button>
+                  )}
+                </div>
               ) : (
-                <pre className="max-h-36 overflow-auto whitespace-pre-wrap rounded border border-border bg-slate-50 p-2 text-muted">
-                  {audioOverview.script}
-                </pre>
+                <p className="text-[11px] text-muted">Speech synthesis is not available in this browser.</p>
               )}
+              <pre className="max-h-36 overflow-auto whitespace-pre-wrap rounded border border-border bg-slate-50 p-2 text-muted">
+                {audioOverview.script}
+              </pre>
             </div>
           ) : (
             <p className="text-xs text-muted">No audio/script generated yet.</p>

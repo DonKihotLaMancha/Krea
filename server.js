@@ -571,6 +571,70 @@ app.get('/api/health', async (_req, res) => {
   });
 });
 
+const IMAGE_SEARCH_STOPWORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'for', 'with', 'from', 'this', 'that', 'into', 'about', 'using', 'your', 'our',
+  'are', 'was', 'were', 'been', 'being', 'have', 'has', 'had', 'does', 'did', 'will', 'would', 'could', 'should',
+  'showing', 'illustrative', 'slide', 'presentation', 'overview', 'flowchart', 'diagram',
+]);
+
+function tokenizeForImageSearch(q) {
+  return String(q || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !IMAGE_SEARCH_STOPWORDS.has(w))
+    .slice(0, 12);
+}
+
+function isAllowedSlideImageUrl(url) {
+  try {
+    const u = new URL(String(url));
+    if (u.protocol !== 'https:') return false;
+    const h = u.hostname.toLowerCase();
+    if (h === 'upload.wikimedia.org' || h.endsWith('.wikimedia.org')) return true;
+    if (h === 'loremflickr.com') return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/** Topic-related slide hero: Wikimedia Commons search, then keyword LoremFlickr (no API keys). */
+app.get('/api/slide-image', async (req, res) => {
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  const raw = String(req.query.q || '').trim().slice(0, 280);
+  const tokens = tokenizeForImageSearch(raw);
+  const search = tokens.slice(0, 5).join(' ') || 'education learning';
+  const tags = tokens.slice(0, 3).join(',') || 'education,learning,study';
+
+  try {
+    const api =
+      'https://commons.wikimedia.org/w/api.php?action=query&generator=search' +
+      `&gsrsearch=${encodeURIComponent(search)}` +
+      '&gsrnamespace=6&gsrlimit=8&prop=imageinfo&iiprop=url|thumburl&iiurlwidth=960&format=json';
+    const wResp = await fetch(api, {
+      headers: { 'User-Agent': 'StudentAssistant/1.0 (educational; +https://github.com/)' },
+      signal: AbortSignal.timeout(12000),
+    });
+    if (!wResp.ok) throw new Error(`wikimedia ${wResp.status}`);
+    const data = await wResp.json();
+    const pages = data?.query?.pages;
+    if (pages && typeof pages === 'object') {
+      for (const pid of Object.keys(pages)) {
+        const info = pages[pid]?.imageinfo?.[0];
+        const thumb = info?.thumburl || info?.url;
+        if (thumb && isAllowedSlideImageUrl(thumb)) {
+          return res.json({ url: thumb, source: 'wikimedia' });
+        }
+      }
+    }
+    throw new Error('no image');
+  } catch {
+    const fallback = `https://loremflickr.com/960/540/${encodeURIComponent(tags)}`;
+    return res.json({ url: fallback, source: 'loremflickr' });
+  }
+});
+
 /** Recent Ollama/API errors for local debugging (no secrets). */
 app.get('/api/debug/logs', (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -759,7 +823,7 @@ app.get('/api/library', async (req, res) => {
         .limit(1000),
       supabase
         .from('concept_maps')
-        .select('id,title,created_at,concept_map_nodes(id,label,description),concept_map_edges(id,source_node_id,target_node_id,label)')
+        .select('id,title,source_id,created_at,concept_map_nodes(id,label,description),concept_map_edges(id,source_node_id,target_node_id,label)')
         .eq('owner_id', studentId)
         .order('created_at', { ascending: false })
         .limit(20),
@@ -779,7 +843,7 @@ app.get('/api/library', async (req, res) => {
       Promise.resolve({ data: [], error: null }),
       supabase
         .from('quizzes')
-        .select('id,mode,difficulty,question_count,created_at')
+        .select('id,mode,difficulty,question_count,source_id,created_at')
         .eq('owner_id', studentId)
         .is('deleted_at', null)
         .order('created_at', { ascending: false })
@@ -928,6 +992,7 @@ app.get('/api/library', async (req, res) => {
       correct: 0,
       sec: Math.max(120, Number(q.question_count || 0) * 45),
       difficulty: q.difficulty || 'medium',
+      sourceId: q.source_id || null,
       questions: groupedQuizQuestions.get(q.id) || [],
     }));
 
@@ -1001,6 +1066,7 @@ app.get('/api/library', async (req, res) => {
       maps: (maps || []).map((m) => ({
         title: m.title,
         id: m.id,
+        sourceId: m.source_id || null,
         createdAt: m.created_at,
         map: {
           title: m.title,

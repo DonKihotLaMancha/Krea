@@ -76,10 +76,58 @@ function buildNodesFromMap(mapData) {
   return out;
 }
 
-export default function ConceptMap({ apartados, chunks = [], conceptMapData = null, isGenerating = false, onGenerate }) {
-  const [selectedChunkId, setSelectedChunkId] = useState('');
+function nodeDisplayLabel(n) {
+  const raw = String(n?.nombre ?? n?.label ?? '').trim();
+  if (raw) return raw.length > 48 ? `${raw.slice(0, 46)}…` : raw;
+  return 'Topic';
+}
+
+/** Up to maxLines lines, ~maxCharsPerLine chars each (word-aware). */
+function splitLabelToLines(text, maxLines, maxCharsPerLine) {
+  const t = String(text || 'Topic').trim() || 'Topic';
+  const words = t.split(/\s+/).filter(Boolean);
+  const lines = [];
+  let cur = '';
+  for (const w of words) {
+    const next = cur ? `${cur} ${w}` : w;
+    if (next.length > maxCharsPerLine && cur) {
+      lines.push(cur);
+      cur = w;
+      if (lines.length >= maxLines) break;
+    } else {
+      cur = next;
+    }
+  }
+  if (lines.length < maxLines && cur) lines.push(cur);
+  if (!lines.length) lines.push(t.slice(0, maxCharsPerLine));
+  if (lines.length === maxLines && words.join(' ').length > lines.join(' ').length) {
+    const last = lines[maxLines - 1];
+    if (last.length > 2) lines[maxLines - 1] = `${last.slice(0, Math.max(1, maxCharsPerLine - 1))}…`;
+  }
+  return lines.slice(0, maxLines);
+}
+
+function circleRadiusForLabel(labelText, level, isActive) {
+  const len = labelText.length;
+  const base = level === 0 ? 50 : isActive ? 42 : 38;
+  const grow = Math.min(40, Math.ceil(len * 1.05));
+  const r = base + grow;
+  const rMin = level === 0 ? 46 : 34;
+  const rMax = level === 0 ? 118 : 92;
+  return Math.max(rMin, Math.min(rMax, r));
+}
+
+export default function ConceptMap({
+  apartados,
+  chunks = [],
+  activePdfId = '',
+  onSelectPdf,
+  conceptMapData = null,
+  isGenerating = false,
+  onGenerate,
+}) {
   const [selectedId, setSelectedId] = useState(null);
-  const selectedChunk = selectedChunkId ? chunks.find((c) => c.id === selectedChunkId) : chunks[0];
+  const selectedChunk = chunks.find((c) => c.id === activePdfId) || chunks[0];
   const isFromAiMap = !!(conceptMapData?.nodes?.length);
 
   const nodes = useMemo(
@@ -91,8 +139,10 @@ export default function ConceptMap({ apartados, chunks = [], conceptMapData = nu
 
   const hubLabel = useMemo(() => {
     const n0 = nodes.find((n) => n.level === 0);
-    if (n0?.nombre) return String(n0.nombre).slice(0, 22);
-    return String(conceptMapData?.title || 'Main Topic').slice(0, 22);
+    const fromNode = String(n0?.nombre || n0?.label || '').trim();
+    if (fromNode) return fromNode.length > 36 ? `${fromNode.slice(0, 34)}…` : fromNode;
+    const t = String(conceptMapData?.title || 'Main Topic').trim();
+    return t.length > 36 ? `${t.slice(0, 34)}…` : t;
   }, [nodes, conceptMapData?.title]);
 
   const centerNode = useMemo(() => {
@@ -176,12 +226,11 @@ export default function ConceptMap({ apartados, chunks = [], conceptMapData = nu
       <div className="mb-3 grid grid-cols-1 gap-2 md:grid-cols-[1fr_auto]">
         <select
           className="input"
-          value={selectedChunkId}
-          onChange={(e) => setSelectedChunkId(e.target.value)}
+          value={activePdfId || ''}
+          onChange={(e) => onSelectPdf?.(e.target.value)}
           disabled={!chunks.length || isGenerating}
         >
           {!chunks.length ? <option value="">Upload a PDF first</option> : null}
-          {chunks.length ? <option value="">Latest upload ({chunks[0].name})</option> : null}
           {chunks.map((c) => (
             <option key={c.id} value={c.id}>
               {c.name}
@@ -249,31 +298,82 @@ export default function ConceptMap({ apartados, chunks = [], conceptMapData = nu
                   />
                 ))}
                 <g>
-                  <circle cx={centerNode.x} cy={centerNode.y} r="56" fill="#4f46e5" opacity="0.95" />
-                  <text x={centerNode.x} y={centerNode.y + 6} textAnchor="middle" fill="#fff" fontSize="15" fontWeight="700">
-                    {hubLabel}
-                  </text>
+                  {(() => {
+                    const hr = circleRadiusForLabel(hubLabel, 0, false);
+                    const hLines = splitLabelToLines(hubLabel, 3, 14);
+                    const lh = 13;
+                    const startDy = -((hLines.length - 1) * lh) / 2;
+                    return (
+                      <>
+                        <circle cx={centerNode.x} cy={centerNode.y} r={hr} fill="#4f46e5" opacity="0.95" />
+                        <text
+                          x={centerNode.x}
+                          y={centerNode.y}
+                          textAnchor="middle"
+                          fill="#fff"
+                          fontSize="14"
+                          fontWeight="700"
+                        >
+                          {hLines.map((line, i) => (
+                            <tspan key={i} x={centerNode.x} dy={i === 0 ? startDy : lh}>
+                              {line}
+                            </tspan>
+                          ))}
+                        </text>
+                      </>
+                    );
+                  })()}
                 </g>
               </>
             ) : nodes.some((n) => n.level === 0) ? null : (
               <g>
-                <circle cx={centerNode.x} cy={centerNode.y} r="48" fill="#4f46e5" opacity="0.9" />
-                <text x={centerNode.x} y={centerNode.y + 5} textAnchor="middle" fill="#fff" fontSize="14" fontWeight="700">
-                  {hubLabel}
-                </text>
+                {(() => {
+                  const hr = circleRadiusForLabel(hubLabel, 0, false);
+                  const hLines = splitLabelToLines(hubLabel, 3, 14);
+                  const lh = 13;
+                  const startDy = -((hLines.length - 1) * lh) / 2;
+                  return (
+                    <>
+                      <circle cx={centerNode.x} cy={centerNode.y} r={hr} fill="#4f46e5" opacity="0.9" />
+                      <text
+                        x={centerNode.x}
+                        y={centerNode.y}
+                        textAnchor="middle"
+                        fill="#fff"
+                        fontSize="13"
+                        fontWeight="700"
+                      >
+                        {hLines.map((line, i) => (
+                          <tspan key={i} x={centerNode.x} dy={i === 0 ? startDy : lh}>
+                            {line}
+                          </tspan>
+                        ))}
+                      </text>
+                    </>
+                  );
+                })()}
               </g>
             )}
 
             {nodes.map((n) => {
               const isActive = selected?.id === n.id;
-              const label = String(n.nombre || '').slice(0, 28);
-              const r = n.level === 0 ? (isActive ? 52 : 48) : isActive ? 44 : 38;
+              const label = nodeDisplayLabel(n);
+              const r = circleRadiusForLabel(label, n.level === 0 ? 0 : Number(n.level) || 1, isActive);
               const fill = n.level === 0 ? '#4f46e5' : isActive ? '#7c3aed' : '#0ea5e9';
+              const maxChars = n.level === 0 ? 16 : 14;
+              const lines = splitLabelToLines(label, 3, maxChars);
+              const lh = n.level === 0 ? 12 : 10;
+              const fs = n.level === 0 ? 12 : 10;
+              const startDy = -((lines.length - 1) * lh) / 2;
               return (
                 <g key={n.id} className="cursor-pointer" onClick={() => setSelectedId(n.id)}>
                   <circle cx={n.x} cy={n.y} r={r} fill={fill} opacity="0.93" />
-                  <text x={n.x} y={n.y + 4} textAnchor="middle" fill="#fff" fontSize={n.level === 0 ? 13 : 11} fontWeight="600">
-                    {label}
+                  <text x={n.x} y={n.y} textAnchor="middle" fill="#fff" fontSize={fs} fontWeight="600">
+                    {lines.map((line, i) => (
+                      <tspan key={i} x={n.x} dy={i === 0 ? startDy : lh}>
+                        {line}
+                      </tspan>
+                    ))}
                   </text>
                 </g>
               );

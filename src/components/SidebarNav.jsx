@@ -1,5 +1,4 @@
-import { Link } from 'react-router-dom';
-import { BookOpen, ClipboardList, FileQuestion, GitBranch, GraduationCap, Library, MessageSquare, Presentation, Upload, UserRoundCog } from 'lucide-react';
+import { BookOpen, ClipboardList, FileQuestion, GitBranch, GraduationCap, Library, MessageSquare, Presentation, Upload } from 'lucide-react';
 
 const icons = {
   Ingest: Upload,
@@ -66,16 +65,6 @@ export default function SidebarNav({ tabs, tab, onChange, collapsed, onToggleCol
           );
         })}
       </nav>
-      <div className={`mt-3 border-t border-white/15 pt-3 ${collapsed ? 'text-center' : ''}`}>
-        <Link
-          to="/teacher"
-          className="flex w-full items-center justify-center gap-2 rounded-lg border border-white/20 bg-white/10 px-3 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-white/15"
-          title="Teacher portal"
-        >
-          <UserRoundCog size={16} className="shrink-0 text-white/90" />
-          {!collapsed ? <span>Teacher portal</span> : null}
-        </Link>
-      </div>
     </aside>
   );
 }
