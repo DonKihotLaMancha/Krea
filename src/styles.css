@@ -14,16 +14,16 @@
   body {
     margin: 0;
     font-family: Inter, system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
-    color: #0f172a;
-    background-color: #f5f5f5;
+    color: #111111;
+    background-color: #ffffff;
     background-image: none;
     -webkit-font-smoothing: antialiased;
   }
   #root {
     min-height: 100vh;
     min-height: 100dvh;
-    color: #0f172a;
-    background-color: #f5f5f5;
+    color: #111111;
+    background-color: #ffffff;
   }
 }
 
@@ -32,7 +32,7 @@
     @apply rounded-xl px-3 py-2 text-sm outline-none;
     border: 1px solid #c7cdd1;
     background: #ffffff;
-    color: #0f172a;
+    color: #111111;
     box-shadow: none;
   }
   .input:focus {
@@ -44,17 +44,17 @@
   }
   .btn-primary {
     @apply btn text-white disabled:opacity-50;
-    background-color: #0374b7;
+    background-color: #2e7d32;
     box-shadow: none;
   }
   .btn-primary:hover:not(:disabled) {
-    background-color: #03659f;
+    background-color: #27682a;
   }
   .btn-ghost {
     @apply btn disabled:opacity-50;
     border: 1px solid #c7cdd1;
     background: #ffffff;
-    color: #0f172a;
+    color: #111111;
   }
   .btn-ghost:hover:not(:disabled) {
     background: #f0f2f4;
@@ -65,7 +65,7 @@
     border: 1px solid #e0e0e0;
     background: #ffffff;
     box-shadow: none;
-    color: #0f172a;
+    color: #111111;
     backdrop-filter: none;
   }
 }
