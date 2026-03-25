@@ -41,10 +41,58 @@ const tabs = ['Ingest', 'LMS', 'Flashcards', 'Notebook', 'Concept Map', 'Tasks',
 
 /** Local-only PDF backup (before sign-in). Cleared after successful sync to Supabase. */
 const LOCAL_PDFS_KEY = 'sa_account_pdfs_v1';
+const LOCAL_PDFS_MAX_BYTES = 4_500_000;
+/** Signed-in: last known workspace PDFs for refresh/offline resilience (per user). */
+const WORKSPACE_PDF_CACHE_PREFIX = 'sa_workspace_pdfs_';
+
+function workspacePdfCacheKey(studentId) {
+  return `${WORKSPACE_PDF_CACHE_PREFIX}${studentId}`;
+}
+
+function readWorkspacePdfCache(studentId) {
+  if (!studentId) return null;
+  try {
+    const raw = localStorage.getItem(workspacePdfCacheKey(studentId));
+    if (!raw) return null;
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr) || !arr.length) return null;
+    return arr.filter((c) => c && c.id && c.name);
+  } catch {
+    return null;
+  }
+}
+
+function writeWorkspacePdfCache(studentId, chunks) {
+  if (!studentId || !Array.isArray(chunks)) return;
+  try {
+    const slim = chunks.map((c) => ({
+      id: c.id,
+      name: c.name,
+      content: c.content || '',
+      createdAt: c.createdAt ?? null,
+      sourceId: c.sourceId ?? null,
+      storagePath: c.storagePath ?? null,
+      sizeBytes: c.sizeBytes != null ? c.sizeBytes : null,
+    }));
+    const payload = JSON.stringify(slim);
+    if (payload.length > LOCAL_PDFS_MAX_BYTES) return;
+    localStorage.setItem(workspacePdfCacheKey(studentId), payload);
+  } catch {
+    /* quota / private mode */
+  }
+}
+
+function clearWorkspacePdfCache(studentId) {
+  if (!studentId) return;
+  try {
+    localStorage.removeItem(workspacePdfCacheKey(studentId));
+  } catch {
+    /* ignore */
+  }
+}
 /** Client fetch budget for /api/* → Ollama. Keep above server OLLAMA_TIMEOUT_MS (flashcards may run two model calls). */
 const AI_REQUEST_TIMEOUT_MS = 180000;
 const AI_FLASHCARDS_TIMEOUT_MS = 300000;
-const LOCAL_PDFS_MAX_BYTES = 4_500_000;
 
 function mapLibraryPdfToChunk(p) {
   return {
@@ -746,8 +794,14 @@ export function StudentApp() {
       applyLibraryData(data);
       const n = Array.isArray(data?.pdfs) ? data.pdfs.length : 0;
       setNotice(n ? `Loaded ${n} PDF${n === 1 ? '' : 's'} from your account.` : 'Your account has no saved PDFs yet — upload one below.');
-    } catch {
-      setNotice('Could not refresh library from your account. Check your connection and try again.');
+    } catch (err) {
+      const cached = readWorkspacePdfCache(studentId);
+      if (cached?.length) setChunks(cached);
+      setNotice(
+        `Could not refresh: ${err?.message || 'connection error'}. ${
+          cached?.length ? 'Kept PDFs from this browser’s last successful sync.' : 'No local backup found — check the server and Supabase.'
+        }`,
+      );
     } finally {
       setLibraryReloadBusy(false);
     }
@@ -907,11 +961,22 @@ export function StudentApp() {
         } catch {
           /* ignore migration */
         }
+        const cached = readWorkspacePdfCache(studentId);
+        if (cached?.length) setChunks(cached);
         const data = await loadLibrary(studentId);
         if (!mounted) return;
         applyLibraryData(data);
-      } catch {
-        // Keep app usable even if DB bootstrap fails.
+      } catch (e) {
+        if (!mounted) return;
+        const cached = readWorkspacePdfCache(studentId);
+        if (cached?.length) setChunks(cached);
+        setNotice(
+          `Could not load your library: ${e?.message || 'network or server error'}. ${
+            cached?.length
+              ? 'Showing the last copy saved in this browser — tap “Refresh from account” when you are online.'
+              : 'Check that the API server is running and Supabase is configured, then tap “Refresh from account”.'
+          }`,
+        );
       }
     };
     bootstrapDb();
@@ -970,6 +1035,16 @@ export function StudentApp() {
       }
     }
   }, [chunks, studentId, setNotice]);
+
+  /** Keep a signed-in browser copy of workspace PDFs so refresh survives brief API/DB failures. */
+  useEffect(() => {
+    if (!studentId) return undefined;
+    const t = setTimeout(() => {
+      if (chunks.length) writeWorkspacePdfCache(studentId, chunks);
+      else clearWorkspacePdfCache(studentId);
+    }, 400);
+    return () => clearTimeout(t);
+  }, [chunks, studentId]);
 
   useEffect(() => {
     const head = activeChunk;

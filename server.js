@@ -920,34 +920,65 @@ app.get('/api/library', async (req, res) => {
         chatMessagesErr || tutorConversationsErr || tutorMessagesErr || sectionsErr
       );
     }
-    const sourcePdfs = (sources || []).map((s) => {
-        const sc = s.source_contents;
-        const text = Array.isArray(sc) ? sc[0]?.cleaned_text : sc?.cleaned_text;
-        return {
-          id: s.id,
-          name: s.title,
-          content: text || '',
-          createdAt: s.created_at,
-          storagePath: s.storage_path || null,
-          sizeBytes: s.size_bytes != null ? Number(s.size_bytes) : null,
-        };
-      });
-    let pdfs = sourcePdfs;
-    if (!pdfs.length) {
-      const { data: legacyPdfs, error: legacyErr } = await supabase
-        .from('student_pdfs')
-        .select('id,name,content,created_at')
-        .eq('student_id', studentId)
-        .order('created_at', { ascending: false })
-        .limit(1000);
-      if (legacyErr) throw legacyErr;
-      pdfs = (legacyPdfs || []).map((p) => ({
-        id: p.id,
-        name: p.name,
-        content: p.content || '',
-        createdAt: p.created_at,
-      }));
+    let sourcePdfs = (sources || []).map((s) => {
+      const sc = s.source_contents;
+      const text = Array.isArray(sc) ? sc[0]?.cleaned_text : sc?.cleaned_text;
+      return {
+        id: s.id,
+        name: s.title,
+        content: String(text || ''),
+        createdAt: s.created_at,
+        storagePath: s.storage_path || null,
+        sizeBytes: s.size_bytes != null ? Number(s.size_bytes) : null,
+      };
+    });
+    /** Nested embed can miss text (RLS/embed quirks); fill from source_contents directly. */
+    const missingTextIds = sourcePdfs.filter((p) => !String(p.content || '').trim()).map((p) => p.id);
+    if (missingTextIds.length) {
+      const { data: contentRows, error: contentFillErr } = await supabase
+        .from('source_contents')
+        .select('source_id, cleaned_text')
+        .in('source_id', missingTextIds);
+      if (!contentFillErr && contentRows?.length) {
+        const bySid = new Map(contentRows.map((r) => [r.source_id, String(r.cleaned_text || '')]));
+        sourcePdfs = sourcePdfs.map((p) =>
+          String(p.content || '').trim() ? p : { ...p, content: bySid.get(p.id) || '' },
+        );
+      }
     }
+    const { data: legacyPdfs, error: legacyErr } = await supabase
+      .from('student_pdfs')
+      .select('id,name,content,created_at')
+      .eq('student_id', studentId)
+      .order('created_at', { ascending: false })
+      .limit(1000);
+    if (legacyErr) throw legacyErr;
+    const legacyMapped = (legacyPdfs || []).map((p) => ({
+      id: p.id,
+      name: p.name,
+      content: String(p.content || ''),
+      createdAt: p.created_at,
+      storagePath: null,
+      sizeBytes: null,
+    }));
+    /** Merge: prefer `sources` rows; add legacy-only uploads; fill empty source text from legacy same filename. */
+    const merged = [...sourcePdfs];
+    const norm = (n) => String(n || '').trim().toLowerCase();
+    for (const leg of legacyMapped) {
+      if (!leg.content.trim()) continue;
+      const idx = merged.findIndex((p) => norm(p.name) === norm(leg.name));
+      if (idx < 0) {
+        merged.push(leg);
+      } else if (!String(merged[idx].content || '').trim()) {
+        merged[idx] = { ...merged[idx], content: leg.content };
+      }
+    }
+    merged.sort((a, b) => {
+      const ta = new Date(a.createdAt || 0).getTime();
+      const tb = new Date(b.createdAt || 0).getTime();
+      return tb - ta;
+    });
+    const pdfs = merged;
     const setIds = (flashcardSets || []).map((s) => s.id).filter(Boolean);
     const scopedFlashcardRows = [];
     if (setIds.length) {

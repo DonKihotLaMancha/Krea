@@ -40,7 +40,7 @@ export default function UploadCard({
         </div>
         <p className="mb-3 text-xs leading-relaxed text-muted">
           {isSignedIn
-            ? 'These are the documents in your workspace (synced from your account). Click a row to select it for Flashcards, Notebook, Concept Map, and other tools.'
+            ? 'These PDFs load from your account on each visit. If the server is briefly unavailable, the app can show the last copy saved in this browser (under the size limit). Click a row to select it for Flashcards, Notebook, Concept Map, and other tools.'
             : 'Documents you add are kept in this browser only. Sign in to save PDFs to your account and open them on any device, then use “Refresh from account” on Ingest.'}
         </p>
         {chunks.length ? (
