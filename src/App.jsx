@@ -2338,6 +2338,7 @@ export function StudentApp() {
           activePdfId={activePdfId}
           studentId={studentId}
           isBusy={isNotebookBusy}
+          onOpenIngest={() => setTab('Ingest')}
           onError={(msg) => setNotice(msg)}
           conceptMapData={conceptMapData}
           onCitationSelect={(citation) => {
