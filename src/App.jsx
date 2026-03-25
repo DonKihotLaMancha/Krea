@@ -602,6 +602,35 @@ async function saveLibraryIngest({ studentId, fileName, mimeType, fileBase64 }) 
   }
 }
 
+async function saveLibraryUrlIngest({ studentId, url }) {
+  if (!studentId) return null;
+  const resp = await fetchWithTimeout(
+    '/api/library/ingest-url',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ studentId, url }),
+    },
+    LIBRARY_INGEST_TIMEOUT_MS,
+  );
+  const raw = await resp.text();
+  if (!resp.ok) {
+    let detail = raw.replace(/\s+/g, ' ').trim().slice(0, 400);
+    try {
+      const j = JSON.parse(raw);
+      detail = String(j?.error || j?.details?.message || detail).trim();
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail || `Could not ingest URL (HTTP ${resp.status}).`);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error('Invalid response from URL ingest.');
+  }
+}
+
 async function savePdfToLibrary({ studentId, name, content, pdfBase64 }) {
   if (!studentId) return null;
   const resp = await fetchWithTimeout(
@@ -1823,6 +1852,86 @@ export function StudentApp() {
     );
   };
 
+  const onUrlIngest = async (url) => {
+    const rawUrl = String(url || '').trim();
+    if (!rawUrl) return { ok: false, error: 'Paste a URL first.' };
+    if (!studentId) {
+      const msg = 'Sign in to ingest links and save them in Supabase.';
+      setNotice(msg);
+      return { ok: false, error: msg };
+    }
+    setIngestBusy(true);
+    setGenerationIndeterminate(true);
+    setGenerationProgress(20);
+    setGenerationStage('Fetching web page…');
+    try {
+      const ingested = await saveLibraryUrlIngest({ studentId, url: rawUrl });
+      const cleaned = String(ingested?.normalizedText || '').trim();
+      if (!cleaned) {
+        const msg = 'The page did not return readable study text.';
+        setNotice(msg);
+        return { ok: false, error: msg };
+      }
+      if (ingested?.deduplicated && ingested?.id) {
+        try {
+          await reloadLibraryFromAccount();
+        } catch {
+          /* ignore */
+        }
+        setGenerationProgress(100);
+        setGenerationStage('Completed');
+        setGenerationIndeterminate(false);
+        const msg = `This link already exists in your library — reused saved copy.`;
+        setNotice(msg);
+        return { ok: true };
+      }
+
+      const label = String(ingested?.title || ingested?.url || rawUrl).slice(0, 160);
+      const localChunk = {
+        id: `${Date.now()}`,
+        name: label,
+        content: cleaned,
+        mimeType: 'text/html',
+        sourceType: 'txt',
+        checksumSha256: ingested?.checksumSha256 || null,
+        ingestStatus: ingested?.embeddingDeferred ? 'indexing' : 'indexed',
+      };
+      setChunks((prev) => [localChunk, ...prev]);
+      if (ingested?.id) {
+        const dbChunk = {
+          ...localChunk,
+          id: `db-pdf-${ingested.id}`,
+          sourceId: ingested.id,
+          createdAt: new Date().toISOString(),
+        };
+        setChunks((prev) => prev.map((c) => (c.id === localChunk.id ? dbChunk : c)));
+        setActivePdfId(dbChunk.id);
+        try {
+          const fresh = await loadLibrary(studentId);
+          applyLibraryData(fresh);
+        } catch {
+          /* keep local */
+        }
+      }
+      setGenerationProgress(100);
+      setGenerationStage('Completed');
+      setGenerationIndeterminate(false);
+      setNotice(`Added link to your library: “${label}”.`);
+      return { ok: true };
+    } catch (error) {
+      const msg = error?.message || 'Link ingest failed.';
+      setNotice(msg);
+      return { ok: false, error: msg };
+    } finally {
+      setIngestBusy(false);
+      setTimeout(() => {
+        setGenerationProgress(0);
+        setGenerationStage('');
+        setGenerationIndeterminate(false);
+      }, 700);
+    }
+  };
+
   const markCard = useCallback((ok) => {
     const top = deckCards[0];
     if (!top) return;
@@ -2339,6 +2448,7 @@ export function StudentApp() {
           studentId={studentId}
           isBusy={isNotebookBusy}
           onOpenIngest={() => setTab('Ingest')}
+          onAddWebSource={onUrlIngest}
           onError={(msg) => setNotice(msg)}
           conceptMapData={conceptMapData}
           onCitationSelect={(citation) => {
@@ -2498,6 +2608,8 @@ export function StudentApp() {
           onGenerate={generateQuiz}
           results={quizResults}
           activeSourceId={activeChunk?.sourceId || null}
+          sourceLabel={activeChunk?.name || ''}
+          groundingReady={Boolean(activeChunk?.content?.trim())}
           isGenerating={isGeneratingQuiz}
         />
       ) : null}
@@ -3178,7 +3290,16 @@ function LmsWorkspace({ studentId, setNotice }) {
   );
 }
 
-function Quizzes({ config, setConfig, onGenerate, results, isGenerating, activeSourceId = null }) {
+function Quizzes({
+  config,
+  setConfig,
+  onGenerate,
+  results,
+  isGenerating,
+  activeSourceId = null,
+  sourceLabel = '',
+  groundingReady = false,
+}) {
   const [answers, setAnswers] = useState({});
   const [submitted, setSubmitted] = useState({});
 
@@ -3205,20 +3326,58 @@ function Quizzes({ config, setConfig, onGenerate, results, isGenerating, activeS
   return (
     <section className="panel">
       <h3 className="mb-3 text-lg font-semibold">Quiz / Exam Generator</h3>
-      <p className="mb-2 text-xs text-muted">Powered by Ollama — multiple-choice questions from your PDF text.</p>
-      <div className="mb-3 grid grid-cols-1 gap-2 md:grid-cols-4">
-        <select className="input" value={config.mode} onChange={(e) => setConfig((c) => ({ ...c, mode: e.target.value }))}>
-          <option value="quiz">Quiz</option>
-          <option value="exam">Exam</option>
-          <option value="test">Test</option>
-        </select>
-        <select className="input" value={config.difficulty} onChange={(e) => setConfig((c) => ({ ...c, difficulty: e.target.value }))}>
-          <option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option>
-        </select>
-        <input className="input" type="number" min={3} max={30} value={config.count} onChange={(e) => setConfig((c) => ({ ...c, count: e.target.value }))} />
-        <button type="button" className="btn-primary" disabled={isGenerating} onClick={onGenerate}>
-          {isGenerating ? 'Generating...' : 'Generate'}
-        </button>
+      <p className="mb-2 text-xs text-muted">Powered by Ollama — multiple-choice questions grounded in your ingested document text.</p>
+      {groundingReady && sourceLabel ? (
+        <p className="mb-2 text-xs font-medium text-slate-700">
+          Grounded in: <span className="text-slate-900">{sourceLabel}</span>
+        </p>
+      ) : (
+        <p className="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-950">
+          Select or upload a document in <strong>Ingest</strong> with extractable text, then return here to generate a quiz.
+        </p>
+      )}
+      <p className="mb-3 text-[11px] leading-snug text-muted">
+        <strong className="font-medium text-slate-700">Difficulty</strong> steers how demanding the questions are (recall vs. synthesis). It does not switch models — only the prompt rules.
+      </p>
+      <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-4">
+        <label className="flex flex-col gap-1">
+          <span className="text-xs font-medium text-slate-700">Format</span>
+          <select className="input" value={config.mode} onChange={(e) => setConfig((c) => ({ ...c, mode: e.target.value }))}>
+            <option value="quiz">Quiz</option>
+            <option value="exam">Exam</option>
+            <option value="test">Test</option>
+          </select>
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-xs font-medium text-slate-700">Difficulty</span>
+          <select className="input" value={config.difficulty} onChange={(e) => setConfig((c) => ({ ...c, difficulty: e.target.value }))}>
+            <option value="easy">Easy — recall & definitions</option>
+            <option value="medium">Medium — mix of recall & application</option>
+            <option value="hard">Hard — synthesis & subtle distinctions</option>
+          </select>
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-xs font-medium text-slate-700">Questions</span>
+          <input
+            className="input"
+            type="number"
+            min={3}
+            max={30}
+            value={config.count}
+            onChange={(e) => setConfig((c) => ({ ...c, count: e.target.value }))}
+          />
+        </label>
+        <div className="flex flex-col justify-end gap-1 md:pt-[1.375rem]">
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={isGenerating || !groundingReady}
+            title={!groundingReady ? 'Need a document with readable text from Ingest' : undefined}
+            onClick={onGenerate}
+          >
+            {isGenerating ? 'Generating...' : 'Generate'}
+          </button>
+        </div>
       </div>
       <ul className="space-y-4">
         {visibleResults.map((r) => {
@@ -3281,7 +3440,11 @@ function Quizzes({ config, setConfig, onGenerate, results, isGenerating, activeS
                     <button type="button" className="btn-primary" onClick={() => submitQuiz(r)}>
                       Submit answers
                     </button>
-                  ) : null}
+                  ) : (
+                    <p className="text-[11px] text-muted">
+                      If this felt off-target, try another difficulty next time — questions are steered by Easy / Medium / Hard rules in the AI prompt.
+                    </p>
+                  )}
                 </div>
               ) : (
                 <p className="text-xs text-muted">No questions in this result (regenerate).</p>

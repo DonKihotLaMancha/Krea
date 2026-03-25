@@ -1573,6 +1573,183 @@ function storageMimeForIngest(format, mimeHint, fileName) {
   return 'application/octet-stream';
 }
 
+function normalizeHttpUrl(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  try {
+    const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
+    const u = new URL(hasScheme ? s : `https://${s}`);
+    if (!/^https?:$/i.test(u.protocol)) return '';
+    return u.toString();
+  } catch {
+    return '';
+  }
+}
+
+function decodeBasicHtmlEntities(text) {
+  return String(text || '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&#x27;/gi, "'");
+}
+
+function extractReadableTextFromHtml(html) {
+  const src = String(html || '');
+  const titleMatch = src.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const title = decodeBasicHtmlEntities(String(titleMatch?.[1] || '').replace(/\s+/g, ' ').trim()).slice(0, 240);
+  const noScript = src
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<svg[\s\S]*?<\/svg>/gi, ' ');
+  const withBreaks = noScript
+    .replace(/<\/(p|div|section|article|li|h[1-6]|br)>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n');
+  const stripped = withBreaks.replace(/<[^>]+>/g, ' ');
+  const text = decodeBasicHtmlEntities(stripped)
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[^\S\r\n]+/g, ' ')
+    .trim();
+  return { title, text };
+}
+
+async function analyzeWebMaterial({ url, title, text }) {
+  const content = String(text || '').slice(0, 12000);
+  if (!content) return null;
+  const prompt = [
+    'Analyze this web study source and return ONLY JSON:',
+    '{"title":"string","summary":"string","keyPoints":["string"]}',
+    'Rules: title <= 90 chars, summary <= 700 chars, keyPoints 3-6 concise bullets.',
+    `URL: ${url}`,
+    `Page title: ${title || 'Untitled'}`,
+    'Content:',
+    content,
+  ].join('\n');
+  try {
+    const data = await callOllama(prompt, 90000);
+    const parsed = safeParseModelJson(String(data?.response || '').trim());
+    const safeTitle = String(parsed?.title || title || 'Web source').trim().slice(0, 140);
+    const safeSummary = String(parsed?.summary || '').trim().slice(0, 2000);
+    const keyPoints = Array.isArray(parsed?.keyPoints)
+      ? parsed.keyPoints.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 8)
+      : [];
+    return { title: safeTitle, summary: safeSummary, keyPoints };
+  } catch {
+    return null;
+  }
+}
+
+const ingestUrlHandler = async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const studentId = String(req.body?.studentId || '').trim();
+  const rawUrl = String(req.body?.url || '').trim();
+  const url = normalizeHttpUrl(rawUrl);
+  if (!studentId || !url) {
+    return res.status(400).json({ error: 'Missing or invalid studentId/url.', errorType: 'validation_error' });
+  }
+  if (!isUuid(studentId)) {
+    return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.', errorType: 'validation_error' });
+  }
+
+  let html = '';
+  let finalUrl = url;
+  let pageMime = 'text/html';
+  try {
+    const controller = new AbortController();
+    const to = setTimeout(() => controller.abort(), 30000);
+    const resp = await fetch(url, {
+      signal: controller.signal,
+      redirect: 'follow',
+      headers: {
+        'User-Agent': 'StudentAssistant/1.0 (+educational ingestion)',
+        Accept: 'text/html, text/plain;q=0.9, application/xhtml+xml;q=0.9',
+      },
+    });
+    clearTimeout(to);
+    if (!resp.ok) return res.status(400).json({ error: `Could not fetch URL (HTTP ${resp.status}).`, errorType: 'fetch_error' });
+    finalUrl = normalizeHttpUrl(resp.url) || url;
+    pageMime = String(resp.headers.get('content-type') || 'text/html').toLowerCase();
+    if (!/text\/html|text\/plain|application\/xhtml\+xml/.test(pageMime)) {
+      return res.status(400).json({
+        error: `Unsupported content type: ${pageMime || 'unknown'}. Only text/HTML pages are supported.`,
+        errorType: 'unsupported',
+      });
+    }
+    html = await resp.text();
+  } catch (e) {
+    return res.status(400).json({ error: e?.message || 'Could not fetch URL.', errorType: 'fetch_error' });
+  }
+
+  const parsed = pageMime.includes('text/plain')
+    ? { title: '', text: String(html || '').trim() }
+    : extractReadableTextFromHtml(html);
+  const readableText = String(parsed.text || '').trim();
+  if (!readableText || readableText.length < 120) {
+    return res.status(400).json({ error: 'The URL does not contain enough readable text.', errorType: 'parse_error' });
+  }
+
+  const analysis = await analyzeWebMaterial({ url: finalUrl, title: parsed.title, text: readableText });
+  const title = String(analysis?.title || parsed.title || new URL(finalUrl).hostname).trim().slice(0, 240) || 'Web source';
+  const keyPoints = Array.isArray(analysis?.keyPoints) ? analysis.keyPoints : [];
+  const summary = String(analysis?.summary || '').trim();
+  const normalizedText = [
+    `Source URL: ${finalUrl}`,
+    summary ? `AI summary: ${summary}` : '',
+    keyPoints.length ? `Key points:\n- ${keyPoints.join('\n- ')}` : '',
+    '---',
+    readableText.slice(0, 120000),
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+
+  try {
+    const checksumSha256 = crypto.createHash('sha256').update(Buffer.from(normalizedText, 'utf8')).digest('hex');
+    const result = await persistLibraryMaterial({
+      studentId,
+      title,
+      cleanedText: normalizedText,
+      rawText: readableText.slice(0, 120000),
+      extractionMeta: {
+        ingestFormat: 'url',
+        sourceUrl: finalUrl,
+        pageTitle: parsed.title || '',
+        aiSummary: summary || null,
+        aiKeyPoints: keyPoints,
+      },
+      sourceType: 'txt',
+      mimeType: pageMime || 'text/html',
+      sizeBytes: Buffer.byteLength(normalizedText, 'utf8'),
+      checksumSha256,
+      pageCount: null,
+    });
+
+    return res.json({
+      ok: true,
+      id: result.id,
+      title,
+      url: finalUrl,
+      checksumSha256,
+      deduplicated: !!result.deduplicated,
+      embeddingDeferred: result.embeddingDeferred,
+      normalizedText,
+      summary,
+      keyPoints,
+      warnings: result.warnings || [],
+    });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not save URL source.'));
+  }
+};
+
+app.post('/api/library/ingest-url', ingestUrlHandler);
+app.post('/api/library/ingestUrl', ingestUrlHandler);
+app.post('/api/library/ingest_url', ingestUrlHandler);
+
 app.post('/api/library/ingest', async (req, res) => {
   if (!requireSupabase(res)) return;
   const studentId = String(req.body?.studentId || '').trim();
@@ -4506,9 +4683,22 @@ ${JSON.stringify(passages)}
   }
 });
 
+/** Explicit difficulty semantics for Ollama quiz prompts (grounding rules unchanged). */
+function quizDifficultyGuidance(difficulty) {
+  const d = String(difficulty || 'medium').toLowerCase();
+  if (d === 'easy') {
+    return `DIFFICULTY = EASY: Ask for direct recall, definitions, and obvious facts stated in the passages. Use clear wording. Distractors should be clearly incorrect to anyone who read the text. Avoid multi-hop reasoning and subtle trick questions.`;
+  }
+  if (d === 'hard') {
+    return `DIFFICULTY = HARD: Ask questions that require synthesis, comparison of ideas, applying a rule to a new scenario, or spotting fine distinctions that are still fully supported by the passages. Distractors must be highly plausible. Prefer 2+ step reasoning only when the passages provide enough detail.`;
+  }
+  return `DIFFICULTY = MEDIUM: Balance recall with light application (e.g. "which best explains…", simple cause/effect). Distractors should be plausible but disprovable from the passages.`;
+}
+
 app.post('/api/quiz-generate', async (req, res) => {
   const mode = String(req.body?.mode || 'quiz').trim();
-  const difficulty = String(req.body?.difficulty || 'medium').trim();
+  const difficultyRaw = String(req.body?.difficulty || 'medium').trim().toLowerCase();
+  const difficulty = ['easy', 'medium', 'hard'].includes(difficultyRaw) ? difficultyRaw : 'medium';
   const count = Math.max(3, Math.min(30, Number(req.body?.count || 10)));
   const sources = Array.isArray(req.body?.sources) ? req.body.sources : [];
   if (!sources.length) return res.status(400).json({ error: 'Missing sources.' });
@@ -4526,8 +4716,13 @@ app.post('/api/quiz-generate', async (req, res) => {
     });
   }
 
+  const secPerQ = difficulty === 'easy' ? 35 : difficulty === 'hard' ? 55 : 45;
+  const suggestedSec = Math.max(60, count * secPerQ);
+
   const prompt = `
-Generate a ${mode} with exactly ${count} multiple-choice questions at ${difficulty} difficulty.
+Generate a ${mode} with exactly ${count} multiple-choice questions. Target difficulty: ${difficulty}.
+
+${quizDifficultyGuidance(difficulty)}
 
 STRICT GROUNDING: Every question and the correct answer MUST be fully answerable ONLY from the excerpts in SOURCE_PASSAGES.
 Do NOT use outside knowledge about subjects that are not clearly supported by those excerpts.
@@ -4540,7 +4735,7 @@ Return strict JSON only:
   "topic":"short topic label",
   "total":${count},
   "estimatedCorrect":0,
-  "sec":${Math.max(60, count * 45)},
+  "sec":${suggestedSec},
   "questions":[
     {
       "prompt":"question text",

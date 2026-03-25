@@ -31,7 +31,7 @@ export default function AppShell({
         accountMenu={authPanel}
       />
       <main
-        className="min-h-screen border-l border-canvas-border bg-white p-3 text-slate-900 md:p-4"
+        className="min-h-screen border-l border-canvas-border bg-white p-3 text-slate-900 md:px-4 md:py-3"
         style={{ backgroundColor: '#ffffff', color: '#0f172a' }}
       >
         <div className="mx-auto w-full max-w-[1320px]">
