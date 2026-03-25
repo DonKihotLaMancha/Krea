@@ -8,6 +8,7 @@ export default function SubirArchivoPanel({
   onSelectActivePdf,
 }) {
   const selectedChunk = chunks.find((c) => c.id === activePdfId) || chunks[0];
+  const indexing = selectedChunk?.ingestStatus === 'indexing';
 
   return (
     <section className="panel mt-4">
@@ -29,12 +30,17 @@ export default function SubirArchivoPanel({
         </select>
         <button
           className="btn-primary"
-          disabled={!selectedChunk || isAnalyzing}
+          disabled={!selectedChunk || isAnalyzing || indexing}
           onClick={() => selectedChunk && onAnalizar(selectedChunk.id)}
         >
-          {isAnalyzing ? 'Analyzing...' : 'Analyze sections'}
+          {indexing ? 'Wait for indexing…' : isAnalyzing ? 'Analyzing...' : 'Analyze sections'}
         </button>
       </div>
+      {indexing ? (
+        <p className="mt-2 text-xs text-amber-800">
+          Vector embeddings are still indexing for this PDF. Wait ~1 minute (or reload your library), then analyze sections.
+        </p>
+      ) : null}
       {apartados.length ? (
         <div className="mt-3 flex flex-wrap gap-2">
           <button

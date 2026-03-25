@@ -17,7 +17,7 @@ const CATEGORY_FILL = {
 };
 
 const COL_GAP = 200;
-const ROW_GAP = 56;
+const ROW_GAP = 72;
 const BOX_PAD_X = 14;
 const BOX_PAD_Y = 10;
 const LINE_HEIGHT = 13;
@@ -72,7 +72,6 @@ function measureBoxForNode(n) {
   const maxChars = n.level === 0 ? 18 : 16;
   const labelLines = splitLabelToLines(label, n.level === 0 ? 3 : 2, maxChars);
   const tldrLines = tldr ? splitLabelToLines(tldr, 2, 26) : [];
-  const cardStrip = 14;
   const lineHeight = LINE_HEIGHT;
   const tldrLineHeight = LINE_HEIGHT - 1;
   const allLens = [...labelLines.map((l) => l.length), ...tldrLines.map((l) => l.length), 4];
@@ -80,8 +79,8 @@ function measureBoxForNode(n) {
   const w = Math.min(MAX_BOX_W + 8, Math.max(MIN_BOX_W, textW + BOX_PAD_X * 2));
   const labelH = labelLines.length * lineHeight;
   const tldrH = tldrLines.length ? 4 + tldrLines.length * tldrLineHeight : 0;
-  const h = Math.max(44, labelH + tldrH + BOX_PAD_Y * 2 + cardStrip);
-  return { labelLines, tldrLines, w, h, lineHeight, tldrLineHeight, cardStrip };
+  const h = Math.max(44, labelH + tldrH + BOX_PAD_Y * 2);
+  return { labelLines, tldrLines, w, h, lineHeight, tldrLineHeight, cardStrip: 0 };
 }
 
 function getVisibleNodeIds(root, children, collapsedIds) {
@@ -141,29 +140,58 @@ function buildDirectedChildren(nodes, links) {
   return { root, children, parent };
 }
 
-/** Horizontal tree: root left, subtrees grow right; y from recursive layout. */
-function layoutTreePositions(root, children, measureById) {
-  let cursorY = 0;
+/** Radial sector layout: root at center, children fan out on a clock / wheel with increasing radius. */
+function layoutRadialSectorPositions(root, children, measureById) {
   const pos = new Map();
+  if (!root) return pos;
+  const CX = 520;
+  const CY = 440;
+  const R_BASE = 260;
+  const R_STEP = 200;
 
-  function walk(id, depth) {
-    const ch = children.get(id) || [];
-    const m = measureById.get(id) || { w: MIN_BOX_W, h: 40 };
-    if (!ch.length) {
-      const y = cursorY;
-      cursorY += ROW_GAP + m.h;
-      pos.set(id, { x: depth * COL_GAP, y, depth, w: m.w, h: m.h });
-      return { minY: y, maxY: y + m.h };
+  const rootM = measureById.get(root) || { w: MIN_BOX_W, h: 44 };
+  pos.set(root, {
+    x: CX - rootM.w / 2,
+    y: CY - rootM.h / 2,
+    depth: 0,
+    w: rootM.w,
+    h: rootM.h,
+  });
+
+  function recurse(pid, angleStart, angleEnd, radius, depth) {
+    const ch = (children.get(pid) || []).slice().sort((a, b) => String(a).localeCompare(String(b)));
+    if (!ch.length) return;
+    const span = angleEnd - angleStart;
+    const n = ch.length;
+    for (let i = 0; i < n; i += 1) {
+      const a0 = angleStart + (span * i) / n;
+      const a1 = angleStart + (span * (i + 1)) / n;
+      const mid = (a0 + a1) / 2;
+      const cid = ch[i];
+      const m = measureById.get(cid) || { w: MIN_BOX_W, h: 44 };
+      const x = CX + radius * Math.cos(mid - Math.PI / 2) - m.w / 2;
+      const y = CY + radius * Math.sin(mid - Math.PI / 2) - m.h / 2;
+      pos.set(cid, { x, y, depth, w: m.w, h: m.h });
+      recurse(cid, a0, a1, radius + R_STEP, depth + 1);
     }
-    const bands = ch.map((cid) => walk(cid, depth + 1));
-    const minY = Math.min(...bands.map((b) => b.minY));
-    const maxY = Math.max(...bands.map((b) => b.maxY));
-    const y = (minY + maxY) / 2 - m.h / 2;
-    pos.set(id, { x: depth * COL_GAP, y, depth, w: m.w, h: m.h });
-    return { minY: Math.min(minY, y), maxY: Math.max(maxY, y + m.h) };
   }
 
-  if (root) walk(root, 0);
+  const ch0 = (children.get(root) || []).slice().sort((a, b) => String(a).localeCompare(String(b)));
+  const TWO_PI = 2 * Math.PI;
+  const n0 = ch0.length;
+  if (n0) {
+    for (let i = 0; i < n0; i += 1) {
+      const a0 = (i / n0) * TWO_PI;
+      const a1 = ((i + 1) / n0) * TWO_PI;
+      const mid = (a0 + a1) / 2;
+      const cid = ch0[i];
+      const m = measureById.get(cid) || { w: MIN_BOX_W, h: 44 };
+      const x = CX + R_BASE * Math.cos(mid - Math.PI / 2) - m.w / 2;
+      const y = CY + R_BASE * Math.sin(mid - Math.PI / 2) - m.h / 2;
+      pos.set(cid, { x, y, depth: 1, w: m.w, h: m.h });
+      recurse(cid, a0, a1, R_BASE + R_STEP, 2);
+    }
+  }
 
   let minX = Infinity;
   let minY = Infinity;
@@ -173,7 +201,7 @@ function layoutTreePositions(root, children, measureById) {
   }
   if (!Number.isFinite(minX)) minX = 0;
   if (!Number.isFinite(minY)) minY = 0;
-  const pad = 32;
+  const pad = 40;
   const shifted = new Map();
   for (const [id, p] of pos) {
     shifted.set(id, { ...p, x: p.x - minX + pad, y: p.y - minY + pad });
@@ -221,6 +249,7 @@ function buildNodesFromMap(conceptMapData, collapsedIds = new Set()) {
     descripcion: item.description,
     tldr: String(item.tldr || '').trim(),
     categoryTag: String(item.categoryTag || 'other').toLowerCase(),
+    parentId: item.parentId != null ? String(item.parentId) : null,
     level: item.level !== undefined && item.level !== null ? Math.max(0, Math.min(3, Number(item.level))) : 1,
   }));
 
@@ -249,7 +278,7 @@ function buildNodesFromMap(conceptMapData, collapsedIds = new Set()) {
   }
 
   const measureByVisible = new Map(nodesVisible.map((n) => [n.id, measureBoxForNode(n)]));
-  const posMap = layoutTreePositions(root, childrenFiltered, measureByVisible);
+  const posMap = layoutRadialSectorPositions(root, childrenFiltered, measureByVisible);
   return nodesVisible
     .filter((n) => posMap.has(n.id))
     .map((n) => {
@@ -334,6 +363,7 @@ export default function ConceptMap({
   isGenerating = false,
   onGenerate,
   onGenerateFlashcardsFromTopic,
+  highPriorityNodeIds,
 }) {
   const [selectedId, setSelectedId] = useState(null);
   const [zoomLevel, setZoomLevel] = useState(1);
@@ -343,6 +373,13 @@ export default function ConceptMap({
   const panRef = useRef({ active: false, sx: 0, sy: 0, sl: 0, st: 0 });
   const selectedChunk = chunks.find((c) => c.id === activePdfId) || chunks[0];
   const isFromAiMap = !!(conceptMapData?.nodes?.length);
+
+  const highPrioritySet = useMemo(() => {
+    const h = highPriorityNodeIds;
+    if (!h) return new Set();
+    if (h instanceof Set) return h;
+    return new Set(Array.isArray(h) ? h : []);
+  }, [highPriorityNodeIds]);
 
   const hubLabel = useMemo(() => {
     const t = String(conceptMapData?.title || 'Main Topic').trim();
@@ -495,9 +532,9 @@ export default function ConceptMap({
       const source = nodeById.get(l.source);
       const target = nodeById.get(l.target);
       if (!source || !target) return null;
-      const x1 = source.x + source.w;
+      const x1 = source.x + source.w / 2;
       const y1 = source.y + source.h / 2;
-      const x2 = target.x;
+      const x2 = target.x + target.w / 2;
       const y2 = target.y + target.h / 2;
       return (
         <path
@@ -593,6 +630,32 @@ export default function ConceptMap({
               {k}
             </span>
           ))}
+        </div>
+      ) : null}
+
+      {isFromAiMap && allDrawNodes.length && onGenerateFlashcardsFromTopic && selectedChunk ? (
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-white px-3 py-2 shadow-sm">
+          <span className="text-xs text-muted">Map toolbar</span>
+          <span className="max-w-[min(100%,18rem)] truncate text-sm font-medium text-slate-800" title={selected?.nombre}>
+            {selected?.nombre || 'Select a node'}
+          </span>
+          <button
+            type="button"
+            className="btn-primary ml-auto text-sm"
+            disabled={!selected?.id}
+            onClick={() =>
+              selected &&
+              onGenerateFlashcardsFromTopic({
+                nodeId: selected.id,
+                label: selected.nombre,
+                tldr: selected.tldr,
+                description: selected.descripcion,
+                categoryTag: selected.categoryTag,
+              })
+            }
+          >
+            Generate flashcards for this topic
+          </button>
         </div>
       ) : null}
 
@@ -693,7 +756,8 @@ export default function ConceptMap({
                     ? CATEGORY_FILL[tag] || branchFill.get(n.id) || ROOT_FILL
                     : branchFill.get(n.id) ||
                       (n.level === 0 ? ROOT_FILL : BRANCH_PALETTES[Math.abs(String(n.id).length) % BRANCH_PALETTES.length]);
-                  const strokeW = isActive ? 2.25 : 1;
+                  const isHighP = isFromAiMap && highPrioritySet.has(n.id);
+                  const strokeW = isActive ? 2.25 : isHighP ? 2.5 : 1;
                   const fs = n.level === 0 ? 12.5 : 11;
                   const fsTldr = 9.5;
                   const labelBlockH = labelLineTexts.length * lineHeight;
@@ -714,7 +778,7 @@ export default function ConceptMap({
                         rx={CORNER_RX}
                         ry={CORNER_RX}
                         fill={fill}
-                        stroke="#171717"
+                        stroke={isHighP ? '#b91c1c' : '#171717'}
                         strokeWidth={strokeW}
                       />
                       {hasCh ? (
@@ -782,30 +846,6 @@ export default function ConceptMap({
                           {line}
                         </text>
                       ))}
-                      {isFromAiMap && onGenerateFlashcardsFromTopic && selectedChunk ? (
-                        <text
-                          className="concept-map-no-pan"
-                          x={n.x + n.w / 2}
-                          y={n.y + n.h - 5}
-                          textAnchor="middle"
-                          fill="#1d4ed8"
-                          fontSize="9"
-                          fontWeight="700"
-                          style={{ fontFamily: 'ui-sans-serif, system-ui, sans-serif', cursor: 'pointer' }}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onGenerateFlashcardsFromTopic({
-                              nodeId: n.id,
-                              label: n.nombre,
-                              tldr: n.tldr,
-                              description: n.descripcion,
-                              categoryTag: n.categoryTag,
-                            });
-                          }}
-                        >
-                          Flashcards →
-                        </text>
-                      ) : null}
                     </g>
                   );
                 })}

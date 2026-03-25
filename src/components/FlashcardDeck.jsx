@@ -36,11 +36,21 @@ export default function FlashcardDeck({
 
   const handleRight = useCallback(() => {
     triggerGradeFlash('right');
+    try {
+      if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(12);
+    } catch {
+      /* ignore */
+    }
     onRight();
   }, [onRight, triggerGradeFlash]);
 
   const handleWrong = useCallback(() => {
     triggerGradeFlash('wrong');
+    try {
+      if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate([18, 40, 18]);
+    } catch {
+      /* ignore */
+    }
     onWrong();
   }, [onWrong, triggerGradeFlash]);
 
@@ -261,14 +271,14 @@ export default function FlashcardDeck({
           <div className="mx-auto mt-2 flex max-w-xl flex-col gap-3 sm:flex-row sm:items-stretch">
             <button
               type="button"
-              className="order-2 flex-1 rounded-xl border-2 border-rose-600 bg-rose-50 py-3 text-sm font-semibold text-rose-900 shadow-sm transition hover:bg-rose-100 sm:order-1"
+              className="order-2 flex-1 rounded-xl border-2 border-rose-600 bg-rose-50 py-3 text-sm font-semibold text-rose-900 shadow-sm transition hover:bg-rose-100 active:scale-[0.98] sm:order-1"
               onClick={handleWrong}
             >
               Still learning
             </button>
             <button
               type="button"
-              className="order-1 flex-1 rounded-xl border-2 border-emerald-700 bg-emerald-600 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 sm:order-2"
+              className="order-1 flex-1 rounded-xl border-2 border-emerald-700 bg-emerald-600 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 active:scale-[0.98] sm:order-2"
               onClick={handleRight}
             >
               Know it

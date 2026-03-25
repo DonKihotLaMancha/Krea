@@ -792,6 +792,22 @@ function tokenizeForImageSearch(q) {
     .slice(0, 12);
 }
 
+/** Penalize obvious language/topic mismatches (e.g. C# image for Java query). */
+function scoreImageLanguageMismatchPenalty(fileTitle, queryTokens) {
+  const t = String(fileTitle || '').toLowerCase();
+  const q = queryTokens.join(' ');
+  const wantsJava = /\bjava\b/i.test(q) && !/javascript/i.test(q);
+  const wantsJs = /javascript|js\b/i.test(q);
+  const wantsPython = /\bpython\b/i.test(q);
+  const wantsCSharp = /c#|csharp/i.test(q);
+  if (wantsJava && (/\bc#|csharp|python|django|numpy\b/i.test(t) && !/\bjava\b/i.test(t))) return -8;
+  if (wantsJava && /javascript|typescript/i.test(t) && !/\bjava\b/i.test(t)) return -4;
+  if (wantsJs && /\bjava\b/i.test(t) && !/javascript/i.test(t)) return -3;
+  if (wantsPython && /\bjava\b|c#/i.test(t)) return -4;
+  if (wantsCSharp && /\bjava\b|python\b/i.test(t) && !/c#|csharp/i.test(t)) return -5;
+  return 0;
+}
+
 /** Wikimedia file title vs query tokens — whole-token matches score higher. */
 function scoreImageTitleAgainstTokens(fileTitle, queryTokens) {
   const t = String(fileTitle || '')
@@ -867,9 +883,11 @@ app.get('/api/slide-image', async (req, res) => {
         const thumb = info?.thumburl || info?.url;
         if (!thumb || !isAllowedSlideImageUrl(thumb)) continue;
         const pageTitle = page?.title || '';
+        let score = scoreImageTitleAgainstTokens(pageTitle, queryToks);
+        score += scoreImageLanguageMismatchPenalty(pageTitle, queryToks);
         candidates.push({
           thumb,
-          score: scoreImageTitleAgainstTokens(pageTitle, queryToks),
+          score,
         });
       }
       if (candidates.length) {
@@ -878,14 +896,25 @@ app.get('/api/slide-image', async (req, res) => {
           if (candidates[i].score > best.score) best = candidates[i];
         }
         const pick = best.score > 0 ? best : candidates[0];
-        return res.json({ url: pick.thumb, source: 'wikimedia' });
+        const safeQ = String(raw || search).slice(0, 80).replace(/"/g, "'");
+        return res.json({
+          url: pick.thumb,
+          source: 'wikimedia',
+          diagramMermaid: `flowchart LR\n  Q["${safeQ}"] --> I["Visual from Commons"]`,
+        });
       }
     }
     throw new Error('no image');
   } catch {
     const seed = slideImagePicsumSeedFromQuery(raw || tags);
     const fallback = `https://picsum.photos/seed/${seed}/960/540`;
-    return res.json({ url: fallback, source: 'picsum' });
+    const safeQ = String(raw || tags).slice(0, 80).replace(/"/g, "'");
+    return res.json({
+      url: fallback,
+      source: 'picsum',
+      noCommonsMatch: true,
+      diagramMermaid: `flowchart TD\n  R["${safeQ}"] --> S["Use course notes / Mermaid instead of unrelated stock"]`,
+    });
   }
 });
 
@@ -1169,7 +1198,7 @@ app.get('/api/library', async (req, res) => {
     ] = await Promise.all([
       supabase
         .from('sources')
-        .select('id,title,created_at,storage_path,size_bytes,mime_type,source_type,source_contents(cleaned_text)')
+        .select('id,title,created_at,storage_path,size_bytes,mime_type,source_type,checksum_sha256,source_contents(cleaned_text)')
         .eq('owner_id', studentId)
         .in('source_type', ['pdf', 'doc', 'txt'])
         .is('deleted_at', null)
@@ -1284,6 +1313,7 @@ app.get('/api/library', async (req, res) => {
         sizeBytes: s.size_bytes != null ? Number(s.size_bytes) : null,
         mimeType: s.mime_type || null,
         sourceType: s.source_type || null,
+        checksumSha256: s.checksum_sha256 || null,
       };
     });
     /** Nested embed can miss text (RLS/embed quirks); fill from source_contents directly. */
@@ -1635,6 +1665,7 @@ app.post('/api/library/ingest', async (req, res) => {
     return res.json({
       ok: true,
       id: result.id,
+      checksumSha256,
       deduplicated: !!result.deduplicated,
       storageUploaded: result.storageUploaded,
       storageWarning: result.storageWarning,
@@ -2154,6 +2185,55 @@ app.post('/api/library/presentation', async (req, res) => {
     }
     // #endregion
     return res.status(500).json(formatSupabaseError(error, 'Could not save presentation.'));
+  }
+});
+
+/** Update a single slide without regenerating the full deck (owner-scoped). */
+app.patch('/api/library/presentation-slide', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const studentId = String(req.body?.studentId || '').trim();
+  const presentationId = String(req.body?.presentationId || '').trim();
+  const slideIndex = Number(req.body?.slideIndex);
+  const patch = req.body?.slide && typeof req.body.slide === 'object' ? req.body.slide : {};
+  if (!studentId || !presentationId || !Number.isFinite(slideIndex)) {
+    return res.status(400).json({ error: 'Missing studentId/presentationId/slideIndex.' });
+  }
+  if (!isUuid(studentId) || !isUuid(presentationId)) {
+    return res.status(400).json({ error: 'Invalid ids.' });
+  }
+  try {
+    const { data: own, error: ownErr } = await supabase
+      .from('presentations')
+      .select('id')
+      .eq('id', presentationId)
+      .eq('owner_id', studentId)
+      .limit(1);
+    if (ownErr) throw ownErr;
+    if (!own?.length) return res.status(404).json({ error: 'Presentation not found.' });
+
+    const { data: slideRows, error: slErr } = await supabase
+      .from('presentation_slides')
+      .select('id')
+      .eq('presentation_id', presentationId)
+      .eq('slide_index', slideIndex)
+      .limit(1);
+    if (slErr) throw slErr;
+    if (!slideRows?.length) return res.status(404).json({ error: 'Slide not found.' });
+
+    const update = {};
+    if (patch.title != null) update.title = String(patch.title).trim();
+    if (Array.isArray(patch.bullets)) update.bullets = patch.bullets.map((b) => String(b));
+    if (patch.notes != null) update.notes = String(patch.notes).trim();
+    if (patch.imageSuggestion != null) update.image_suggestion = String(patch.imageSuggestion).trim();
+    if (patch.graphSuggestion != null) update.graph_suggestion = String(patch.graphSuggestion).trim();
+    if (Object.keys(update).length === 0) {
+      return res.json({ ok: true, updated: false });
+    }
+    const { error: upErr } = await supabase.from('presentation_slides').update(update).eq('id', slideRows[0].id);
+    if (upErr) throw upErr;
+    return res.json({ ok: true, updated: true });
+  } catch (error) {
+    return res.status(500).json(formatSupabaseError(error, 'Could not update slide.'));
   }
 });
 
@@ -3631,8 +3711,12 @@ app.post('/api/ai-job', async (req, res) => {
 app.post('/api/flashcards', async (req, res) => {
   const format = String(req.body?.format || '').toLowerCase();
   const focusTopic = String(req.body?.focusTopic || '').trim();
+  const userInterest = String(req.body?.userInterest || '').trim();
   const focusBlock = focusTopic
     ? `\nFOCUS TOPIC — generate cards ONLY about this theme; every card must clearly relate to it:\n${focusTopic.slice(0, 2000)}\n`
+    : '';
+  const feynmanBlock = userInterest
+    ? `\nFEYNMAN TECHNIQUE: For at least half the cards, ask the student to explain the concept using an analogy related to this interest (keep the analogy secondary to accuracy): "${userInterest.slice(0, 200)}". Avoid generic "What is..." when a mechanism or analogy fits.\n`
     : '';
   if (format === 'anki') {
     const sources = Array.isArray(req.body?.sources) ? req.body.sources : [];
@@ -3650,7 +3734,7 @@ app.post('/api/flashcards', async (req, res) => {
     const prompt = `
 You are an Anki-style flashcard generator.
 Use ONLY SOURCE_JSON. Prefer "why" and "how" mechanisms, not just definitions.
-${focusBlock}
+${focusBlock}${feynmanBlock}
 - type "qa": short question on front, answer on back.
 - type "cloze": clozeText must contain exactly one {{blank}} (or {{c1::hidden}}) for the hidden term; back is the revealed text or brief explanation.
 - HARD LIMITS: front ≤ 35 words, back ≤ 45 words (≈10 second read). If too long, split meaning into two cards in the next array entries.
@@ -3691,7 +3775,7 @@ Input is structured JSON extracted from a university document.
 Generate 10 accurate and varied flashcards using ONLY input data.
 
 Rules:
-${focusBlock}- Use only SOURCE_JSON facts/sentences.
+${focusBlock}${feynmanBlock}- Use only SOURCE_JSON facts/sentences.
 - Questions must be diverse: definition, why, how, comparison, application.
 - Answers concise (1-3 sentences).
 - evidence must copy exact short phrase from SOURCE_JSON.sentences or SOURCE_JSON.facts.
@@ -3782,7 +3866,7 @@ Rules:
 - Add references and Google Scholar links when available.
 - Unique slide titles; no repeated bullets.
 - Optional per-slide "chartBars" only when numbers are explicit in SOURCE_JSON or bullets (same rules as default mode).
-- Required per-slide "imageSearchQuery" (4–14 words, Wikimedia-oriented keywords from THIS slide only).
+- Required per-slide "imageSearchQuery": "Diagram of [concept] + [language or domain from SOURCE_JSON] + [context from THIS slide] — exclude unrelated languages" (4–18 words, Wikimedia-oriented).
 - Return JSON only with this exact shape:
 {
   "title":"...",
@@ -3829,7 +3913,7 @@ Rules:
 - Add references and Google Scholar links when available.
 - Ensure slide titles are unique and avoid repeated bullets.
 - Optional per-slide "chartBars": use ONLY when SOURCE_JSON or the slide bullets state explicit comparable numbers, percentages, or clear ordinal rankings grounded in that text. Format: [{"label":"short label","value":number}, ...] with 2 to 5 items, distinct labels. If there are no such values, omit chartBars or use []. Never invent statistics. Do not use chartBars on summary/conclusion slides unless bullets contain digits or percentages.
-- Required per-slide "imageSearchQuery": a short English phrase (4–14 words) of concrete search keywords for Wikimedia Commons — nouns and proper nouns from THIS slide's title and bullets only (e.g. "Java ArrayList data structure diagram"). No generic words like "slide", "overview", "image", "photo".
+- Required per-slide "imageSearchQuery": same format as storyboard — include programming language or domain from SOURCE_JSON when relevant (e.g. "Java ArrayList internal structure diagram documentation"). No generic words like "slide", "overview", "image", "photo". Exclude wrong-language imagery by naming the correct stack explicitly.
 - Return JSON only with this exact shape:
 {
   "title":"...",
@@ -4052,7 +4136,7 @@ STRUCTURE (mandatory):
 - Exactly ONE root (level 0): the document's overarching theme.
 - Identify 3–5 "super-nodes" (level 1 MAIN THEMES) that group related ideas. Every other node must nest under one of these themes or under their descendants — not as random siblings of the root.
 - Multi-tier depth: Level 0 → Level 1 themes → Level 2 clusters → Level 3 details. Prefer horizontal expansion (several branches) over one deep ladder.
-- FIVE-BRANCH RULE: No node may have more than 5 direct children. If more items belong under one parent, insert an intermediate "Sub-category" node and attach extras under it.
+- FOUR-BRANCH RULE (strict): No node may have more than 4 direct children. If a theme has more than four subtopics, insert Mid-tier category nodes (e.g. Operations, Syntax, Details, Pitfalls) and nest items under those buckets so the map spreads wide instead of stacking vertically.
 - PRUNE: High-impact keywords only; merge redundant phrases; no box bloat.
 
 SEMANTICS:
@@ -4083,7 +4167,7 @@ ${JSON.stringify(sourceJson)}
 You are a Senior Information Architect in DEEP DIVE mode. Merge SOURCE_JSON with the cross-reference (if any); the document stays primary.
 
 STRUCTURE:
-- Same tree rules as standard mode but 24–40 nodes: 3–5 level-1 super-nodes, deep grouping, five-branch rule, prune redundancy.
+- Same tree rules as standard mode but 24–40 nodes: 3–5 level-1 super-nodes, deep grouping, four-branch rule with mid-tier buckets, prune redundancy.
 - Rich cross-links (crossLink true) between sections that causally interact across the document.
 
 SEMANTICS:
@@ -4144,6 +4228,7 @@ app.post('/api/source-chat', async (req, res) => {
 You are a source-grounded academic assistant.
 Answer only using the provided PASSAGES.
 If information is missing, say so clearly.
+MANDATORY: Every substantive sentence in "answer" must end with an inline citation tag like (Source: passageId) matching one entry in "citations". No uncited factual claims.
 
 Return strict JSON:
 {
@@ -4261,11 +4346,12 @@ app.post('/api/document-bottlenecks', async (req, res) => {
   const passages = buildPassagesFromSources(sources).slice(0, 40);
   const prompt = `
 You identify learning bottlenecks for university material.
-From PASSAGES only, pick exactly 3 bottlenecks: concepts that are dense, prerequisite-heavy, or easy to confuse.
+From PASSAGES only, pick exactly 3 bottlenecks: the statistically most difficult ideas (dense jargon, heavy prerequisites, easy-to-confuse contrasts, or multi-step procedures).
+Assign each a "complexityScore" from 1–10 with one-line statistical justification (e.g. nested definitions, symbolic density).
 Return strict JSON only:
 {
   "bottlenecks":[
-    {"concept":"...","whyHard":"...","fix":"active recall / analogy / worked example"}
+    {"concept":"...","whyHard":"...","complexityScore":7,"complexityNote":"...","fix":"active recall / analogy / worked example"}
   ]
 }
 
@@ -4310,6 +4396,7 @@ app.post('/api/tutor-socratic', async (req, res) => {
       .filter((b) => b.concept);
     const prompt = `
 You are a Socratic tutor. Ground every factual statement in PASSAGES; cite with passageId when possible.
+MANDATORY: Include at least one citation entry for every distinct claim in "reply"; prefer inline (Source: passageId) markers in the reply text.
 Do NOT give a lecture-only answer: include a short helpful explanation AND a probing challenge question.
 If BOTTLENECKS are provided, relate at least one to the student's question.
 Return strict JSON only:
@@ -4938,6 +5025,159 @@ function linkKey(a, b) {
   return `${a}::${b}`;
 }
 
+const MAX_TREE_FANOUT = 4;
+const MID_TIER_BUCKET_LABELS = ['Operations', 'Syntax', 'Details', 'Pitfalls', 'More'];
+
+/**
+ * Deterministic repair: no tree parent may have more than MAX_TREE_FANOUT direct children.
+ * Inserts mid-tier synthetic nodes so the client radial layout can fan out.
+ */
+function enforceMaxFourTreeChildren(nodes, links) {
+  const crossLinks = links.filter((l) => l.crossLink);
+  const idToNode = new Map(nodes.map((n) => [n.id, { ...n }]));
+  let synthCounter = 0;
+  const freshId = () => {
+    let id;
+    do {
+      synthCounter += 1;
+      id = `syn${synthCounter}`;
+    } while (idToNode.has(id));
+    return id;
+  };
+
+  function rebuildMapsFromLinks(treeLinks) {
+    const parentOf = new Map();
+    const children = new Map();
+    for (const id of idToNode.keys()) children.set(id, []);
+    for (const l of treeLinks) {
+      if (!idToNode.has(l.source) || !idToNode.has(l.target)) continue;
+      if (!parentOf.has(l.target)) {
+        parentOf.set(l.target, l.source);
+        children.get(l.source).push(l.target);
+      }
+    }
+    const rootId =
+      [...idToNode.values()].find((n) => Number(n.level) === 0)?.id ||
+      [...idToNode.keys()].find((id) => !parentOf.has(id)) ||
+      [...idToNode.keys()][0];
+    return { parentOf, children, rootId };
+  }
+
+  let treeLinks = links.filter((l) => !l.crossLink);
+  let { parentOf, children } = rebuildMapsFromLinks(treeLinks);
+
+  let guard = 0;
+  while (guard < 400) {
+    guard += 1;
+    let offender = null;
+    for (const [pid, ch] of children) {
+      if (ch.length > MAX_TREE_FANOUT) {
+        offender = pid;
+        break;
+      }
+    }
+    if (!offender) break;
+
+    const ch = [...children.get(offender)].sort((a, b) =>
+      String(idToNode.get(a)?.label || '').localeCompare(String(idToNode.get(b)?.label || '')),
+    );
+    const chunks = [];
+    for (let i = 0; i < ch.length; i += MAX_TREE_FANOUT) {
+      chunks.push(ch.slice(i, i + MAX_TREE_FANOUT));
+    }
+
+    for (const c of ch) {
+      parentOf.delete(c);
+    }
+    children.set(offender, []);
+
+    if (chunks.length <= MAX_TREE_FANOUT) {
+      for (let i = 0; i < chunks.length; i += 1) {
+        const synId = freshId();
+        idToNode.set(synId, {
+          id: synId,
+          label: MID_TIER_BUCKET_LABELS[i % MID_TIER_BUCKET_LABELS.length],
+          description: 'Mid-tier category to keep branches readable.',
+          tldr: 'Grouped subtopics.',
+          categoryTag: 'other',
+          level: NaN,
+        });
+        parentOf.set(synId, offender);
+        children.get(offender).push(synId);
+        children.set(synId, []);
+        for (const c of chunks[i]) {
+          parentOf.set(c, synId);
+          children.get(synId).push(c);
+        }
+      }
+    } else {
+      const metaChunks = [];
+      for (let i = 0; i < chunks.length; i += MAX_TREE_FANOUT) {
+        metaChunks.push(chunks.slice(i, i + MAX_TREE_FANOUT));
+      }
+      for (let mi = 0; mi < metaChunks.length; mi += 1) {
+        const metaId = freshId();
+        idToNode.set(metaId, {
+          id: metaId,
+          label: `Category ${mi + 1}`,
+          description: 'Higher-level grouping for wide topics.',
+          tldr: 'Mid-tier category.',
+          categoryTag: 'other',
+          level: NaN,
+        });
+        parentOf.set(metaId, offender);
+        children.get(offender).push(metaId);
+        children.set(metaId, []);
+        const mc = metaChunks[mi];
+        for (let j = 0; j < mc.length; j += 1) {
+          const innerId = freshId();
+          idToNode.set(innerId, {
+            id: innerId,
+            label: MID_TIER_BUCKET_LABELS[j % MID_TIER_BUCKET_LABELS.length],
+            description: 'Grouped subtopics.',
+            tldr: 'Mid-tier category.',
+            categoryTag: 'other',
+            level: NaN,
+          });
+          parentOf.set(innerId, metaId);
+          children.get(metaId).push(innerId);
+          children.set(innerId, []);
+          for (const c of mc[j]) {
+            parentOf.set(c, innerId);
+            children.get(innerId).push(c);
+          }
+        }
+      }
+    }
+
+    treeLinks = [];
+    for (const [target, source] of parentOf) {
+      treeLinks.push({ source, target, label: 'includes', crossLink: false });
+    }
+    const rebuilt = rebuildMapsFromLinks(treeLinks);
+    parentOf = rebuilt.parentOf;
+    children = rebuilt.children;
+  }
+
+  const finalTreeLinks = [];
+  for (const [target, source] of parentOf) {
+    finalTreeLinks.push({ source, target, label: 'includes', crossLink: false });
+  }
+  const merged = [...finalTreeLinks, ...crossLinks];
+  return { nodes: [...idToNode.values()], links: merged.slice(0, 128) };
+}
+
+function attachParentIds(nodes, links) {
+  const treeLinks = links.filter((l) => !l.crossLink);
+  const parentOf = new Map();
+  for (const l of treeLinks) {
+    if (!parentOf.has(l.target)) parentOf.set(l.target, l.source);
+  }
+  for (const n of nodes) {
+    n.parentId = parentOf.get(n.id) || null;
+  }
+}
+
 /**
  * Ensure map has coherent parent-child links even when model output is sparse/noisy.
  * Uses level constraints + lexical overlap to infer missing logical connections.
@@ -4993,7 +5233,7 @@ function inferConceptLinksFromNodes(nodes, links) {
   }
 
   // add limited sibling cross-links when strongly related (dashed in UI)
-  const maxCrossLinks = Math.min(8, Math.max(2, Math.floor(nodes.length / 3)));
+  const maxCrossLinks = Math.min(4, Math.max(2, Math.floor(nodes.length / 4)));
   let addedCross = 0;
   for (let i = 0; i < nodes.length && addedCross < maxCrossLinks; i += 1) {
     for (let j = i + 1; j < nodes.length && addedCross < maxCrossLinks; j += 1) {
@@ -5012,7 +5252,7 @@ function inferConceptLinksFromNodes(nodes, links) {
       addedCross += 1;
     }
   }
-  return out.slice(0, 96);
+  return out.slice(0, 128);
 }
 
 function normalizeCategoryTag(raw) {
@@ -5041,10 +5281,10 @@ function tldrFromNode(n) {
 }
 
 function normalizeConceptMap(map, options = {}) {
-  const maxNodes = Number(options.maxNodes) > 0 ? Math.min(56, Number(options.maxNodes)) : 22;
-  const maxLinks = Number(options.maxLinks) > 0 ? Math.min(96, Number(options.maxLinks)) : 40;
+  const maxNodes = Number(options.maxNodes) > 0 ? Math.min(64, Number(options.maxNodes)) : 22;
+  const maxLinks = Number(options.maxLinks) > 0 ? Math.min(128, Number(options.maxLinks)) : 40;
   const seenNode = new Set();
-  const nodes = (map.nodes || [])
+  let nodes = (map.nodes || [])
     .map((n, i) => ({
       id: String(n?.id || `n${i + 1}`),
       label: String(n?.label || '').trim(),
@@ -5080,6 +5320,11 @@ function normalizeConceptMap(map, options = {}) {
 
   assignConceptLevels(nodes, links.filter((l) => !l.crossLink));
   links = inferConceptLinksFromNodes(nodes, links);
+  const repaired = enforceMaxFourTreeChildren(nodes, links);
+  nodes = repaired.nodes;
+  links = repaired.links;
+  assignConceptLevels(nodes, links.filter((l) => !l.crossLink));
+  attachParentIds(nodes, links);
 
   const externalResources = Array.isArray(map.externalResources)
     ? map.externalResources
@@ -5410,6 +5655,8 @@ function normalizeBottlenecks(parsed) {
           concept: String(b?.concept || b?.title || '').trim(),
           whyHard: String(b?.whyHard || b?.description || '').trim(),
           fix: String(b?.fix || b?.remediation || '').trim(),
+          complexityScore: Math.max(1, Math.min(10, Number(b?.complexityScore) || 5)),
+          complexityNote: String(b?.complexityNote || '').trim(),
         }))
         .filter((b) => b.concept)
         .slice(0, 5)

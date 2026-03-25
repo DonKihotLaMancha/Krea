@@ -106,6 +106,8 @@ function mapLibraryPdfToChunk(p) {
     sizeBytes: p.sizeBytes != null ? Number(p.sizeBytes) : null,
     mimeType: p.mimeType ?? null,
     sourceType: p.sourceType ?? null,
+    checksumSha256: p.checksumSha256 || null,
+    ingestStatus: 'indexed',
   };
 }
 
@@ -114,10 +116,12 @@ function mergeLibraryChunksWithLocal(prev, dbChunks) {
   const safeDb = Array.isArray(dbChunks) ? dbChunks : [];
   const byId = new Map(safeDb.map((c) => [c.id, c]));
   const bySourceId = new Map(safeDb.filter((c) => c.sourceId).map((c) => [String(c.sourceId), c]));
+  const checksums = new Set(safeDb.filter((c) => c.checksumSha256).map((c) => c.checksumSha256));
   const prepended = [];
   for (const p of prev) {
     if (byId.has(p.id)) continue;
     if (p.sourceId && bySourceId.has(String(p.sourceId))) continue;
+    if (p.checksumSha256 && checksums.has(p.checksumSha256)) continue;
     if (!String(p.content || '').trim()) continue;
     prepended.push(p);
   }
@@ -199,9 +203,10 @@ function fallbackCardsFromText(raw) {
     }));
 }
 
-async function generateCardsWithOllama(text, { focusTopic = '' } = {}) {
+async function generateCardsWithOllama(text, { focusTopic = '', userInterest = '' } = {}) {
   const body = { text };
   if (String(focusTopic || '').trim()) body.focusTopic = String(focusTopic).trim();
+  if (String(userInterest || '').trim()) body.userInterest = String(userInterest).trim();
   const resp = await fetchWithTimeout('/api/flashcards', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -394,9 +399,10 @@ async function tutorSocraticWithOllama({ prompt, sources, studentId, bottlenecks
   return await resp.json();
 }
 
-async function generateAnkiFlashcardsWithOllama({ sources, focusTopic = '' }) {
+async function generateAnkiFlashcardsWithOllama({ sources, focusTopic = '', userInterest = '' }) {
   const body = { format: 'anki', sources };
   if (String(focusTopic || '').trim()) body.focusTopic = String(focusTopic).trim();
+  if (String(userInterest || '').trim()) body.userInterest = String(userInterest).trim();
   const resp = await fetchWithTimeout('/api/flashcards', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -922,6 +928,7 @@ function normalizeStudyCards(cardsInput) {
     d.setDate(d.getDate() + i);
     return {
       ...c,
+      conceptNodeId: c.conceptNodeId || null,
       id: c.id || `${Date.now()}-${i}`,
       question: c.question || c.frente || 'Question',
       answer: c.answer || c.atras || '',
@@ -935,12 +942,13 @@ function normalizeStudyCards(cardsInput) {
   });
 }
 
-function tagFlashcardsForChunk(chunk, list) {
+function tagFlashcardsForChunk(chunk, list, { conceptNodeId = null } = {}) {
   if (!chunk) return list;
   return list.map((c) => ({
     ...c,
     sourceId: chunk.sourceId || c.sourceId || null,
     libraryChunkId: chunk.id,
+    ...(conceptNodeId ? { conceptNodeId } : {}),
   }));
 }
 
@@ -1033,6 +1041,9 @@ export function StudentApp() {
   const [deckSessionGrades, setDeckSessionGrades] = useState({ right: 0, wrong: 0 });
   /** `legacy` = original /api/flashcards; `anki` = QA + cloze with word caps */
   const [flashcardDeckStyle, setFlashcardDeckStyle] = useState('legacy');
+  const [flashcardUserInterest, setFlashcardUserInterest] = useState('');
+  const [highPriorityConceptNodeIds, setHighPriorityConceptNodeIds] = useState(() => new Set());
+  const conceptWeakStreakRef = useRef({});
   const [conceptMapData, setConceptMapData] = useState(null);
   const [isGeneratingConceptMap, setIsGeneratingConceptMap] = useState(false);
   const [isNotebookBusy, setIsNotebookBusy] = useState(false);
@@ -1132,6 +1143,19 @@ export function StudentApp() {
       setLibraryReloadBusy(false);
     }
   }, [studentId, applyLibraryData]);
+
+  useEffect(() => {
+    const pending = chunks.some((c) => c.ingestStatus === 'indexing' && c.sourceId);
+    if (!pending || !studentId) return undefined;
+    const t = setTimeout(() => {
+      void reloadLibraryFromAccount().then(() => {
+        setChunks((prev) =>
+          prev.map((c) => (c.ingestStatus === 'indexing' ? { ...c, ingestStatus: 'indexed' } : c)),
+        );
+      });
+    }, 45000);
+    return () => clearTimeout(t);
+  }, [chunks, studentId, reloadLibraryFromAccount]);
 
   const activeChunk = useMemo(() => {
     if (!chunks.length) return null;
@@ -1422,7 +1446,10 @@ export function StudentApp() {
     return items;
   }, [chunks, cards, messages, tutorMessages, presentations, tasks]);
 
-  const generateForChunk = async (chunk, { append = false, focusTopic = '' } = {}) => {
+  const generateForChunk = async (
+    chunk,
+    { append = false, focusTopic = '', conceptNodeId = null } = {},
+  ) => {
     if (!chunk?.content?.trim()) {
       setNotice('No readable content found for flashcard generation.');
       return;
@@ -1435,17 +1462,27 @@ export function StudentApp() {
     try {
       let aiCards = [];
       const focus = String(focusTopic || '').trim();
+      const interest = String(flashcardUserInterest || '').trim();
       if (flashcardDeckStyle === 'anki') {
         const data = await generateAnkiFlashcardsWithOllama({
           sources: [{ name: chunk.name, content: chunk.content }],
           ...(focus ? { focusTopic: focus } : {}),
+          ...(interest ? { userInterest: interest } : {}),
         });
         aiCards = ankiCardsToStudyCards(data.cards || []);
       } else {
-        aiCards = await generateCardsWithOllama(chunk.content, focus ? { focusTopic: focus } : {});
+        aiCards = await generateCardsWithOllama(
+          chunk.content,
+          {
+            ...(focus ? { focusTopic: focus } : {}),
+            ...(interest ? { userInterest: interest } : {}),
+          },
+        );
       }
       if (aiCards.length) {
-        const normalized = tagFlashcardsForChunk(chunk, normalizeStudyCards(aiCards));
+        const normalized = tagFlashcardsForChunk(chunk, normalizeStudyCards(aiCards), {
+          conceptNodeId: conceptNodeId || null,
+        });
         setCards((prev) => (append ? [...prev, ...normalized] : normalized));
         if (studentId) {
           try {
@@ -1580,11 +1617,27 @@ export function StudentApp() {
           setGenerationIndeterminate(false);
           return;
         }
+        if (ingested?.deduplicated && ingested?.id) {
+          setNotice(
+            `Same SHA-256 hash as existing material — reusing your library copy. ${ingested.embeddingDeferred ? 'Indexing may still be running in the background.' : ''}`,
+          );
+          try {
+            await reloadLibraryFromAccount();
+          } catch {
+            /* ignore */
+          }
+          setGenerationProgress(100);
+          setGenerationStage('Completed');
+          setGenerationIndeterminate(false);
+          return;
+        }
         const chunk = {
           id: `${Date.now()}`,
           name: file.name,
           content: cleaned,
           mimeType: file.type || ingested?.ingestFormat || null,
+          checksumSha256: ingested?.checksumSha256 || null,
+          ingestStatus: ingested?.embeddingDeferred ? 'indexing' : 'indexed',
         };
         let chunkForGen = chunk;
         setChunks((prev) => [chunk, ...prev]);
@@ -1672,6 +1725,16 @@ export function StudentApp() {
       right: s.right + (ok ? 1 : 0),
       wrong: s.wrong + (ok ? 0 : 1),
     }));
+    if (top.conceptNodeId) {
+      const nid = String(top.conceptNodeId);
+      if (!ok) {
+        const n = (conceptWeakStreakRef.current[nid] || 0) + 1;
+        conceptWeakStreakRef.current[nid] = n;
+        if (n >= 3) setHighPriorityConceptNodeIds((hp) => new Set([...hp, nid]));
+      } else {
+        conceptWeakStreakRef.current[nid] = 0;
+      }
+    }
     setCards((prev) => {
       const idx = prev.findIndex((c) => c.id === top.id);
       if (idx < 0) return prev;
@@ -1687,6 +1750,12 @@ export function StudentApp() {
     const chunk = chunkId ? chunks.find((c) => c.id === chunkId) : activeChunk;
     if (!chunk) {
       setNotice('Upload a document first, then analyze sections.');
+      return;
+    }
+    if (chunk.sourceId && chunk.ingestStatus === 'indexing') {
+      setNotice(
+        'Vector search indexing is still running for this PDF. Wait ~1 minute after upload, reload the library, then analyze sections.',
+      );
       return;
     }
     setIsAnalyzingSections(true);
@@ -2095,6 +2164,16 @@ export function StudentApp() {
               </select>
               <span className="text-[11px] text-muted">Applies to Generate below</span>
             </div>
+            <label className="flex min-w-[12rem] max-w-md flex-1 flex-col gap-0.5 text-[11px] text-muted">
+              <span className="font-medium text-slate-700">Feynman interest (optional)</span>
+              <input
+                className="input py-1.5 text-xs"
+                placeholder="e.g. basketball, cooking, video games — for analogy-style prompts"
+                value={flashcardUserInterest}
+                onChange={(e) => setFlashcardUserInterest(e.target.value)}
+                disabled={isGenerating}
+              />
+            </label>
             <button
               type="button"
               className="btn-primary shrink-0"
@@ -2318,6 +2397,8 @@ export function StudentApp() {
           isGenerating={isGeneratingPresentation}
           chunks={chunks}
           activeChunkId={activePdfId}
+          studentId={studentId}
+          setNotice={setNotice}
         />
       ) : null}
       {tab === 'Concept Map' ? (
@@ -2338,8 +2419,9 @@ export function StudentApp() {
               }
               const focusTopic = [payload.label, payload.tldr, payload.description].filter(Boolean).join('\n\n');
               setTab('Flashcards');
-              generateForChunk(chunk, { append: true, focusTopic });
+              generateForChunk(chunk, { append: true, focusTopic, conceptNodeId: payload.nodeId });
             }}
+            highPriorityNodeIds={highPriorityConceptNodeIds}
           />
         </Suspense>
       ) : null}
@@ -3137,7 +3219,16 @@ function Chat({ room, setRoom, messages, setMessages, studentId, setNotice }) {
   );
 }
 
-function Presentations({ presentations, setPresentations, onGenerate, isGenerating, chunks, activeChunkId = '' }) {
+function Presentations({
+  presentations,
+  setPresentations,
+  onGenerate,
+  isGenerating,
+  chunks,
+  activeChunkId = '',
+  studentId = null,
+  setNotice,
+}) {
   const [topic, setTopic] = useState('My Project');
   const [promptText, setPromptText] = useState('Create a classroom-ready deck with examples and references.');
   const [selectedChunkIds, setSelectedChunkIds] = useState([]);
@@ -3214,6 +3305,47 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
       ]),
     ].join('\n');
     downloadTextFile(`${presentation.title.replace(/\s+/g, '_') || 'presentation'}.md`, markdown, 'text/markdown');
+  };
+
+  const persistSlideToLibrary = async (idx) => {
+    if (!studentId || !editingId || !draft) return;
+    const uuid =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(editingId);
+    if (!uuid) {
+      setNotice?.('Save the full deck to your library first so this presentation has a server id.');
+      return;
+    }
+    const s = draft.slides[idx];
+    const bullets = String(s.bulletsText || '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, 8);
+    try {
+      await fetchWithTimeout(
+        '/api/library/presentation-slide',
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            studentId,
+            presentationId: editingId,
+            slideIndex: idx,
+            slide: {
+              title: s.title,
+              bullets,
+              notes: s.notes,
+              imageSuggestion: s.imageSuggestion,
+              graphSuggestion: s.graphSuggestion,
+            },
+          }),
+        },
+        20000,
+      );
+      setNotice?.('This slide was updated in your saved library deck.');
+    } catch (e) {
+      setNotice?.(e?.message || 'Could not update slide in library.');
+    }
   };
 
   const exportPptx = async (presentation) => {
@@ -3590,6 +3722,11 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
                   }
                   placeholder="Graph suggestion"
                 />
+                {studentId && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(editingId) ? (
+                  <button type="button" className="btn-ghost mt-2 text-xs" onClick={() => persistSlideToLibrary(idx)}>
+                    Update this slide in library only
+                  </button>
+                ) : null}
               </div>
             ))}
           </div>

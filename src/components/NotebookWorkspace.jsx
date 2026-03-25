@@ -387,7 +387,12 @@ export default function NotebookWorkspace({
           <ul className="mt-2 space-y-1 text-[11px] text-slate-700">
             {bottlenecks.map((b, i) => (
               <li key={`bn-${i}`} className="rounded border border-amber-200 bg-amber-50/80 px-2 py-1">
-                <span className="font-semibold">{b.concept}</span>: {b.whyHard}
+                <span className="font-semibold">{b.concept}</span>
+                {b.complexityScore != null ? (
+                  <span className="text-muted"> · difficulty {b.complexityScore}/10</span>
+                ) : null}
+                : {b.whyHard}
+                {b.complexityNote ? <span className="mt-0.5 block text-muted">{b.complexityNote}</span> : null}
               </li>
             ))}
           </ul>
