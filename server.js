@@ -2075,11 +2075,6 @@ app.post('/api/library/presentation', async (req, res) => {
       },
     };
     agentDebugLog538766(_p);
-    fetch('http://127.0.0.1:7555/ingest/65a187b1-f84f-4fb8-91e9-b3378bd5e60a', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '538766' },
-      body: JSON.stringify({ sessionId: '538766', ..._p, timestamp: Date.now() }),
-    }).catch(() => {});
   }
   // #endregion
   if (!studentId || !slides.length) return res.status(400).json({ error: 'Missing studentId/slides.' });
@@ -2160,11 +2155,6 @@ app.post('/api/library/presentation', async (req, res) => {
         data: { hypothesisId: 'H4', presentationId: presData.id },
       };
       agentDebugLog538766(_p);
-      fetch('http://127.0.0.1:7555/ingest/65a187b1-f84f-4fb8-91e9-b3378bd5e60a', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '538766' },
-        body: JSON.stringify({ sessionId: '538766', ..._p, timestamp: Date.now() }),
-      }).catch(() => {});
     }
     // #endregion
     return res.json({ ok: true, presentationId: presData.id });
@@ -2177,11 +2167,6 @@ app.post('/api/library/presentation', async (req, res) => {
         data: { hypothesisId: 'H4', detail: String(error?.message || error).slice(0, 400) },
       };
       agentDebugLog538766(_p);
-      fetch('http://127.0.0.1:7555/ingest/65a187b1-f84f-4fb8-91e9-b3378bd5e60a', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '538766' },
-        body: JSON.stringify({ sessionId: '538766', ..._p, timestamp: Date.now() }),
-      }).catch(() => {});
     }
     // #endregion
     return res.status(500).json(formatSupabaseError(error, 'Could not save presentation.'));
@@ -3827,11 +3812,6 @@ app.post('/api/presentation', async (req, res) => {
       },
     };
     agentDebugLog538766(_p);
-    fetch('http://127.0.0.1:7555/ingest/65a187b1-f84f-4fb8-91e9-b3378bd5e60a', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '538766' },
-      body: JSON.stringify({ sessionId: '538766', ..._p, timestamp: Date.now() }),
-    }).catch(() => {});
   }
   // #endregion
 
@@ -3963,11 +3943,6 @@ ${JSON.stringify(sourceJson)}
           },
         };
         agentDebugLog538766(_p);
-        fetch('http://127.0.0.1:7555/ingest/65a187b1-f84f-4fb8-91e9-b3378bd5e60a', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '538766' },
-          body: JSON.stringify({ sessionId: '538766', ..._p, timestamp: Date.now() }),
-        }).catch(() => {});
       }
       // #endregion
       const fallbackPrompt = isStoryboard
@@ -4012,11 +3987,6 @@ Create exactly ${requestedSlides} slides.
         },
       };
       agentDebugLog538766(_p);
-      fetch('http://127.0.0.1:7555/ingest/65a187b1-f84f-4fb8-91e9-b3378bd5e60a', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '538766' },
-        body: JSON.stringify({ sessionId: '538766', ..._p, timestamp: Date.now() }),
-      }).catch(() => {});
     }
     // #endregion
     return res.json(presentation);
@@ -4029,11 +3999,6 @@ Create exactly ${requestedSlides} slides.
         data: { hypothesisId: 'H1', detail: String(error?.message || error).slice(0, 400) },
       };
       agentDebugLog538766(_p);
-      fetch('http://127.0.0.1:7555/ingest/65a187b1-f84f-4fb8-91e9-b3378bd5e60a', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '538766' },
-        body: JSON.stringify({ sessionId: '538766', ..._p, timestamp: Date.now() }),
-      }).catch(() => {});
     }
     // #endregion
     return res.status(500).json({ error: 'Could not generate presentation.', details: String(error) });
@@ -4138,10 +4103,14 @@ STRUCTURE (mandatory):
 - Multi-tier depth: Level 0 → Level 1 themes → Level 2 clusters → Level 3 details. Prefer horizontal expansion (several branches) over one deep ladder.
 - FOUR-BRANCH RULE (strict): No node may have more than 4 direct children. If a theme has more than four subtopics, insert Mid-tier category nodes (e.g. Operations, Syntax, Details, Pitfalls) and nest items under those buckets so the map spreads wide instead of stacking vertically.
 - PRUNE: High-impact keywords only; merge redundant phrases; no box bloat.
+- TEXT CONSTRAINTS (strict — prevents node overlap):
+  - label: 2–5 words, <= 44 chars, no colon/semicolon, no parentheses, no slashes, no long clauses; not a sentence.
+  - tldr: 1 short sentence <= 85 chars and 6–14 words; must NOT start with the same words as label; avoid repeating label.
+  - description: 1–2 sentences, <= 220 chars; first sentence <= 120 chars.
 
 SEMANTICS:
 - Assign every node "categoryTag": one of Theory | Action | Process | Fact | Definition | Exam | Risk | Other (use Theory for core concepts, Action/Process for steps, Fact for names/dates/numbers, Exam for must-know test points, Risk for pitfalls).
-- "tldr": exactly ONE short sentence (≤ 140 chars) the student sees first. "description": fuller 1–2 sentences for detail on demand.
+- "tldr": exactly ONE short sentence (see TEXT CONSTRAINTS). "description": fuller 1–2 sentences for detail on demand.
 
 LINKS:
 - Tree links (parent→child hierarchy): set "crossLink": false. Label the relationship (includes, part-of, prerequisite, etc.).
@@ -4173,6 +4142,9 @@ STRUCTURE:
 - Same tree rules as standard mode but 24–40 nodes: 3–5 level-1 super-nodes, deep grouping, four-branch rule with mid-tier buckets, prune redundancy.
 - Rich cross-links (crossLink true) between sections that causally interact across the document.
 - Link quality rule: every cross-link must represent a concrete dependency/causal relation traceable to SOURCE_JSON phrases, not topic similarity alone.
+
+TEXT CONSTRAINTS (strict — prevents node overlap):
+- Use exactly the same TEXT CONSTRAINTS as standard mode (label short, tldr short, description short; no box bloat).
 
 SEMANTICS:
 - Every node: "tldr", "description", "categoryTag" as in standard mode.

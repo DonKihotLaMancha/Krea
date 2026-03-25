@@ -71,7 +71,9 @@ function measureBoxForNode(n) {
   const tldr = String(n.tldr || '').trim();
   const maxChars = n.level === 0 ? 18 : 16;
   const labelLines = splitLabelToLines(label, n.level === 0 ? 3 : 2, maxChars);
-  const tldrLines = tldr ? splitLabelToLines(tldr, 2, 26) : [];
+  // Keep the mind-map nodes visually uncluttered:
+  // show only 1 tldr line inside the node; full details appear in the side panel.
+  const tldrLines = tldr ? splitLabelToLines(tldr, 1, 26) : [];
   const lineHeight = LINE_HEIGHT;
   const tldrLineHeight = LINE_HEIGHT - 1;
   const allLens = [...labelLines.map((l) => l.length), ...tldrLines.map((l) => l.length), 4];
@@ -92,6 +94,39 @@ function getVisibleNodeIds(root, children, collapsedIds) {
   }
   if (root) walk(root);
   return out;
+}
+
+function buildRawNodesForCollapsedHeuristic(conceptMapData) {
+  const raw = (conceptMapData?.nodes || []).slice(0, 72);
+  return raw.map((item) => ({
+    id: item.id,
+    label: item.label,
+    nombre: item.label,
+    level:
+      item.level !== undefined && item.level !== null ? Math.max(0, Math.min(3, Number(item.level))) : 1,
+  }));
+}
+
+function getInitialCollapsedIds(conceptMapData) {
+  const nodes = buildRawNodesForCollapsedHeuristic(conceptMapData);
+  const treeLinks = (conceptMapData?.links || []).filter((l) => !l.crossLink);
+  const { root, children } = buildDirectedChildren(nodes, treeLinks);
+  if (!root) return [];
+
+  const depthById = new Map([[root, 0]]);
+  const q = [root];
+  while (q.length) {
+    const id = q.shift();
+    const d0 = depthById.get(id) ?? 0;
+    for (const c of children.get(id) || []) {
+      if (depthById.has(c)) continue;
+      depthById.set(c, d0 + 1);
+      q.push(c);
+    }
+  }
+
+  // Keep root + direct children visible; collapse deeper branches.
+  return nodes.filter((n) => (depthById.get(n.id) ?? 0) >= 2).map((n) => n.id);
 }
 
 function buildDirectedChildren(nodes, links) {
@@ -426,25 +461,23 @@ function buildApartadosLayout(apartados, hubLabel) {
   return { nodes, hub, contentW, contentH };
 }
 
-function edgePathBezier(x1, y1, x2, y2) {
+function edgePathBezier(x1, y1, x2, y2, laneOffset = 0) {
   const dx = x2 - x1;
   const dy = y2 - y1;
-  const dist = Math.hypot(dx, dy);
-  if (!Number.isFinite(dist) || dist < 0.01) {
+  if (!Number.isFinite(dx) || !Number.isFinite(dy)) {
     return `M ${x1} ${y1} L ${x2} ${y2}`;
   }
-
-  // Perpendicular unit vector controls the curve "side".
-  const nx = -dy / dist;
-  const ny = dx / dist;
-  const curvature = Math.min(160, Math.max(56, dist * 0.25));
-
-  const c1x = x1 + dx * 0.35 + nx * curvature;
-  const c1y = y1 + dy * 0.35 + ny * curvature;
-  const c2x = x1 + dx * 0.65 + nx * curvature;
-  const c2y = y1 + dy * 0.65 + ny * curvature;
-
-  return `M ${x1} ${y1} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${x2} ${y2}`;
+  // Orthogonal (elbow) routing for sharp 90-degree connectors.
+  if (Math.abs(dx) < 1 || Math.abs(dy) < 1) {
+    return `M ${x1} ${y1} L ${x2} ${y2}`;
+  }
+  // Fixed-lane Manhattan routing: spread parallel edges into nearby lanes.
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    const midX = x1 + dx / 2 + laneOffset;
+    return `M ${x1} ${y1} L ${midX} ${y1} L ${midX} ${y2} L ${x2} ${y2}`;
+  }
+  const midY = y1 + dy / 2 + laneOffset;
+  return `M ${x1} ${y1} L ${x1} ${midY} L ${x2} ${midY} L ${x2} ${y2}`;
 }
 
 function rectBorderAnchor(fromRect, toRect) {
@@ -522,8 +555,13 @@ export default function ConceptMap({
   const collapsedSet = useMemo(() => new Set(collapsedIdsArr), [collapsedIdsArr]);
 
   useEffect(() => {
-    setCollapsedIdsArr([]);
-  }, [conceptMapData?.title, conceptMapData?.nodes?.length]);
+    if (isFromAiMap) {
+      // Progressive reveal: show root + first tier, collapse deeper branches by default.
+      setCollapsedIdsArr(getInitialCollapsedIds(conceptMapData));
+    } else {
+      setCollapsedIdsArr([]);
+    }
+  }, [conceptMapData?.title, conceptMapData?.nodes?.length, conceptMapData?.links?.length, isFromAiMap]);
 
   const layout = useMemo(() => {
     if (isFromAiMap) {
@@ -621,8 +659,20 @@ export default function ConceptMap({
   }, [contentW, contentH]);
 
   useEffect(() => {
-    setZoomLevel(1);
-  }, [contentW, contentH]);
+    const el = scrollRef.current;
+    if (!el) {
+      setZoomLevel(1);
+      return;
+    }
+    // Auto-fit map canvas to the visible viewport so nodes are not cramped.
+    const availW = Math.max(320, el.clientWidth - 24);
+    const availH = Math.max(260, el.clientHeight - 24);
+    const fitW = availW / Math.max(1, baseView.w);
+    const fitH = availH / Math.max(1, baseView.h);
+    const fit = Math.min(fitW, fitH);
+    const nextZoom = Number.isFinite(fit) && fit > 0 ? Math.max(0.45, Math.min(1.8, fit)) : 1;
+    setZoomLevel(nextZoom);
+  }, [baseView.w, baseView.h, activePdfId, isFromAiMap]);
 
   const displayW = baseView.w * Math.max(0.25, Math.min(4, zoomLevel));
   const displayH = baseView.h * Math.max(0.25, Math.min(4, zoomLevel));
@@ -695,10 +745,11 @@ export default function ConceptMap({
       if (!source || !target) return null;
       const a1 = rectBorderAnchor(source, target);
       const a2 = rectBorderAnchor(target, source);
+      const laneOffset = ((i % 7) - 3) * (dashed ? 7 : 10);
       return (
         <path
           key={`${dashed ? 'x' : 't'}-${l.source}-${l.target}-${i}`}
-          d={edgePathBezier(a1.x, a1.y, a2.x, a2.y)}
+          d={edgePathBezier(a1.x, a1.y, a2.x, a2.y, laneOffset)}
           fill="none"
           stroke={dashed ? '#94a3b8' : stroke}
           strokeWidth={dashed ? 1.1 : 1.25}
@@ -888,12 +939,25 @@ export default function ConceptMap({
                   const labelBlockH = labelLineTexts.length * lineHeight;
                   const tldrBlockH = tldrLineTexts.length ? 4 + tldrLineTexts.length * tldrLineHeight : 0;
                   const contentH = labelBlockH + tldrBlockH;
-                  const startY = n.y + (n.h - contentH) / 2;
+                  // Deterministic inside-node layout:
+                  // start label at the same top padding used by measurement.
+                  const startY = n.y + BOX_PAD_Y;
                   const desc = String(n.descripcion || '').trim();
                   const hasCh = isFromAiMap && (treeChildrenMap?.get(n.id) || []).length > 0;
                   const isCollapsed = collapsedIdsArr.includes(n.id);
                   return (
-                    <g key={n.id} className="concept-map-node cursor-pointer" onClick={() => setSelectedId(n.id)}>
+                    <g
+                      key={n.id}
+                      className="concept-map-node cursor-pointer"
+                      onClick={() => {
+                        setSelectedId(n.id);
+                        // Progressive reveal: if the node is currently a collapsed branch root,
+                        // expand it so its children become visible.
+                        if (isFromAiMap) {
+                          setCollapsedIdsArr((prev) => (prev.includes(n.id) ? prev.filter((x) => x !== n.id) : prev));
+                        }
+                      }}
+                    >
                       <title>{desc || String(n.tldr || n.nombre || '')}</title>
                       <rect
                         x={n.x}
@@ -1083,7 +1147,7 @@ export default function ConceptMap({
                       </button>
                     ) : null}
 
-                    <details className="mt-2 rounded-lg border border-border bg-white p-2 text-[11px]">
+                    <details className="mt-2 rounded-lg border border-border bg-white p-2 text-[11px]" open>
                       <summary className="cursor-pointer font-semibold text-slate-800">Connections</summary>
                       <div className="mt-2 space-y-2">
                         {parentLines.length ? (
