@@ -306,6 +306,7 @@ create table if not exists public.presentation_slides (
   notes text,
   image_suggestion text,
   graph_suggestion text,
+  chart_bars jsonb,
   created_at timestamptz not null default now(),
   unique (presentation_id, slide_index)
 );

@@ -284,7 +284,16 @@ async function generateQuizWithOllama({ mode, difficulty, count, sources }) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ mode, difficulty, count, sources }),
   }, AI_REQUEST_TIMEOUT_MS);
-  if (!resp.ok) throw new Error('Quiz API error');
+  if (!resp.ok) {
+    let msg = 'Quiz API error';
+    try {
+      const err = await resp.json();
+      if (err?.error) msg = err.error;
+    } catch {
+      // ignore
+    }
+    throw new Error(msg);
+  }
   return await resp.json();
 }
 
@@ -564,21 +573,43 @@ function slideHeroImageUrl(deckTitle, slideIndex, slideTitle) {
   return `https://picsum.photos/seed/${seed}/960/540`;
 }
 
-function buildSlideGraphData(slide) {
-  const labels = (slide?.bullets || []).slice(0, 5).map((b, i) => {
-    const short = String(b).split(' ').slice(0, 3).join(' ');
-    return short || `Point ${i + 1}`;
-  });
-  const values = (slide?.bullets || []).slice(0, 5).map((b, i) => {
-    const words = String(b).split(/\s+/).filter(Boolean).length;
-    return Math.max(2, Math.min(12, words + i));
-  });
+/** Max length accepted by /api/slide-image */
+const SLIDE_IMAGE_QUERY_MAX = 280;
+
+function buildSlideImageSearchQuery(deckTitle, slide) {
+  const parts = [
+    String(deckTitle || '').trim(),
+    String(slide?.title || '').trim(),
+    ...(Array.isArray(slide?.bullets) ? slide.bullets.slice(0, 3).map((b) => String(b || '').trim()) : []),
+    String(slide?.imageSuggestion || '').trim(),
+  ].filter(Boolean);
+  return parts.join(' ').slice(0, SLIDE_IMAGE_QUERY_MAX).trim();
+}
+
+function slideChartBarsAreValid(chartBars) {
+  if (!Array.isArray(chartBars) || chartBars.length < 2) return false;
+  const labels = new Set();
+  for (const row of chartBars) {
+    const label = String(row?.label || '').trim();
+    const value = Number(row?.value);
+    if (!label || !Number.isFinite(value)) return false;
+    const k = label.toLowerCase();
+    if (labels.has(k)) return false;
+    labels.add(k);
+  }
+  return true;
+}
+
+/** Chart.js bar payload when slide has model-provided chartBars; otherwise null. */
+function buildSlideChartJsData(slide) {
+  const bars = slide?.chartBars;
+  if (!slideChartBarsAreValid(bars)) return null;
   return {
-    labels: labels.length ? labels : ['Point 1', 'Point 2', 'Point 3'],
+    labels: bars.map((b) => String(b.label).trim().slice(0, 48)),
     datasets: [
       {
-        label: 'Words per bullet (illustrative)',
-        data: values.length ? values : [4, 6, 5],
+        label: 'From slide outline',
+        data: bars.map((b) => Number(b.value)),
         backgroundColor: 'rgba(37,99,235,0.45)',
         borderColor: '#2563eb',
         borderWidth: 1,
@@ -591,8 +622,9 @@ function slideImageFallbackUrl(deckTitle, slideIndex, slideTitle) {
   return slideHeroImageUrl(deckTitle, slideIndex, slideTitle);
 }
 
-async function fetchSlideHeroImageUrl(deckTitle, slideIndex, slideTitle) {
-  const q = `${deckTitle || ''} ${slideTitle || ''}`.trim();
+async function fetchSlideHeroImageUrl(deckTitle, slideIndex, slide) {
+  const slideTitle = typeof slide === 'string' ? slide : String(slide?.title || '');
+  const q = buildSlideImageSearchQuery(deckTitle, typeof slide === 'string' ? { title: slide } : slide);
   if (!q) return slideImageFallbackUrl(deckTitle, slideIndex, slideTitle);
   try {
     const resp = await fetch(`${apiUrl('/api/slide-image')}?q=${encodeURIComponent(q)}`);
@@ -1928,9 +1960,17 @@ export function StudentApp() {
   );
 }
 
+const LMS_TABS = [
+  { id: 'course', label: 'Course' },
+  { id: 'work', label: 'Assignments & quizzes' },
+  { id: 'discuss', label: 'Discussions & inbox' },
+  { id: 'planner', label: 'Calendar & alerts' },
+];
+
 function LmsWorkspace({ studentId, setNotice }) {
   const [courses, setCourses] = useState([]);
   const [selectedCourseId, setSelectedCourseId] = useState('');
+  const [lmsTab, setLmsTab] = useState('course');
   const [modules, setModules] = useState([]);
   const [assignments, setAssignments] = useState([]);
   const [courseQuizzes, setCourseQuizzes] = useState([]);
@@ -2023,254 +2063,409 @@ function LmsWorkspace({ studentId, setNotice }) {
   }
 
   const threadMessages = messages.filter((m) => m.thread_id === activeThreadId);
+  const selectedCourse = courses.find((c) => c.id === selectedCourseId);
+
+  const lmsCardClass = 'rounded-xl border border-slate-200/90 bg-white p-4 shadow-sm';
+  const lmsCardTitle = 'mb-3 text-sm font-semibold text-slate-900';
+  const lmsMutedBox = 'rounded-lg border border-slate-100 bg-slate-50/90 px-3 py-8 text-center text-sm text-muted';
 
   return (
     <section className="panel">
-      <h3 className="mb-3 text-lg font-semibold">LMS Workspace (Canvas-style)</h3>
-      <div className="mb-3 grid grid-cols-1 gap-2 md:grid-cols-2">
-        <select className="input" value={selectedCourseId} onChange={(e) => setSelectedCourseId(e.target.value)}>
-          <option value="">Select course</option>
-          {courses.map((c) => (
-            <option key={c.id} value={c.id}>{c.title} ({c.code})</option>
-          ))}
-        </select>
-        <input
-          className="input"
-          placeholder="Quick discussion reply"
-          value={discussionText}
-          onChange={(e) => setDiscussionText(e.target.value)}
-        />
-      </div>
-
-      <div className="mb-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
-        <div className="rounded-xl border border-border bg-white p-3">
-          <p className="mb-2 text-sm font-semibold">Modules</p>
-          <ul className="space-y-2 text-sm">
-            {modules.length ? modules.map((m) => (
-              <li key={m.id} className="rounded border border-border bg-slate-50 px-2 py-1.5">
-                <strong>{m.title}</strong> <span className="text-xs text-muted">({(m.items || []).length} items)</span>
-              </li>
-            )) : <li className="text-muted">No modules yet.</li>}
-          </ul>
-        </div>
-        <div className="rounded-xl border border-border bg-white p-3">
-          <p className="mb-2 text-sm font-semibold">Assignments</p>
-          <select className="input mb-2" value={activeAssignmentId} onChange={(e) => setActiveAssignmentId(e.target.value)}>
-            <option value="">Select assignment to submit</option>
-            {assignments.map((a) => <option key={a.id} value={a.id}>{a.title}</option>)}
-          </select>
-          <textarea className="input min-h-20" value={submissionText} onChange={(e) => setSubmissionText(e.target.value)} placeholder="Submission text..." />
-          <button
-            className="btn-primary mt-2"
-            disabled={!activeAssignmentId || !submissionText.trim()}
-            onClick={async () => {
-              try {
-                const resp = await fetchWithTimeout('/api/submissions', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    userId: studentId,
-                    assignmentId: activeAssignmentId,
-                    submissionText,
-                  }),
-                });
-                if (!resp.ok) throw new Error('Submission failed.');
-                setSubmissionText('');
-                setNotice?.('Assignment submitted.');
-              } catch (e) {
-                setNotice?.(e?.message || 'Could not submit assignment.');
-              }
-            }}
+      <div className="mb-6 border-b border-slate-200 pb-5">
+        <h3 className="text-lg font-semibold text-slate-900">LMS</h3>
+        <p className="mt-1 max-w-2xl text-sm text-muted">
+          Course tools in one place. Pick a course, then use the tabs below.
+        </p>
+        <label className="mt-4 block text-xs font-medium uppercase tracking-wide text-slate-500">
+          Course
+          <select
+            className="input mt-1.5 max-w-xl"
+            value={selectedCourseId}
+            onChange={(e) => setSelectedCourseId(e.target.value)}
           >
-            Submit assignment
-          </button>
-        </div>
-      </div>
-
-      <div className="mb-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
-        <div className="rounded-xl border border-border bg-white p-3">
-          <p className="mb-2 text-sm font-semibold">Quizzes</p>
-          <select className="input mb-2" value={activeQuizId} onChange={(e) => setActiveQuizId(e.target.value)}>
-            <option value="">Select quiz</option>
-            {courseQuizzes.map((q) => <option key={q.id} value={q.id}>{q.title}</option>)}
-          </select>
-          <input className="input mb-2" placeholder="Score (0-100)" value={quizScore} onChange={(e) => setQuizScore(e.target.value)} />
-          <button
-            className="btn-primary"
-            disabled={!activeQuizId || quizScore === ''}
-            onClick={async () => {
-              try {
-                const resp = await fetchWithTimeout('/api/quizzes', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    action: 'attempt',
-                    userId: studentId,
-                    courseId: selectedCourseId,
-                    quizId: activeQuizId,
-                    score: Number(quizScore),
-                    answers: [],
-                  }),
-                });
-                if (!resp.ok) throw new Error('Could not submit quiz attempt.');
-                setQuizScore('');
-                setNotice?.('Quiz attempt saved.');
-              } catch (e) {
-                setNotice?.(e?.message || 'Could not save quiz attempt.');
-              }
-            }}
-          >
-            Save quiz attempt
-          </button>
-          <ul className="mt-2 space-y-1 text-xs">
-            {courseQuizzes.slice(0, 8).map((q) => (
-              <li key={q.id} className="rounded border border-border bg-slate-50 px-2 py-1">
-                {q.title} ({q.difficulty})
-              </li>
+            <option value="">Select a course</option>
+            {courses.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.title} ({c.code})
+              </option>
             ))}
-          </ul>
-        </div>
-        <div className="rounded-xl border border-border bg-white p-3">
-          <p className="mb-2 text-sm font-semibold">Gradebook</p>
-          <ul className="space-y-1 text-xs">
-            {gradeRows.length ? gradeRows.slice(0, 12).map((g) => (
-              <li key={g.id} className="rounded border border-border bg-slate-50 px-2 py-1">
-                Assignment: {g.assignment_id?.slice(0, 8)} - Grade: {g.grade ?? '—'} - Status: {g.status}
-              </li>
-            )) : <li className="text-muted">No grades yet.</li>}
-          </ul>
-        </div>
+          </select>
+        </label>
+        {selectedCourse ? (
+          <p className="mt-2 text-xs text-muted">
+            Working in <span className="font-medium text-slate-700">{selectedCourse.title}</span>
+          </p>
+        ) : null}
       </div>
 
-      <div className="mb-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
-        <div className="rounded-xl border border-border bg-white p-3">
-          <p className="mb-2 text-sm font-semibold">Discussions</p>
-          <ul className="space-y-2 text-sm">
-            {discussions.length ? discussions.map((d) => (
-              <li key={d.id} className="rounded border border-border bg-slate-50 px-2 py-1.5">
-                <strong>{d.title}</strong>
-                <div className="mt-1 text-xs text-muted">{(d.replies || []).length} replies</div>
-                <button
-                  className="btn-ghost mt-1"
-                  onClick={async () => {
-                    if (!discussionText.trim()) return;
-                    try {
-                      const resp = await fetchWithTimeout('/api/discussions', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                          userId: studentId,
-                          courseId: selectedCourseId,
-                          discussionId: d.id,
-                          body: discussionText,
-                        }),
-                      });
-                      if (!resp.ok) throw new Error('Reply failed.');
-                      setDiscussionText('');
-                      setNotice?.('Reply posted.');
-                    } catch (e) {
-                      setNotice?.(e?.message || 'Could not post discussion reply.');
-                    }
-                  }}
-                >
-                  Reply
-                </button>
-              </li>
-            )) : <li className="text-muted">No discussions yet.</li>}
-          </ul>
-        </div>
-        <div className="rounded-xl border border-border bg-white p-3">
-          <p className="mb-2 text-sm font-semibold">Inbox</p>
-          <select className="input mb-2" value={activeThreadId} onChange={(e) => setActiveThreadId(e.target.value)}>
-            <option value="">Select thread</option>
-            {threads.map((t) => <option key={t.id} value={t.id}>{t.subject}</option>)}
-          </select>
-          <div className="max-h-36 space-y-1 overflow-auto rounded border border-border bg-slate-50 p-2 text-xs">
-            {threadMessages.length ? threadMessages.map((m) => (
-              <p key={m.id}><strong>{m.sender_id === studentId ? 'You' : 'Other'}:</strong> {m.body}</p>
-            )) : <p className="text-muted">No messages.</p>}
+      <div
+        className="mb-6 flex flex-wrap gap-1 border-b border-slate-200 pb-px"
+        role="tablist"
+        aria-label="LMS sections"
+      >
+        {LMS_TABS.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            aria-selected={lmsTab === t.id}
+            className={`rounded-t-md px-3 py-2 text-sm font-medium transition-colors ${
+              lmsTab === t.id
+                ? 'border border-b-0 border-slate-200 bg-white text-slate-900'
+                : 'border border-transparent text-muted hover:bg-slate-50 hover:text-slate-800'
+            }`}
+            onClick={() => setLmsTab(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {!selectedCourseId ? (
+        <div className={lmsMutedBox}>Select a course above to load modules, assignments, and the rest.</div>
+      ) : null}
+
+      {selectedCourseId && lmsTab === 'course' ? (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <div className={lmsCardClass}>
+            <p className={lmsCardTitle}>Modules</p>
+            <ul className="space-y-2">
+              {modules.length ? (
+                modules.map((m) => (
+                  <li
+                    key={m.id}
+                    className="flex items-start justify-between gap-2 rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-2.5 text-sm"
+                  >
+                    <span className="font-medium text-slate-800">{m.title}</span>
+                    <span className="shrink-0 text-xs text-muted">{(m.items || []).length} items</span>
+                  </li>
+                ))
+              ) : (
+                <li className="rounded-lg border border-dashed border-slate-200 px-3 py-6 text-center text-sm text-muted">
+                  No modules for this course yet.
+                </li>
+              )}
+            </ul>
           </div>
-          <input className="input mt-2" value={messageText} onChange={(e) => setMessageText(e.target.value)} placeholder="Type message..." />
-          <button
-            className="btn-primary mt-2"
-            disabled={!activeThreadId || !messageText.trim()}
-            onClick={async () => {
-              try {
-                const resp = await fetchWithTimeout('/api/messages', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    userId: studentId,
-                    threadId: activeThreadId,
-                    body: messageText,
-                  }),
-                });
-                if (!resp.ok) throw new Error('Could not send message.');
-                const data = await resp.json();
-                setMessages((prev) => [...prev, data.message]);
-                setMessageText('');
-              } catch (e) {
-                setNotice?.(e?.message || 'Could not send message.');
-              }
-            }}
-          >
-            Send
-          </button>
+          <div className={lmsCardClass}>
+            <p className={lmsCardTitle}>Gradebook</p>
+            <ul className="space-y-2">
+              {gradeRows.length ? (
+                gradeRows.slice(0, 14).map((g) => (
+                  <li
+                    key={g.id}
+                    className="rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-2 text-xs leading-relaxed text-slate-700"
+                  >
+                    <span className="font-medium">Assignment</span> {g.assignment_id?.slice(0, 8) ?? '—'}
+                    <span className="mx-2 text-slate-300">·</span>
+                    <span className="font-medium">Grade</span> {g.grade ?? '—'}
+                    <span className="mx-2 text-slate-300">·</span>
+                    <span className="text-muted">{g.status}</span>
+                  </li>
+                ))
+              ) : (
+                <li className="rounded-lg border border-dashed border-slate-200 px-3 py-6 text-center text-sm text-muted">
+                  No grades yet.
+                </li>
+              )}
+            </ul>
+          </div>
         </div>
-      </div>
+      ) : null}
 
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-        <div className="rounded-xl border border-border bg-white p-3">
-          <p className="mb-2 text-sm font-semibold">Calendar</p>
-          <input className="input mb-2" placeholder="Event title" value={newEventTitle} onChange={(e) => setNewEventTitle(e.target.value)} />
-          <input className="input" type="datetime-local" value={newEventDate} onChange={(e) => setNewEventDate(e.target.value)} />
-          <button
-            className="btn-primary mt-2"
-            disabled={!newEventTitle.trim() || !newEventDate}
-            onClick={async () => {
-              try {
-                const resp = await fetchWithTimeout('/api/calendar', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    userId: studentId,
-                    courseId: selectedCourseId || null,
-                    title: newEventTitle,
-                    startAt: new Date(newEventDate).toISOString(),
-                    eventType: 'deadline',
-                  }),
-                });
-                if (!resp.ok) throw new Error('Could not save event.');
-                const data = await resp.json();
-                setEvents((prev) => [...prev, data.event].sort((a, b) => new Date(a.start_at).getTime() - new Date(b.start_at).getTime()));
-                setNewEventTitle('');
-                setNewEventDate('');
-              } catch (e) {
-                setNotice?.(e?.message || 'Could not save event.');
-              }
-            }}
-          >
-            Add event
-          </button>
-          <ul className="mt-2 space-y-1 text-xs">
-            {events.slice(0, 8).map((e) => (
-              <li key={e.id} className="rounded border border-border bg-slate-50 px-2 py-1">
-                {e.title} - {new Date(e.start_at).toLocaleString()}
-              </li>
-            ))}
-          </ul>
+      {selectedCourseId && lmsTab === 'work' ? (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <div className={lmsCardClass}>
+            <p className={lmsCardTitle}>Submit assignment</p>
+            <select
+              className="input mb-3"
+              value={activeAssignmentId}
+              onChange={(e) => setActiveAssignmentId(e.target.value)}
+            >
+              <option value="">Choose an assignment</option>
+              {assignments.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.title}
+                </option>
+              ))}
+            </select>
+            <textarea
+              className="input min-h-28"
+              value={submissionText}
+              onChange={(e) => setSubmissionText(e.target.value)}
+              placeholder="Paste or type your submission…"
+            />
+            <button
+              className="btn-primary mt-3"
+              disabled={!activeAssignmentId || !submissionText.trim()}
+              onClick={async () => {
+                try {
+                  const resp = await fetchWithTimeout('/api/submissions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      userId: studentId,
+                      assignmentId: activeAssignmentId,
+                      submissionText,
+                    }),
+                  });
+                  if (!resp.ok) throw new Error('Submission failed.');
+                  setSubmissionText('');
+                  setNotice?.('Assignment submitted.');
+                } catch (e) {
+                  setNotice?.(e?.message || 'Could not submit assignment.');
+                }
+              }}
+            >
+              Submit
+            </button>
+          </div>
+          <div className={lmsCardClass}>
+            <p className={lmsCardTitle}>Quiz attempt</p>
+            <p className="mb-3 text-xs text-muted">Record a score for a course quiz (demo flow).</p>
+            <select className="input mb-3" value={activeQuizId} onChange={(e) => setActiveQuizId(e.target.value)}>
+              <option value="">Choose a quiz</option>
+              {courseQuizzes.map((q) => (
+                <option key={q.id} value={q.id}>
+                  {q.title} ({q.difficulty})
+                </option>
+              ))}
+            </select>
+            <input
+              className="input mb-3"
+              placeholder="Score (0–100)"
+              value={quizScore}
+              onChange={(e) => setQuizScore(e.target.value)}
+            />
+            <button
+              className="btn-primary"
+              disabled={!activeQuizId || quizScore === ''}
+              onClick={async () => {
+                try {
+                  const resp = await fetchWithTimeout('/api/quizzes', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      action: 'attempt',
+                      userId: studentId,
+                      courseId: selectedCourseId,
+                      quizId: activeQuizId,
+                      score: Number(quizScore),
+                      answers: [],
+                    }),
+                  });
+                  if (!resp.ok) throw new Error('Could not submit quiz attempt.');
+                  setQuizScore('');
+                  setNotice?.('Quiz attempt saved.');
+                } catch (e) {
+                  setNotice?.(e?.message || 'Could not save quiz attempt.');
+                }
+              }}
+            >
+              Save attempt
+            </button>
+            {!courseQuizzes.length ? (
+              <p className="mt-4 text-center text-sm text-muted">No quizzes in this course.</p>
+            ) : null}
+          </div>
         </div>
-        <div className="rounded-xl border border-border bg-white p-3">
-          <p className="mb-2 text-sm font-semibold">Notifications</p>
-          <ul className="space-y-1 text-xs">
-            {notifications.length ? notifications.slice(0, 12).map((n) => (
-              <li key={n.id} className="rounded border border-border bg-slate-50 px-2 py-1">
-                <strong>{n.title}</strong> - {n.kind}
-              </li>
-            )) : <li className="text-muted">No notifications.</li>}
-          </ul>
+      ) : null}
+
+      {selectedCourseId && lmsTab === 'discuss' ? (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <div className={lmsCardClass}>
+            <p className={lmsCardTitle}>Discussions</p>
+            <label className="mb-3 block text-xs font-medium text-slate-600">
+              Your reply (used with Reply on a topic)
+              <textarea
+                className="input mt-1 min-h-20"
+                placeholder="Write a reply, then press Reply on a discussion below."
+                value={discussionText}
+                onChange={(e) => setDiscussionText(e.target.value)}
+              />
+            </label>
+            <ul className="space-y-3">
+              {discussions.length ? (
+                discussions.map((d) => (
+                  <li key={d.id} className="rounded-lg border border-slate-100 bg-slate-50/80 p-3">
+                    <p className="font-medium text-slate-800">{d.title}</p>
+                    <p className="mt-0.5 text-xs text-muted">{(d.replies || []).length} replies</p>
+                    <button
+                      type="button"
+                      className="btn-ghost mt-2 !px-2 !py-1 text-xs"
+                      disabled={!discussionText.trim()}
+                      onClick={async () => {
+                        if (!discussionText.trim()) return;
+                        try {
+                          const resp = await fetchWithTimeout('/api/discussions', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              userId: studentId,
+                              courseId: selectedCourseId,
+                              discussionId: d.id,
+                              body: discussionText,
+                            }),
+                          });
+                          if (!resp.ok) throw new Error('Reply failed.');
+                          setDiscussionText('');
+                          setNotice?.('Reply posted.');
+                        } catch (e) {
+                          setNotice?.(e?.message || 'Could not post discussion reply.');
+                        }
+                      }}
+                    >
+                      Reply to this topic
+                    </button>
+                  </li>
+                ))
+              ) : (
+                <li className={lmsMutedBox}>No discussions yet.</li>
+              )}
+            </ul>
+          </div>
+          <div className={lmsCardClass}>
+            <p className={lmsCardTitle}>Inbox</p>
+            <select className="input mb-3" value={activeThreadId} onChange={(e) => setActiveThreadId(e.target.value)}>
+              <option value="">Select a thread</option>
+              {threads.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.subject}
+                </option>
+              ))}
+            </select>
+            <div className="mb-3 max-h-48 space-y-2 overflow-y-auto rounded-lg border border-slate-100 bg-slate-50/80 p-3 text-sm">
+              {threadMessages.length ? (
+                threadMessages.map((m) => (
+                  <p key={m.id} className="leading-snug">
+                    <span className="font-medium text-slate-800">
+                      {m.sender_id === studentId ? 'You' : 'Peer'}
+                    </span>
+                    <span className="text-muted"> · </span>
+                    {m.body}
+                  </p>
+                ))
+              ) : (
+                <p className="text-center text-sm text-muted">No messages in this thread.</p>
+              )}
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+              <input
+                className="input flex-1"
+                value={messageText}
+                onChange={(e) => setMessageText(e.target.value)}
+                placeholder="Message…"
+              />
+              <button
+                type="button"
+                className="btn-primary shrink-0"
+                disabled={!activeThreadId || !messageText.trim()}
+                onClick={async () => {
+                  try {
+                    const resp = await fetchWithTimeout('/api/messages', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        userId: studentId,
+                        threadId: activeThreadId,
+                        body: messageText,
+                      }),
+                    });
+                    if (!resp.ok) throw new Error('Could not send message.');
+                    const data = await resp.json();
+                    setMessages((prev) => [...prev, data.message]);
+                    setMessageText('');
+                  } catch (e) {
+                    setNotice?.(e?.message || 'Could not send message.');
+                  }
+                }}
+              >
+                Send
+              </button>
+            </div>
+          </div>
         </div>
-      </div>
+      ) : null}
+
+      {selectedCourseId && lmsTab === 'planner' ? (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <div className={lmsCardClass}>
+            <p className={lmsCardTitle}>Calendar</p>
+            <div className="space-y-3">
+              <input
+                className="input"
+                placeholder="Event title"
+                value={newEventTitle}
+                onChange={(e) => setNewEventTitle(e.target.value)}
+              />
+              <input className="input" type="datetime-local" value={newEventDate} onChange={(e) => setNewEventDate(e.target.value)} />
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={!newEventTitle.trim() || !newEventDate}
+                onClick={async () => {
+                  try {
+                    const resp = await fetchWithTimeout('/api/calendar', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        userId: studentId,
+                        courseId: selectedCourseId || null,
+                        title: newEventTitle,
+                        startAt: new Date(newEventDate).toISOString(),
+                        eventType: 'deadline',
+                      }),
+                    });
+                    if (!resp.ok) throw new Error('Could not save event.');
+                    const data = await resp.json();
+                    setEvents((prev) =>
+                      [...prev, data.event].sort(
+                        (a, b) => new Date(a.start_at).getTime() - new Date(b.start_at).getTime(),
+                      ),
+                    );
+                    setNewEventTitle('');
+                    setNewEventDate('');
+                  } catch (e) {
+                    setNotice?.(e?.message || 'Could not save event.');
+                  }
+                }}
+              >
+                Add event
+              </button>
+            </div>
+            <ul className="mt-4 space-y-2 border-t border-slate-100 pt-4">
+              {events.slice(0, 10).map((ev) => (
+                <li
+                  key={ev.id}
+                  className="flex flex-wrap items-baseline justify-between gap-2 rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-2 text-sm"
+                >
+                  <span className="font-medium text-slate-800">{ev.title}</span>
+                  <span className="text-xs text-muted">{new Date(ev.start_at).toLocaleString()}</span>
+                </li>
+              ))}
+              {!events.length ? <li className="text-center text-sm text-muted">No upcoming events.</li> : null}
+            </ul>
+          </div>
+          <div className={lmsCardClass}>
+            <p className={lmsCardTitle}>Notifications</p>
+            <ul className="space-y-2">
+              {notifications.length ? (
+                notifications.slice(0, 14).map((n) => (
+                  <li
+                    key={n.id}
+                    className="rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-2 text-sm leading-snug"
+                  >
+                    <span className="font-medium text-slate-800">{n.title}</span>
+                    <span className="text-muted"> · {n.kind}</span>
+                  </li>
+                ))
+              ) : (
+                <li className={lmsMutedBox}>No notifications.</li>
+              )}
+            </ul>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -2470,7 +2665,7 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
       for (let idx = 0; idx < pres.slides.length; idx += 1) {
         if (cancelled) return;
         const s = pres.slides[idx];
-        next[idx] = await fetchSlideHeroImageUrl(deck, idx, s.title);
+        next[idx] = await fetchSlideHeroImageUrl(deck, idx, s);
       }
       if (!cancelled) {
         setSlideThumbByIndex(next);
@@ -2554,6 +2749,7 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
         notes: s.notes || '',
         imageSuggestion: s.imageSuggestion || '',
         graphSuggestion: s.graphSuggestion || '',
+        chartBars: slideChartBarsAreValid(s.chartBars) ? s.chartBars : undefined,
       })),
     });
   };
@@ -2584,6 +2780,7 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
             notes: s.notes.trim(),
             imageSuggestion: s.imageSuggestion.trim(),
             graphSuggestion: s.graphSuggestion.trim(),
+            ...(slideChartBarsAreValid(s.chartBars) ? { chartBars: s.chartBars } : {}),
           })),
         };
       }),
@@ -2677,7 +2874,9 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
             </div>
           </div>
           <div className="max-h-[76vh] space-y-3 overflow-y-auto pr-1">
-            {previewPresentation.slides.map((s, idx) => (
+            {previewPresentation.slides.map((s, idx) => {
+              const slideChartData = buildSlideChartJsData(s);
+              return (
               <div key={`${previewPresentation.id}-preview-${idx}`} className="rounded-xl border border-border bg-white p-3 shadow-sm">
                 <p className="text-base font-semibold">{idx + 1}. {s.title}</p>
                 <ul className="mt-2 list-disc pl-5 text-sm text-muted">
@@ -2705,11 +2904,11 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
                   </div>
                   <div className="rounded-lg border border-border bg-slate-50 p-2">
                     <p className="mb-1 text-xs font-medium text-muted">Graph</p>
-                    {(s.bullets || []).length >= 2 ? (
+                    {slideChartData ? (
                       <>
                         <div className="h-44">
                           <Bar
-                            data={buildSlideGraphData(s)}
+                            data={slideChartData}
                             options={{
                               responsive: true,
                               maintainAspectRatio: false,
@@ -2717,29 +2916,37 @@ function Presentations({ presentations, setPresentations, onGenerate, isGenerati
                                 legend: { display: false },
                                 title: {
                                   display: true,
-                                  text: 'Word-count proxy per bullet (not real metrics)',
+                                  text: (s.graphSuggestion && String(s.graphSuggestion).slice(0, 80)) || 'Values from slide outline',
                                   font: { size: 11 },
                                   color: '#64748b',
                                   padding: { bottom: 4 },
                                 },
                               },
-                              scales: { y: { beginAtZero: true, ticks: { stepSize: 2 } } },
+                              scales: { y: { beginAtZero: true } },
                             }}
                           />
                         </div>
                         <p className="mt-1 text-[11px] leading-snug text-muted">
-                          Bar heights reflect bullet length only (illustrative layout aid).
+                          Bars use numbers from the generated outline only when the source slide includes explicit comparable values.
                         </p>
                       </>
                     ) : (
-                      <p className="py-6 text-center text-xs text-muted">Add at least two bullet points to show a simple emphasis chart.</p>
+                      <div className="py-4 text-center text-xs text-muted">
+                        <p>No numeric comparison on this slide.</p>
+                        {s.graphSuggestion ? (
+                          <p className="mt-2 text-left leading-snug">
+                            <span className="font-medium text-slate-600">Chart idea (text only): </span>
+                            {s.graphSuggestion}
+                          </p>
+                        ) : null}
+                      </div>
                     )}
-                    {s.graphSuggestion ? <p className="mt-1 text-xs text-muted">{s.graphSuggestion}</p> : null}
                   </div>
                 </div>
                 {s.notes ? <p className="mt-2 text-xs text-muted">Notes: {s.notes}</p> : null}
               </div>
-            ))}
+              );
+            })}
           </div>
           {(previewPresentation.references || []).length ? (
             <div className="mt-3 rounded-lg border border-border bg-white p-2">

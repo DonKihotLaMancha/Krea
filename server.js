@@ -586,6 +586,31 @@ function tokenizeForImageSearch(q) {
     .slice(0, 12);
 }
 
+/** Wikimedia file title vs query tokens — whole-token matches score higher. */
+function scoreImageTitleAgainstTokens(fileTitle, queryTokens) {
+  const t = String(fileTitle || '')
+    .replace(/^file:/i, '')
+    .replace(/\.[a-z0-9]{2,5}$/i, '')
+    .replace(/_/g, ' ')
+    .toLowerCase();
+  let s = 0;
+  for (const tok of queryTokens) {
+    if (tok.length < 2) continue;
+    let esc;
+    try {
+      esc = tok.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    } catch {
+      esc = tok;
+    }
+    try {
+      if (new RegExp(`(?:^|[^a-z0-9])${esc}(?:[^a-z0-9]|$)`, 'i').test(t)) s += 1;
+    } catch {
+      if (t.includes(tok)) s += 1;
+    }
+  }
+  return s;
+}
+
 function isAllowedSlideImageUrl(url) {
   try {
     const u = new URL(String(url));
@@ -620,12 +645,26 @@ app.get('/api/slide-image', async (req, res) => {
     const data = await wResp.json();
     const pages = data?.query?.pages;
     if (pages && typeof pages === 'object') {
+      const queryToks = tokens.length ? tokens : tokenizeForImageSearch(search);
+      const candidates = [];
       for (const pid of Object.keys(pages)) {
-        const info = pages[pid]?.imageinfo?.[0];
+        const page = pages[pid];
+        const info = page?.imageinfo?.[0];
         const thumb = info?.thumburl || info?.url;
-        if (thumb && isAllowedSlideImageUrl(thumb)) {
-          return res.json({ url: thumb, source: 'wikimedia' });
+        if (!thumb || !isAllowedSlideImageUrl(thumb)) continue;
+        const pageTitle = page?.title || '';
+        candidates.push({
+          thumb,
+          score: scoreImageTitleAgainstTokens(pageTitle, queryToks),
+        });
+      }
+      if (candidates.length) {
+        let best = candidates[0];
+        for (let i = 1; i < candidates.length; i += 1) {
+          if (candidates[i].score > best.score) best = candidates[i];
         }
+        const pick = best.score > 0 ? best : candidates[0];
+        return res.json({ url: pick.thumb, source: 'wikimedia' });
       }
     }
     throw new Error('no image');
@@ -861,7 +900,7 @@ app.get('/api/library', async (req, res) => {
         .limit(40),
       supabase
         .from('presentation_slides')
-        .select('id,presentation_id,slide_index,title,bullets,notes,image_suggestion,graph_suggestion')
+        .select('id,presentation_id,slide_index,title,bullets,notes,image_suggestion,graph_suggestion,chart_bars')
         .order('slide_index', { ascending: true })
         .limit(3000),
       supabase
@@ -1032,12 +1071,14 @@ app.get('/api/library', async (req, res) => {
     for (const slide of presentationSlidesRows || []) {
       if (!presentationIds.has(slide.presentation_id)) continue;
       if (!groupedSlides.has(slide.presentation_id)) groupedSlides.set(slide.presentation_id, []);
+      const chartBars = normalizeChartBarsInput(slide.chart_bars);
       groupedSlides.get(slide.presentation_id).push({
         title: slide.title,
         bullets: Array.isArray(slide.bullets) ? slide.bullets.map((b) => String(b)) : [],
         notes: slide.notes || '',
         imageSuggestion: slide.image_suggestion || '',
         graphSuggestion: slide.graph_suggestion || '',
+        ...(chartBars ? { chartBars } : {}),
       });
     }
     const groupedRefs = new Map();
@@ -1584,15 +1625,19 @@ app.post('/api/library/presentation', async (req, res) => {
       .single();
     if (presErr) throw presErr;
 
-    const slideRows = slides.slice(0, 60).map((s, idx) => ({
-      presentation_id: presData.id,
-      slide_index: idx,
-      title: String(s?.title || `Slide ${idx + 1}`).trim(),
-      bullets: Array.isArray(s?.bullets) ? s.bullets.map((b) => String(b)) : [],
-      notes: String(s?.notes || '').trim(),
-      image_suggestion: String(s?.imageSuggestion || '').trim(),
-      graph_suggestion: String(s?.graphSuggestion || '').trim(),
-    }));
+    const slideRows = slides.slice(0, 60).map((s, idx) => {
+      const chartBars = normalizeChartBarsInput(s?.chartBars);
+      return {
+        presentation_id: presData.id,
+        slide_index: idx,
+        title: String(s?.title || `Slide ${idx + 1}`).trim(),
+        bullets: Array.isArray(s?.bullets) ? s.bullets.map((b) => String(b)) : [],
+        notes: String(s?.notes || '').trim(),
+        image_suggestion: String(s?.imageSuggestion || '').trim(),
+        graph_suggestion: String(s?.graphSuggestion || '').trim(),
+        chart_bars: chartBars || null,
+      };
+    });
     const refRows = references
       .slice(0, 100)
       .map((r) => ({
@@ -3049,9 +3094,9 @@ ${JSON.stringify(teacherPassages)}
     try {
       const modelData = await callOllama(quizPrompt);
       const parsed = safeParseModelJson(String(modelData.response || '').trim());
-      result = normalizeQuizResult(parsed, { mode: 'quiz', count, difficulty, passages: teacherPassages });
+      result = normalizeQuizResult(parsed, { mode: 'quiz', count, difficulty, passages: teacherPassages, docHint: title });
     } catch {
-      result = buildQuizFallback({ mode: 'quiz', count, difficulty, passages: teacherPassages });
+      result = buildQuizFallback({ mode: 'quiz', count, difficulty, passages: teacherPassages, docHint: title });
     }
 
     const { data, error } = await supabase
@@ -3190,6 +3235,7 @@ Rules:
 - Add short speaker notes (1-2 sentences).
 - Add references and Google Scholar links when available.
 - Ensure slide titles are unique and avoid repeated bullets.
+- Optional per-slide "chartBars": use ONLY when SOURCE_JSON or the slide bullets state explicit comparable numbers, percentages, or clear ordinal rankings grounded in that text. Format: [{"label":"short label","value":number}, ...] with 2 to 5 items, distinct labels. If there are no such values, omit chartBars or use []. Never invent statistics.
 - Return JSON only with this exact shape:
 {
   "title":"...",
@@ -3202,10 +3248,12 @@ Rules:
       "bullets":["..."],
       "notes":"...",
       "imageSuggestion":"...",
-      "graphSuggestion":"..."
+      "graphSuggestion":"...",
+      "chartBars":[{"label":"...","value":0}]
     }
   ]
 }
+- chartBars may be omitted or [] on any slide when not applicable.
 - Generate exactly ${requestedSlides} slides.
 
 TOPIC:
@@ -3232,7 +3280,7 @@ Return strict JSON only:
     {"text":"Primary source from uploaded material","url":"https://scholar.google.com/scholar?q=${encodeURIComponent(topic)}"}
   ],
   "slides":[
-    {"title":"Slide 1", "bullets":["...","...","..."], "notes":"...", "imageSuggestion":"...", "graphSuggestion":"..."}
+    {"title":"Slide 1", "bullets":["...","...","..."], "notes":"...", "imageSuggestion":"...", "graphSuggestion":"...", "chartBars":[]}
   ]
 }
 Create exactly ${requestedSlides} slides.
@@ -3543,10 +3591,29 @@ app.post('/api/quiz-generate', async (req, res) => {
   const count = Math.max(3, Math.min(30, Number(req.body?.count || 10)));
   const sources = Array.isArray(req.body?.sources) ? req.body.sources : [];
   if (!sources.length) return res.status(400).json({ error: 'Missing sources.' });
-  const passages = buildPassagesFromSources(sources).slice(0, 25);
+  const passages = buildPassagesFromSources(sources).slice(0, 30);
+  const docHint = String(sources[0]?.name || '')
+    .replace(/\.[^.]+$/i, '')
+    .replace(/[_]+/g, ' ')
+    .trim();
+  const sourceNames = sources.map((s) => String(s?.name || '').trim()).filter(Boolean);
+
+  if (passages.length < 3) {
+    return res.status(422).json({
+      error:
+        'Could not extract enough readable text from this PDF for a grounded quiz. Try a text-based PDF, OCR for scanned pages, or another file.',
+    });
+  }
+
   const prompt = `
-Generate a ${mode} with exactly ${count} multiple-choice questions at ${difficulty} difficulty from SOURCE_PASSAGES.
-Ground every question in the passages; distractors must be plausible but wrong.
+Generate a ${mode} with exactly ${count} multiple-choice questions at ${difficulty} difficulty.
+
+STRICT GROUNDING: Every question and the correct answer MUST be fully answerable ONLY from the excerpts in SOURCE_PASSAGES.
+Do NOT use outside knowledge about subjects that are not clearly supported by those excerpts.
+Distractors must be plausible but wrong according to the passages (or unsupported by them).
+SOURCE_DOCUMENT_NAMES (context only — do not invent facts from filenames alone): ${JSON.stringify(sourceNames)}
+The "topic" field must briefly describe the subject matter of the passages (what they discuss), not an unrelated generic theme.
+
 Return strict JSON only:
 {
   "topic":"short topic label",
@@ -3568,9 +3635,9 @@ ${JSON.stringify(passages)}
   try {
     const data = await callOllama(prompt);
     const parsed = safeParseModelJson(String(data.response || '').trim());
-    return res.json(normalizeQuizResult(parsed, { mode, count, difficulty, passages }));
+    return res.json(normalizeQuizResult(parsed, { mode, count, difficulty, passages, docHint }));
   } catch {
-    return res.json(buildQuizFallback({ mode, count, difficulty, passages }));
+    return res.json(buildQuizFallback({ mode, count, difficulty, passages, docHint }));
   }
 });
 
@@ -3693,13 +3760,17 @@ async function generatePresentationWithOllama(prompt) {
     ? parsed.slides
         .filter((s) => s?.title && Array.isArray(s?.bullets) && s.bullets.length)
         .slice(0, 20)
-        .map((s) => ({
-          title: String(s.title).trim(),
-          bullets: s.bullets.map((b) => String(b).trim()).filter(Boolean).slice(0, 6),
-          notes: String(s.notes || '').trim(),
-          imageSuggestion: String(s.imageSuggestion || '').trim(),
-          graphSuggestion: String(s.graphSuggestion || '').trim(),
-        }))
+        .map((s) => {
+          const chartBars = normalizeChartBarsInput(s.chartBars);
+          const base = {
+            title: String(s.title).trim(),
+            bullets: s.bullets.map((b) => String(b).trim()).filter(Boolean).slice(0, 6),
+            notes: String(s.notes || '').trim(),
+            imageSuggestion: String(s.imageSuggestion || '').trim(),
+            graphSuggestion: String(s.graphSuggestion || '').trim(),
+          };
+          return chartBars ? { ...base, chartBars } : base;
+        })
     : [];
   const normalizedSlides = normalizeSlides(slides);
   const finalReferences = references.length ? references : buildScholarReferencesFromSlides(title, normalizedSlides);
@@ -3806,6 +3877,23 @@ function normalizeSlides(slides) {
     seenTitle.add(k);
     return s.bullets.length >= 2;
   });
+}
+
+/** 2–5 bars, finite values, distinct labels; otherwise null (omit chart). */
+function normalizeChartBarsInput(raw) {
+  if (!Array.isArray(raw)) return null;
+  const out = [];
+  const seen = new Set();
+  for (const row of raw.slice(0, 5)) {
+    const label = String(row?.label ?? '').trim().slice(0, 120);
+    const value = Number(row?.value);
+    if (!label || !Number.isFinite(value)) continue;
+    const kl = label.toLowerCase();
+    if (seen.has(kl)) continue;
+    seen.add(kl);
+    out.push({ label, value });
+  }
+  return out.length >= 2 ? out : null;
 }
 
 function normalizeApartados(apartados) {
@@ -3935,10 +4023,11 @@ function buildPassagesFromSources(sources) {
   const passages = [];
   for (const source of sources) {
     const name = String(source?.name || 'source').trim();
-    const content = String(source?.content || '').trim().slice(0, 20000);
-    const sourceJson = buildSourceJson(content);
-    for (const s of sourceJson.sentences.slice(0, 20)) {
-      passages.push({ source: name, excerpt: s, page: null });
+    const content = String(source?.content || '').trim().slice(0, 80000);
+    const sentences = extractStudySentences(content, 48);
+    for (const s of sentences) {
+      const excerpt = s.length > 520 ? `${s.slice(0, 520)}…` : s;
+      passages.push({ source: name, excerpt, page: null });
     }
   }
   return passages;
@@ -4104,7 +4193,7 @@ function buildQuizQuestionsFromPassages(passages, count) {
   return out;
 }
 
-function normalizeQuizResult(parsed, { mode, count, difficulty, passages }) {
+function normalizeQuizResult(parsed, { mode, count, difficulty, passages, docHint }) {
   const normalized = normalizeQuizQuestions(parsed?.questions);
   const questions =
     normalized.length >= Math.min(3, count) ? normalized.slice(0, count) : buildQuizQuestionsFromPassages(passages || [], count);
@@ -4113,9 +4202,11 @@ function normalizeQuizResult(parsed, { mode, count, difficulty, passages }) {
   const correctEst = Number.isFinite(est)
     ? Math.max(0, Math.min(total, est))
     : Math.min(total, Math.round(total * 0.72));
+  const topicFromModel = String(parsed?.topic || '').trim();
+  const hint = String(docHint || '').trim();
   return {
     id: Date.now(),
-    topic: String(parsed?.topic || mode.toUpperCase()).trim(),
+    topic: topicFromModel || hint || mode.toUpperCase(),
     total,
     correct: correctEst,
     sec: Math.max(30, Number(parsed?.sec || Math.max(120, total * 45))),
@@ -4124,12 +4215,13 @@ function normalizeQuizResult(parsed, { mode, count, difficulty, passages }) {
   };
 }
 
-function buildQuizFallback({ mode, count, difficulty, passages }) {
+function buildQuizFallback({ mode, count, difficulty, passages, docHint }) {
   const questions = buildQuizQuestionsFromPassages(passages || [], count);
   const total = questions.length;
+  const hint = String(docHint || '').trim();
   return {
     id: Date.now(),
-    topic: `${mode.toUpperCase()} (backup)`,
+    topic: hint || `${mode.toUpperCase()} (backup)`,
     total,
     correct: Math.round(total * 0.7),
     sec: 120,
@@ -4164,19 +4256,64 @@ function chunkTextForStore(text, maxChunk = 2000) {
   return chunks;
 }
 
-function buildSourceJson(text) {
-  const cleaned = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 18000);
-  const sentences = (cleaned.match(/[^.!?]+[.!?]/g) || [])
+/**
+ * Study-sized excerpts for prompts (quiz, RAG snippets). PDFs often lack clean ./? endings;
+ * falls back to line-based and fixed windows so SOURCE_PASSAGES is never empty for real text.
+ */
+function extractStudySentences(text, maxOut = 45) {
+  const raw = String(text || '').trim();
+  if (!raw) return [];
+  const normalizedBreaks = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const collapsed = normalizedBreaks.replace(/[\t ]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  const singleLine = collapsed.replace(/\n+/g, ' ').slice(0, 120000);
+
+  let parts = (singleLine.match(/[^.!?。！？]+[.!?。！？]/g) || [])
     .map((s) => s.trim())
-    .filter((s) => s.length >= 40 && s.length <= 260)
-    .slice(0, 60);
+    .filter((s) => s.length >= 20 && s.length <= 450);
+
+  if (parts.length < 8) {
+    const lines = normalizedBreaks
+      .split(/\n+/)
+      .map((l) => l.trim().replace(/\s+/g, ' '))
+      .filter((l) => l.length >= 32 && l.length <= 520);
+    for (const l of lines) {
+      if (parts.length >= maxOut) break;
+      parts.push(l);
+    }
+  }
+
+  if (parts.length < 6) {
+    const slug = singleLine.replace(/\s+/g, ' ');
+    for (let i = 0; i < slug.length && parts.length < maxOut; i += 360) {
+      const chunk = slug.slice(i, i + 420).trim();
+      if (chunk.length >= 45) parts.push(chunk);
+    }
+  }
+
+  const seen = new Set();
+  const out = [];
+  for (const p of parts) {
+    const key = p.slice(0, 96).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(p);
+    if (out.length >= maxOut) break;
+  }
+  return out;
+}
+
+function buildSourceJson(text) {
+  const clipped = String(text || '').trim().slice(0, 25000);
+  const cleaned = clipped.replace(/\s+/g, ' ').trim().slice(0, 18000);
+  const sentences = extractStudySentences(clipped, 55);
 
   const stop = new Set([
     'about','after','again','being','between','could','every','first','from','have','into','other','since',
     'their','there','these','those','through','until','using','which','while','would','where','with','this',
   ]);
   const freq = new Map();
-  for (const s of sentences) {
+  const topicLines = sentences.length ? sentences : cleaned ? [cleaned.slice(0, 800)] : [];
+  for (const s of topicLines) {
     const uniq = new Set(
       s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w.length >= 5 && !stop.has(w)),
     );
@@ -4188,7 +4325,7 @@ function buildSourceJson(text) {
   return {
     topics,
     facts,
-    sentences: sentences.slice(0, 30),
+    sentences: sentences.slice(0, 35),
   };
 }
 
