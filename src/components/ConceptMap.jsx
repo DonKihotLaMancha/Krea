@@ -95,38 +95,32 @@ function getVisibleNodeIds(root, children, collapsedIds) {
 }
 
 function buildDirectedChildren(nodes, links) {
-  const lev = new Map(nodes.map((n) => [n.id, Number(n.level) || 0]));
+  // Treat tree edges as directed links: `source` -> `target` (parent -> child).
   const children = new Map();
   const parent = new Map();
-  for (const n of nodes) {
-    children.set(n.id, []);
-  }
+
+  for (const n of nodes) children.set(n.id, []);
+
   for (const l of links) {
-    const a = l.source;
-    const b = l.target;
-    const la = lev.get(a);
-    const lb = lev.get(b);
-    let p;
-    let c;
-    if (lb === la + 1) {
-      p = a;
-      c = b;
-    } else if (la === lb + 1) {
-      p = b;
-      c = a;
-    } else {
-      continue;
-    }
-    if (!parent.has(c)) {
-      parent.set(c, p);
-      children.get(p).push(c);
-    }
+    const p = l.source;
+    const c = l.target;
+    if (!children.has(p) || !children.has(c)) continue;
+    if (parent.has(c)) continue; // keep the first parent deterministically
+    parent.set(c, p);
+    children.get(p).push(c);
   }
-  const root =
-    nodes.find((n) => Number(n.level) === 0)?.id ||
-    nodes.find((n) => /main|central|topic|root/i.test(String(n.label || '')))?.id ||
-    nodes[0]?.id;
+
+  const parentless = nodes.filter((n) => !parent.has(n.id)).map((n) => n.id);
+  let root =
+    nodes.find((n) => Number(n.level) === 0 && parentless.includes(n.id))?.id ||
+    nodes.find((n) => /main|central|topic|root/i.test(String(n.label || '')) && parentless.includes(n.id))?.id ||
+    parentless[0] ||
+    nodes[0]?.id ||
+    null;
+
   if (!root) return { root: null, children, parent };
+
+  // Ensure every node is reachable for layout even if links are sparse.
   for (const n of nodes) {
     if (n.id === root) continue;
     if (!parent.has(n.id)) {
@@ -134,9 +128,8 @@ function buildDirectedChildren(nodes, links) {
       children.get(root).push(n.id);
     }
   }
-  for (const [, arr] of children) {
-    arr.sort((a, b) => String(a).localeCompare(String(b)));
-  }
+
+  for (const [, arr] of children) arr.sort((a, b) => String(a).localeCompare(String(b)));
   return { root, children, parent };
 }
 
@@ -236,6 +229,90 @@ function layoutLevelColumns(nodes) {
     }
   }
   return { positions: out, contentW: maxW + pad, contentH: maxH + pad };
+}
+
+/**
+ * Layered left-to-right placement (Google-Docs style):
+ * depth columns on X, stacked boxes vertically on Y.
+ */
+function layoutLayeredTreePositions(root, children, nodesById, measureById) {
+  const positions = new Map();
+  if (!root) return { positions, contentW: 400, contentH: 300 };
+
+  const depthById = new Map([[root, 0]]);
+  const q = [root];
+  while (q.length) {
+    const id = q.shift();
+    const d0 = depthById.get(id) ?? 0;
+    for (const c of children.get(id) || []) {
+      if (depthById.has(c)) continue;
+      depthById.set(c, d0 + 1);
+      q.push(c);
+    }
+  }
+
+  // Ensure any remaining nodes still get a column.
+  for (const id of measureById.keys()) {
+    if (!depthById.has(id)) depthById.set(id, 1);
+  }
+
+  const byDepth = new Map();
+  for (const [id, d] of depthById.entries()) {
+    if (!byDepth.has(d)) byDepth.set(d, []);
+    byDepth.get(d).push(id);
+  }
+
+  const sortedDepths = [...byDepth.keys()].sort((a, b) => a - b);
+  const pad = 72;
+  const layeredRowGap = 132;
+  const layeredColGap = 240;
+  const temp = new Map();
+  const colHeights = new Map();
+  let maxX = 0;
+  let maxH = 0;
+  const colMaxWidth = new Map();
+
+  for (const d of sortedDepths) {
+    const ids = byDepth.get(d).slice().sort((a, b) => {
+      const na = String(nodesById.get(a)?.label || nodesById.get(a)?.nombre || '').toLowerCase();
+      const nb = String(nodesById.get(b)?.label || nodesById.get(b)?.nombre || '').toLowerCase();
+      return na.localeCompare(nb);
+    });
+
+    let maxWForCol = MIN_BOX_W;
+    for (const id of ids) {
+      const m = measureById.get(id) || { w: MIN_BOX_W };
+      maxWForCol = Math.max(maxWForCol, m.w ?? MIN_BOX_W);
+    }
+    colMaxWidth.set(d, maxWForCol);
+
+    const prevDepths = sortedDepths.filter((x) => x < d);
+    const prevWidth = prevDepths.reduce((sum, x) => sum + (colMaxWidth.get(x) ?? MIN_BOX_W), 0);
+    const colX = pad + prevWidth + prevDepths.length * layeredColGap;
+    let y = pad;
+    for (const id of ids) {
+      const m = measureById.get(id) || { w: MIN_BOX_W, h: 44 };
+      const w = m.w ?? MIN_BOX_W;
+      const h = m.h ?? 44;
+      temp.set(id, { x: colX, y, depth: d, w, h });
+      y += h + layeredRowGap;
+      maxX = Math.max(maxX, colX + w);
+    }
+    colHeights.set(d, y);
+    maxH = Math.max(maxH, y);
+  }
+
+  for (const [id, p] of temp.entries()) {
+    const colH = colHeights.get(p.depth) ?? maxH;
+    const delta = (maxH - colH) / 2;
+    positions.set(id, { ...p, y: p.y + delta });
+  }
+
+  return {
+    positions,
+    contentW: Math.max(980, maxX + pad),
+    contentH: Math.max(760, maxH + pad),
+  };
 }
 
 function buildNodesFromMap(conceptMapData, collapsedIds = new Set()) {
@@ -350,8 +427,64 @@ function buildApartadosLayout(apartados, hubLabel) {
 }
 
 function edgePathBezier(x1, y1, x2, y2) {
-  const dx = Math.max(48, (x2 - x1) * 0.45);
-  return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const dist = Math.hypot(dx, dy);
+  if (!Number.isFinite(dist) || dist < 0.01) {
+    return `M ${x1} ${y1} L ${x2} ${y2}`;
+  }
+
+  // Perpendicular unit vector controls the curve "side".
+  const nx = -dy / dist;
+  const ny = dx / dist;
+  const curvature = Math.min(160, Math.max(56, dist * 0.25));
+
+  const c1x = x1 + dx * 0.35 + nx * curvature;
+  const c1y = y1 + dy * 0.35 + ny * curvature;
+  const c2x = x1 + dx * 0.65 + nx * curvature;
+  const c2y = y1 + dy * 0.65 + ny * curvature;
+
+  return `M ${x1} ${y1} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${x2} ${y2}`;
+}
+
+function rectBorderAnchor(fromRect, toRect) {
+  const x = fromRect.x;
+  const y = fromRect.y;
+  const w = fromRect.w;
+  const h = fromRect.h;
+  const cx = x + w / 2;
+  const cy = y + h / 2;
+
+  const tx = toRect.x + toRect.w / 2;
+  const ty = toRect.y + toRect.h / 2;
+
+  const dx = tx - cx;
+  const dy = ty - cy;
+  const dist = Math.hypot(dx, dy);
+  if (!Number.isFinite(dist) || dist < 0.01) return { x: cx, y: cy };
+
+  const eps = 1e-6;
+  const candidates = [];
+
+  // Vertical sides: x = left/right edge.
+  if (Math.abs(dx) > eps) {
+    const t = (dx > 0 ? w / 2 : -w / 2) / dx;
+    const ix = cx + t * dx; // equals edge
+    const iy = cy + t * dy;
+    if (iy >= y - eps && iy <= y + h + eps) candidates.push({ t, x: ix, y: iy });
+  }
+
+  // Horizontal sides: y = top/bottom edge.
+  if (Math.abs(dy) > eps) {
+    const t = (dy > 0 ? h / 2 : -h / 2) / dy;
+    const ix = cx + t * dx;
+    const iy = cy + t * dy; // equals edge
+    if (ix >= x - eps && ix <= x + w + eps) candidates.push({ t, x: ix, y: iy });
+  }
+
+  if (!candidates.length) return { x: cx, y: cy };
+  candidates.sort((a, b) => a.t - b.t);
+  return candidates[0];
 }
 
 export default function ConceptMap({
@@ -395,22 +528,25 @@ export default function ConceptMap({
   const layout = useMemo(() => {
     if (isFromAiMap) {
       const placed = buildNodesFromMap(conceptMapData, collapsedSet);
-      let maxR = 0;
-      let maxB = 0;
-      for (const n of placed) {
-        maxR = Math.max(maxR, n.x + n.w);
-        maxB = Math.max(maxB, n.y + n.h);
-      }
-      const pad = 48;
-      const contentW = Math.max(520, maxR + pad);
-      const contentH = Math.max(360, maxB + pad);
       const treeLinks = (conceptMapData?.links || []).filter((l) => !l.crossLink);
       const { root, children } = buildDirectedChildren(
         placed.map((n) => ({ id: n.id, label: n.nombre, level: n.level })),
         treeLinks,
       );
       const branchFill = assignBranchColorsFromTree(root, children);
-      return { nodes: placed, hub: null, contentW, contentH, branchFill, children, rootId: root };
+      const nodesById = new Map(placed.map((n) => [n.id, n]));
+      const measureById = new Map(placed.map((n) => [n.id, n._measure || measureBoxForNode(n)]));
+      const { positions, contentW, contentH } = layoutLayeredTreePositions(root, children, nodesById, measureById);
+
+      const nodes = placed
+        .filter((n) => positions.has(n.id))
+        .map((n) => {
+          const p = positions.get(n.id);
+          const m = measureById.get(n.id) || n._measure || { w: n.w, h: n.h };
+          return { ...n, x: p.x, y: p.y, w: p.w ?? m.w, h: p.h ?? m.h, _measure: m };
+        });
+
+      return { nodes, hub: null, contentW, contentH, branchFill, children, rootId: root };
     }
     const { nodes, hub, contentW, contentH } = buildApartadosLayout(apartados, hubLabel);
     const branchFill = new Map();
@@ -434,6 +570,7 @@ export default function ConceptMap({
   const selected = allDrawNodes.find((n) => n.id === selectedId) || allDrawNodes[0];
 
   const visibleNodeIds = useMemo(() => new Set(allDrawNodes.map((n) => n.id)), [allDrawNodes]);
+  const nodeDepthById = useMemo(() => new Map(allDrawNodes.map((n) => [n.id, Number(n.level) || 0])), [allDrawNodes]);
 
   const treeEdges = useMemo(() => {
     if (!isFromAiMap || !conceptMapData?.links?.length) return [];
@@ -444,10 +581,34 @@ export default function ConceptMap({
 
   const crossEdges = useMemo(() => {
     if (!isFromAiMap || !conceptMapData?.links?.length) return [];
-    return conceptMapData.links.filter(
+    const allCross = conceptMapData.links.filter(
       (l) => l.crossLink && visibleNodeIds.has(l.source) && visibleNodeIds.has(l.target),
     );
-  }, [isFromAiMap, conceptMapData?.links, visibleNodeIds]);
+
+    // Reduce cross-links when the graph is dense to keep the map readable.
+    const denseCount = allDrawNodes.length;
+    const maxCrossLinks = denseCount >= 26 ? 8 : denseCount >= 18 ? 10 : 12;
+    if (allCross.length <= maxCrossLinks) return allCross;
+
+    const scored = allCross.map((l) => {
+      const da = nodeDepthById.get(l.source) ?? 0;
+      const db = nodeDepthById.get(l.target) ?? 0;
+      const depthDiff = Math.abs(da - db);
+      return { l, depthDiff };
+    });
+
+    scored.sort((a, b) => {
+      if (a.depthDiff !== b.depthDiff) return a.depthDiff - b.depthDiff;
+      const as = String(a.l.source);
+      const bs = String(b.l.source);
+      if (as !== bs) return as.localeCompare(bs);
+      const at = String(a.l.target);
+      const bt = String(b.l.target);
+      return at.localeCompare(bt);
+    });
+
+    return scored.slice(0, maxCrossLinks).map((x) => x.l);
+  }, [isFromAiMap, conceptMapData?.links, visibleNodeIds, allDrawNodes.length, nodeDepthById]);
 
   const hubEdges = useMemo(() => {
     if (isFromAiMap || !hub || !nodes.length) return [];
@@ -532,14 +693,12 @@ export default function ConceptMap({
       const source = nodeById.get(l.source);
       const target = nodeById.get(l.target);
       if (!source || !target) return null;
-      const x1 = source.x + source.w / 2;
-      const y1 = source.y + source.h / 2;
-      const x2 = target.x + target.w / 2;
-      const y2 = target.y + target.h / 2;
+      const a1 = rectBorderAnchor(source, target);
+      const a2 = rectBorderAnchor(target, source);
       return (
         <path
           key={`${dashed ? 'x' : 't'}-${l.source}-${l.target}-${i}`}
-          d={edgePathBezier(x1, y1, x2, y2)}
+          d={edgePathBezier(a1.x, a1.y, a2.x, a2.y)}
           fill="none"
           stroke={dashed ? '#94a3b8' : stroke}
           strokeWidth={dashed ? 1.1 : 1.25}
@@ -640,11 +799,15 @@ export default function ConceptMap({
           </button>
           <div
             ref={scrollRef}
-            className="max-h-[78vh] touch-pan-y overflow-auto overscroll-contain p-2 pt-2"
+            className="max-h-[86vh] min-h-[68vh] touch-pan-y overflow-auto overscroll-contain p-3 pt-3"
             onWheel={(e) => {
               if (!e.ctrlKey) return;
               e.preventDefault();
-              setZoomLevel((z) => Math.max(0.25, Math.min(4, z * (e.deltaY > 0 ? 0.92 : 1.08))));
+              // Lower wheel sensitivity for smoother trackpad/mouse zoom.
+              const magnitude = Math.min(80, Math.abs(e.deltaY));
+              const step = 1 + magnitude * 0.001;
+              const factor = e.deltaY > 0 ? 1 / step : step;
+              setZoomLevel((z) => Math.max(0.25, Math.min(4, z * factor)));
             }}
             onPointerDown={(e) => {
               if (e.button !== 0) return;
@@ -878,13 +1041,107 @@ export default function ConceptMap({
             <p className="text-xs text-muted">
               Tier {selected.level} {selected.level === 0 ? '(theme)' : ''}
               {isFromAiMap && selected.categoryTag ? ` · ${selected.categoryTag}` : ''}
+              {highPrioritySet?.has(selected.id) ? ' · high priority' : ''}
             </p>
           ) : null}
+
           {isFromAiMap && selected.tldr ? (
             <p className="mt-1 text-sm text-slate-800">{selected.tldr}</p>
           ) : null}
+
           <p className="mt-1 text-sm text-muted">{selected.descripcion || 'No description available.'}</p>
-          {null}
+
+          {isFromAiMap ? (
+            <>
+              {(() => {
+                const incoming = treeEdges.filter((e) => e.target === selected.id);
+                const outgoing = treeEdges.filter((e) => e.source === selected.id);
+                const hasCh = (treeChildrenMap?.get(selected.id) || []).length > 0;
+                const isCollapsed = collapsedIdsArr.includes(selected.id);
+                const cross = crossEdges.filter((e) => e.source === selected.id || e.target === selected.id);
+                const parentLines = incoming.slice(0, 3).map((e) => {
+                  const src = nodeById.get(e.source);
+                  return { label: e.label || 'related', name: src?.nombre || src?.label || e.source };
+                });
+                const childLines = outgoing.slice(0, 3).map((e) => {
+                  const dst = nodeById.get(e.target);
+                  return { label: e.label || 'includes', name: dst?.nombre || dst?.label || e.target };
+                });
+                return (
+                  <>
+                    {hasCh ? (
+                      <button
+                        type="button"
+                        className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-slate-100"
+                        onClick={() => {
+                          setCollapsedIdsArr((prev) =>
+                            prev.includes(selected.id) ? prev.filter((x) => x !== selected.id) : [...prev, selected.id],
+                          );
+                        }}
+                      >
+                        {isCollapsed ? 'Expand branch' : 'Collapse branch'}
+                      </button>
+                    ) : null}
+
+                    <details className="mt-2 rounded-lg border border-border bg-white p-2 text-[11px]">
+                      <summary className="cursor-pointer font-semibold text-slate-800">Connections</summary>
+                      <div className="mt-2 space-y-2">
+                        {parentLines.length ? (
+                          <div>
+                            <p className="font-semibold text-slate-800">Parents</p>
+                            <ul className="mt-1 space-y-1">
+                              {parentLines.map((p, i) => (
+                                <li key={`pl-${i}`} className="text-slate-700">
+                                  <span className="font-medium">{p.name}</span>
+                                  <span className="text-slate-500"> · {p.label}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : null}
+
+                        {childLines.length ? (
+                          <div>
+                            <p className="font-semibold text-slate-800">Children</p>
+                            <ul className="mt-1 space-y-1">
+                              {childLines.map((c, i) => (
+                                <li key={`cl-${i}`} className="text-slate-700">
+                                  <span className="font-medium">{c.name}</span>
+                                  <span className="text-slate-500"> · {c.label}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : null}
+
+                        {cross.length ? (
+                          <div>
+                            <p className="font-semibold text-slate-800">Cross-links</p>
+                            <ul className="mt-1 space-y-1">
+                              {cross.slice(0, 4).map((e, i) => {
+                                const otherId = e.source === selected.id ? e.target : e.source;
+                                const other = nodeById.get(otherId);
+                                return (
+                                  <li key={`cr-${i}`} className="text-slate-700">
+                                    <span className="font-medium">{other?.nombre || other?.label || otherId}</span>
+                                    <span className="text-slate-500"> · {e.label || 'related'}</span>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          </div>
+                        ) : null}
+
+                        {!parentLines.length && !childLines.length && !cross.length ? (
+                          <p className="text-slate-500">No connections visible for this node.</p>
+                        ) : null}
+                      </div>
+                    </details>
+                  </>
+                );
+              })()}
+            </>
+          ) : null}
         </div>
       ) : null}
     </section>

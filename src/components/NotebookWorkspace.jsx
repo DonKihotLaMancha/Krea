@@ -166,6 +166,7 @@ export default function NotebookWorkspace({
   }, [chunks, selectedChunkIds]);
 
   const noSources = !chunks.length;
+  const hasSelectedSources = selectedSources.length > 0;
   const busy = isBusy || localLoading;
 
   const runSection = async (key, cb, setter) => {
@@ -262,7 +263,14 @@ export default function NotebookWorkspace({
           <button
             type="button"
             className="btn-primary !px-2 !py-1 text-xs"
-            disabled={busy || noSources || !onResearchSynthesis}
+            disabled={busy || !hasSelectedSources || !onResearchSynthesis}
+            title={
+              busy
+                ? 'Working…'
+                : !hasSelectedSources
+                  ? 'Select at least one source PDF.'
+                  : undefined
+            }
             onClick={async () =>
               runSection(
                 'research',
@@ -280,7 +288,14 @@ export default function NotebookWorkspace({
           <button
             type="button"
             className="btn-primary !px-2 !py-1 text-xs"
-            disabled={busy || noSources || !onCornellNotes}
+            disabled={busy || !hasSelectedSources || !onCornellNotes}
+            title={
+              busy
+                ? 'Working…'
+                : !hasSelectedSources
+                  ? 'Select at least one source PDF.'
+                  : undefined
+            }
             onClick={async () => runSection('cornell', () => onCornellNotes?.({ sources: selectedSources }), setCornellNotes)}
           >
             {localLoading === 'cornell' ? '…' : 'Cornell notes'}
@@ -288,7 +303,14 @@ export default function NotebookWorkspace({
           <button
             type="button"
             className="btn-primary !px-2 !py-1 text-xs"
-            disabled={busy || noSources || !onStoryboardPresentation}
+            disabled={busy || !hasSelectedSources || !onStoryboardPresentation}
+            title={
+              busy
+                ? 'Working…'
+                : !hasSelectedSources
+                  ? 'Select at least one source PDF.'
+                  : undefined
+            }
             onClick={async () =>
               runSection(
                 'storyboard',

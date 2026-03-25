@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 const SWIPE_GRADE_PX = 72;
 const SWIPE_REVEAL_PX = 56;
@@ -24,6 +24,9 @@ export default function FlashcardDeck({
   const flashTimer = useRef(null);
   const [dragX, setDragX] = useState(0);
   const [gradeFlash, setGradeFlash] = useState(null);
+  const [reviewedIds, setReviewedIds] = useState(() => new Set());
+  const [roundComplete, setRoundComplete] = useState(false);
+  const deckSize = cards.length;
 
   const triggerGradeFlash = useCallback((kind) => {
     if (flashTimer.current) window.clearTimeout(flashTimer.current);
@@ -35,6 +38,15 @@ export default function FlashcardDeck({
   }, []);
 
   const handleRight = useCallback(() => {
+    if (!currentCard || roundComplete) return;
+    let completedNow = false;
+    setReviewedIds((prev) => {
+      const next = new Set(prev);
+      next.add(currentCard.id);
+      completedNow = next.size >= deckSize;
+      return next;
+    });
+    setRoundComplete(completedNow);
     triggerGradeFlash('right');
     try {
       if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(12);
@@ -42,9 +54,19 @@ export default function FlashcardDeck({
       /* ignore */
     }
     onRight();
-  }, [onRight, triggerGradeFlash]);
+    setShowAnswer(false);
+  }, [currentCard, deckSize, onRight, roundComplete, setShowAnswer, triggerGradeFlash]);
 
   const handleWrong = useCallback(() => {
+    if (!currentCard || roundComplete) return;
+    let completedNow = false;
+    setReviewedIds((prev) => {
+      const next = new Set(prev);
+      next.add(currentCard.id);
+      completedNow = next.size >= deckSize;
+      return next;
+    });
+    setRoundComplete(completedNow);
     triggerGradeFlash('wrong');
     try {
       if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate([18, 40, 18]);
@@ -52,19 +74,31 @@ export default function FlashcardDeck({
       /* ignore */
     }
     onWrong();
-  }, [onWrong, triggerGradeFlash]);
+    setShowAnswer(false);
+  }, [currentCard, deckSize, onWrong, roundComplete, setShowAnswer, triggerGradeFlash]);
 
   useEffect(() => () => {
     if (flashTimer.current) window.clearTimeout(flashTimer.current);
   }, []);
 
+  const deckSignature = useMemo(
+    () => cards.map((c) => c.id).slice().sort().join('|'),
+    [cards],
+  );
+
+  useEffect(() => {
+    setReviewedIds(new Set());
+    setRoundComplete(false);
+  }, [deckSignature]);
+
   const toggleFlip = useCallback(() => {
+    if (roundComplete) return;
     setShowAnswer((v) => !v);
-  }, [setShowAnswer]);
+  }, [roundComplete, setShowAnswer]);
 
   useEffect(() => {
     const onKey = (e) => {
-      if (!currentCard) return;
+      if (!currentCard || roundComplete) return;
       const t = e.target;
       if (
         t &&
@@ -94,7 +128,7 @@ export default function FlashcardDeck({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [currentCard, showAnswer, handleWrong, handleRight, toggleFlip]);
+  }, [currentCard, roundComplete, showAnswer, handleWrong, handleRight, toggleFlip]);
 
   const onPointerDown = (e) => {
     pointerStart.current = { x: e.clientX, y: e.clientY };
@@ -103,7 +137,7 @@ export default function FlashcardDeck({
   };
 
   const onPointerMove = (e) => {
-    if (!pointerStart.current) return;
+    if (!pointerStart.current || roundComplete) return;
     setDragX(e.clientX - pointerStart.current.x);
   };
 
@@ -139,7 +173,8 @@ export default function FlashcardDeck({
     if (acted) suppressClickUntil.current = Date.now() + 320;
   };
 
-  const deckSize = cards.length;
+  const totalRated = sessionRight + sessionWrong;
+  const accuracy = totalRated ? Math.round((sessionRight / totalRated) * 100) : 0;
 
   const cardShellClass =
     gradeFlash === 'right'
@@ -161,7 +196,7 @@ export default function FlashcardDeck({
       </div>
 
       {!currentCard ? (
-        <p className="text-sm text-muted">
+        <p className="mx-auto max-w-2xl rounded-lg border border-slate-100 bg-slate-50 p-3 text-sm text-muted">
           {sourceLabel ? (
             <>
               No flashcards yet for “{sourceLabel}”. Pick a deck style and click{' '}
@@ -187,6 +222,38 @@ export default function FlashcardDeck({
             </p>
           </div>
 
+          {roundComplete ? (
+            <div className="mx-auto w-full max-w-xl rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <p className="text-center text-base font-semibold text-slate-900">Round complete</p>
+              <p className="mt-1 text-center text-sm text-slate-700">
+                You reviewed {reviewedIds.size} / {deckSize} cards.
+              </p>
+              <p className="mt-1 text-center text-sm text-slate-700">
+                Accuracy: <span className="font-semibold">{accuracy}%</span> ({sessionRight} known, {sessionWrong} review)
+              </p>
+              <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700">
+                <p className="font-medium text-slate-800">Performance analysis</p>
+                {accuracy >= 85 ? (
+                  <p className="mt-1">Strong recall. Keep spacing reviews and add a few harder cards to avoid overconfidence.</p>
+                ) : accuracy >= 60 ? (
+                  <p className="mt-1">Solid progress. Focus on the cards you marked “Still learning” and explain answers out loud once.</p>
+                ) : (
+                  <p className="mt-1">Foundation needs reinforcement. Do a shorter second round now and break difficult cards into smaller facts.</p>
+                )}
+              </div>
+              <button
+                type="button"
+                className="btn-primary mt-3 w-full"
+                onClick={() => {
+                  setReviewedIds(new Set());
+                  setRoundComplete(false);
+                  setShowAnswer(false);
+                }}
+              >
+                Start another round
+              </button>
+            </div>
+          ) : (
           <div className="relative mx-auto w-full max-w-xl pb-2">
             {cards.slice(1, 3).map((c, stackIdx) => (
               <div
@@ -267,7 +334,9 @@ export default function FlashcardDeck({
               </div>
             </motion.div>
           </div>
+          )}
 
+          {!roundComplete ? (
           <div className="mx-auto mt-2 flex max-w-xl flex-col gap-3 sm:flex-row sm:items-stretch">
             <button
               type="button"
@@ -284,6 +353,7 @@ export default function FlashcardDeck({
               Know it
             </button>
           </div>
+          ) : null}
 
           <p className="mx-auto mt-3 max-w-xl text-center text-[11px] text-slate-400">
             Keyboard: Space flip · ← / → rate when the definition is showing

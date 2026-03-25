@@ -44,13 +44,17 @@ export async function initSupabaseClient() {
     let anonKey = w.anonKey || b.anonKey;
     if (!url || !anonKey) {
       try {
-        const r = await fetch(apiUrl('/api/client-env'));
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), 6000);
+        const r = await fetch(apiUrl('/api/client-env'), { signal: controller.signal });
+        window.clearTimeout(timeout);
         if (r.ok) {
           const j = await r.json();
           url = j.supabaseUrl || url;
           anonKey = j.supabaseAnonKey || anonKey;
         }
       } catch (e) {
+        // Keep app usable even when env fetch hangs/unavailable.
         console.warn('[Supabase] /api/client-env failed', e);
       }
     }

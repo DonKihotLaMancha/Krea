@@ -128,6 +128,39 @@ function mergeLibraryChunksWithLocal(prev, dbChunks) {
   return [...prepended, ...safeDb];
 }
 
+function dedupeChunksForUi(list) {
+  const srcSeen = new Set();
+  const checksumSeen = new Set();
+  const nameSeen = new Set();
+  const out = [];
+  for (const c of list || []) {
+    const nameKey = String(c?.name || '').trim().toLowerCase();
+    if (nameKey) {
+      if (nameSeen.has(nameKey)) continue;
+      nameSeen.add(nameKey);
+      out.push(c);
+      continue;
+    }
+
+    const srcKey = c?.sourceId ? String(c.sourceId) : '';
+    if (srcKey) {
+      if (srcSeen.has(srcKey)) continue;
+      srcSeen.add(srcKey);
+      out.push(c);
+      continue;
+    }
+    const checksumKey = c?.checksumSha256 ? String(c.checksumSha256) : '';
+    if (checksumKey) {
+      if (checksumSeen.has(checksumKey)) continue;
+      checksumSeen.add(checksumKey);
+      out.push(c);
+      continue;
+    }
+    out.push(c);
+  }
+  return out;
+}
+
 function fileToBase64DataOnly(file) {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -961,6 +994,7 @@ function tagFlashcardsForChunk(chunk, list, { conceptNodeId = null } = {}) {
     ...c,
     sourceId: chunk.sourceId || c.sourceId || null,
     libraryChunkId: chunk.id,
+    sourceName: chunk.name || c.sourceName || '',
     ...(conceptNodeId ? { conceptNodeId } : {}),
   }));
 }
@@ -1078,6 +1112,8 @@ export function StudentApp() {
   const [isAcademicsAiBusy, setIsAcademicsAiBusy] = useState(false);
   const [libraryReloadBusy, setLibraryReloadBusy] = useState(false);
 
+  const uiChunks = useMemo(() => dedupeChunksForUi(chunks), [chunks]);
+
   /** Apply GET /api/library JSON to client state (bootstrap + manual refresh). */
   const applyLibraryData = useCallback((data, opts = {}) => {
     const dbChunks = Array.isArray(data?.pdfs) ? data.pdfs.map(mapLibraryPdfToChunk) : [];
@@ -1120,6 +1156,7 @@ export function StudentApp() {
               setId: c.setId,
               sourceId: sid,
               libraryChunkId: chunk?.id || null,
+              sourceName: chunk?.name || '',
             };
           }),
         ),
@@ -1171,32 +1208,35 @@ export function StudentApp() {
   }, [chunks, studentId, reloadLibraryFromAccount]);
 
   const activeChunk = useMemo(() => {
-    if (!chunks.length) return null;
-    const match = chunks.find((c) => c.id === activePdfId);
-    return match || chunks[0];
-  }, [chunks, activePdfId]);
+    if (!uiChunks.length) return null;
+    const match = uiChunks.find((c) => c.id === activePdfId);
+    return match || uiChunks[0];
+  }, [uiChunks, activePdfId]);
 
   useEffect(() => {
-    if (!chunks.length) {
+    if (!uiChunks.length) {
       setActivePdfId('');
       return;
     }
-    setActivePdfId((prev) => (prev && chunks.some((c) => c.id === prev) ? prev : chunks[0].id));
-  }, [chunks]);
+    setActivePdfId((prev) => (prev && uiChunks.some((c) => c.id === prev) ? prev : uiChunks[0].id));
+  }, [uiChunks]);
 
   const deckCards = useMemo(() => {
     if (!activeChunk) return [];
+    const activeName = String(activeChunk.name || '').trim().toLowerCase();
     return cards.filter((c) => {
       if (activeChunk.sourceId) {
         if (c.sourceId) return c.sourceId === activeChunk.sourceId;
         if (c.libraryChunkId) return c.libraryChunkId === activeChunk.id;
+        if (activeName && c.sourceName) return String(c.sourceName).trim().toLowerCase() === activeName;
         return false;
       }
       if (c.libraryChunkId) return c.libraryChunkId === activeChunk.id;
-      if (!c.sourceId && !c.libraryChunkId) return chunks.length === 1;
+      if (activeName && c.sourceName) return String(c.sourceName).trim().toLowerCase() === activeName;
+      if (!c.sourceId && !c.libraryChunkId) return uiChunks.length === 1;
       return false;
     });
-  }, [cards, activeChunk, chunks.length]);
+  }, [cards, activeChunk, uiChunks.length]);
 
   useEffect(() => {
     setDeckSessionGrades({ right: 0, wrong: 0 });
@@ -1652,16 +1692,15 @@ export function StudentApp() {
           checksumSha256: ingested?.checksumSha256 || null,
           ingestStatus: ingested?.embeddingDeferred ? 'indexing' : 'indexed',
         };
-        let chunkForGen = chunk;
         setChunks((prev) => [chunk, ...prev]);
         if (ingested?.id) {
-          chunkForGen = {
+          const dbChunk = {
             ...chunk,
             id: `db-pdf-${ingested.id}`,
             sourceId: ingested.id,
             createdAt: new Date().toISOString(),
           };
-          setChunks((prev) => prev.map((c) => (c.id === chunk.id ? chunkForGen : c)));
+          setChunks((prev) => prev.map((c) => (c.id === chunk.id ? dbChunk : c)));
           try {
             const fresh = await loadLibrary(studentId);
             applyLibraryData(fresh);
@@ -1686,11 +1725,6 @@ export function StudentApp() {
         setGenerationProgress(100);
         setGenerationStage('Completed');
         setGenerationIndeterminate(false);
-        queueMicrotask(() => {
-          void generateForChunk(chunkForGen).catch((e) => {
-            setNotice(`Flashcard generation failed: ${e?.message || e}`);
-          });
-        });
         return;
       }
 
@@ -1713,14 +1747,8 @@ export function StudentApp() {
         return;
       }
       const chunk = { id: `${Date.now()}`, name: file.name, content: cleaned };
-      let chunkForGen = chunk;
       setChunks((prev) => [chunk, ...prev]);
       setNotice('Saved in this browser only — sign in to keep materials in your account across devices.');
-      queueMicrotask(() => {
-        void generateForChunk(chunkForGen).catch((e) => {
-          setNotice(`Flashcard generation failed: ${e?.message || e}`);
-        });
-      });
     } catch (error) {
       setNotice(`Upload failed: ${error?.message || 'Unknown error.'}`);
       setGenerationProgress(0);
@@ -1729,6 +1757,18 @@ export function StudentApp() {
     } finally {
       setIngestBusy(false);
     }
+  };
+
+  const onFilesUpload = async (files) => {
+    const list = Array.isArray(files) ? files : [];
+    if (!list.length) return;
+    for (const file of list) {
+      // Sequential ingest avoids race/mixing between file metadata and follow-up actions.
+      await onFileUpload(file);
+    }
+    setNotice(
+      `Ingested ${list.length} file${list.length === 1 ? '' : 's'} only. Use Flashcards tab to generate per selected file.`,
+    );
   };
 
   const markCard = useCallback((ok) => {
@@ -2143,9 +2183,15 @@ export function StudentApp() {
       {tab === 'Ingest' ? (
         <>
           <UploadCard
-            onFile={onFileUpload}
-            onGenerateLatest={() => activeChunk && generateForChunk(activeChunk)}
-            chunks={chunks}
+            onFiles={onFilesUpload}
+            onIngestOnly={() =>
+              activeChunk
+                ? setNotice(
+                    `Ingest-only mode: “${activeChunk.name}” is stored. Generate flashcards from the Flashcards tab when ready.`,
+                  )
+                : setNotice('Upload at least one file to ingest.')
+            }
+            chunks={uiChunks}
             activePdfId={activePdfId}
             onSelectPdf={setActivePdfId}
             isGenerating={isGenerating}
@@ -2158,7 +2204,7 @@ export function StudentApp() {
             libraryReloadBusy={libraryReloadBusy}
           />
           <SubirArchivoPanel
-            chunks={chunks}
+            chunks={uiChunks}
             activePdfId={activePdfId}
             onSelectActivePdf={setActivePdfId}
             apartados={apartados}
@@ -2171,12 +2217,12 @@ export function StudentApp() {
       ) : null}
 
       {tab === 'Flashcards' ? (
-        <>
-          <div className="mb-2 flex flex-col gap-2 rounded-lg border border-border bg-slate-50/90 p-2.5 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between">
+        <div className="mx-auto w-full max-w-4xl">
+          <div className="mb-3 flex flex-col gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between">
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="text-xs font-medium text-slate-700">Style</span>
               <select
-                className="input max-w-[11rem] py-1 text-xs"
+                className="input min-w-[12rem] py-1 text-xs"
                 value={flashcardDeckStyle}
                 onChange={(e) => setFlashcardDeckStyle(e.target.value)}
                 disabled={isGenerating}
@@ -2185,7 +2231,7 @@ export function StudentApp() {
                 <option value="anki">Anki-style (QA + cloze)</option>
               </select>
             </div>
-            <label className="flex min-w-[10rem] max-w-md flex-1 flex-col gap-0.5 text-xs text-muted">
+            <label className="flex min-w-[12rem] max-w-md flex-1 flex-col gap-0.5 text-xs text-muted">
               <span className="font-medium text-slate-700">Feynman hook (optional)</span>
               <input
                 className="input py-1 text-xs"
@@ -2205,9 +2251,9 @@ export function StudentApp() {
               {isGenerating ? 'Generating…' : 'Generate flashcards'}
             </button>
           </div>
-          <details className="mb-2 px-0.5 text-xs text-muted">
+          <details className="mb-3 rounded-lg border border-slate-100 bg-white px-3 py-2 text-xs text-muted">
             <summary className="cursor-pointer font-medium text-slate-600">How generation works</summary>
-            <p className="mt-1 pl-0.5 text-[11px] leading-snug">
+            <p className="mt-1 text-[11px] leading-snug">
               Uses the document selected in Ingest. A full generate replaces this document&apos;s deck; use &quot;Generate more&quot; on the deck to append.
             </p>
           </details>
@@ -2230,7 +2276,7 @@ export function StudentApp() {
               setDeckSessionGrades({ right: 0, wrong: 0 });
             }}
           />
-        </>
+        </div>
       ) : null}
       <div
         className={tab === 'Notebook' ? 'contents' : 'hidden'}
@@ -2238,7 +2284,7 @@ export function StudentApp() {
         aria-hidden={tab !== 'Notebook'}
       >
         <NotebookWorkspace
-          chunks={chunks}
+          chunks={uiChunks}
           activePdfId={activePdfId}
           studentId={studentId}
           isBusy={isNotebookBusy}
@@ -2420,7 +2466,7 @@ export function StudentApp() {
           setPresentations={setPresentations}
           onGenerate={generatePresentation}
           isGenerating={isGeneratingPresentation}
-          chunks={chunks}
+          chunks={uiChunks}
           activeChunkId={activePdfId}
           studentId={studentId}
           setNotice={setNotice}
@@ -2430,14 +2476,14 @@ export function StudentApp() {
         <Suspense fallback={<section className="panel text-sm text-muted">Loading concept map...</section>}>
           <ConceptMap
             apartados={apartados}
-            chunks={chunks}
+            chunks={uiChunks}
             activePdfId={activePdfId}
             onSelectPdf={setActivePdfId}
             conceptMapData={conceptMapData}
             isGenerating={isGeneratingConceptMap}
             onGenerate={(chunkId, opts) => generateConceptMap(chunkId, opts)}
             onGenerateFlashcardsFromTopic={(payload) => {
-              const chunk = chunks.find((c) => c.id === activePdfId) || chunks[0];
+              const chunk = uiChunks.find((c) => c.id === activePdfId) || uiChunks[0];
               if (!chunk?.content?.trim()) {
                 setNotice('Select a document with readable content first.');
                 return;

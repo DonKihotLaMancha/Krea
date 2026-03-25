@@ -1,8 +1,9 @@
+import { useState } from 'react';
 import { UploadCloud } from 'lucide-react';
 
 export default function UploadCard({
-  onFile,
-  onGenerateLatest,
+  onFiles,
+  onIngestOnly,
   chunks,
   activePdfId = '',
   onSelectPdf,
@@ -15,7 +16,18 @@ export default function UploadCard({
   onReloadLibrary,
   libraryReloadBusy = false,
 }) {
+  const [dragActive, setDragActive] = useState(false);
   const selected = chunks.find((c) => c.id === activePdfId) || chunks[0];
+
+  const handleDrop = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setDragActive(false);
+    if (ingestBusy) return;
+    const files = Array.from(event.dataTransfer?.files || []);
+    if (files.length) onFiles?.(files);
+  };
+
   return (
     <section className="panel">
       <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
@@ -88,28 +100,51 @@ export default function UploadCard({
 
       <label
         title="PDF, DOCX, PPTX, text, images (OCR when signed in)"
-        className={`mb-2 flex cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4 text-center transition ${ingestBusy ? 'pointer-events-none opacity-60' : 'hover:bg-slate-100'}`}
+        className={`mb-2 flex cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed p-4 text-center transition ${
+          ingestBusy
+            ? 'pointer-events-none opacity-60'
+            : dragActive
+              ? 'border-slate-500 bg-slate-100'
+              : 'border-slate-300 bg-slate-50 hover:bg-slate-100'
+        }`}
+        onDragOver={(event) => {
+          if (ingestBusy) return;
+          event.preventDefault();
+          setDragActive(true);
+        }}
+        onDragEnter={(event) => {
+          if (ingestBusy) return;
+          event.preventDefault();
+          setDragActive(true);
+        }}
+        onDragLeave={(event) => {
+          if (ingestBusy) return;
+          if (!event.currentTarget.contains(event.relatedTarget)) setDragActive(false);
+        }}
+        onDrop={handleDrop}
       >
         <UploadCloud className="mb-1.5" size={22} />
         <p className="text-sm font-medium">Drop or click to add a file</p>
         <p className="text-xs text-muted">PDF, Office, text, images</p>
         <input
           type="file"
+          multiple
           accept=".pdf,.txt,.md,.csv,.docx,.pptx,.png,.jpg,.jpeg,.webp,.gif,.bmp"
           className="hidden"
           disabled={ingestBusy}
           onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file) onFile(file);
+            const files = Array.from(e.target.files || []);
+            if (files.length) onFiles?.(files);
+            e.target.value = '';
           }}
         />
       </label>
       <button
         className="btn-primary w-full md:w-auto"
-        disabled={!selected || isGenerating || ingestBusy}
-        onClick={onGenerateLatest}
+        disabled={!selected || ingestBusy}
+        onClick={onIngestOnly}
       >
-        {isGenerating ? 'Generating your study set…' : ingestBusy ? 'Digesting or saving file…' : 'Generate flashcards (selected)'}
+        {ingestBusy ? 'Digesting or saving file…' : 'Ingest only (selected)'}
       </button>
       {(isGenerating || ingestBusy || progress > 0) ? (
         <div className="mt-3">

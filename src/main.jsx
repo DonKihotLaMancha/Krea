@@ -26,7 +26,12 @@ if (!rootEl) {
 // Register PWA only in production. A dev/proxy service worker can otherwise serve stale JS bundles,
 // so UI changes (e.g. Flashcards) appear "stuck" until the cache updates.
 queueMicrotask(() => {
-  if (!import.meta.env.PROD) {
+  const isLocalHost =
+    typeof window !== 'undefined' &&
+    ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
+
+  // On localhost/preview we always prefer fresh bundles over SW cache.
+  if (!import.meta.env.PROD || isLocalHost) {
     if ('serviceWorker' in navigator) {
       void navigator.serviceWorker.getRegistrations().then((regs) => {
         for (const r of regs) void r.unregister();
