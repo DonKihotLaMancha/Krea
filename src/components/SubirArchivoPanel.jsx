@@ -20,7 +20,7 @@ export default function SubirArchivoPanel({
           onChange={(e) => onSelectActivePdf?.(e.target.value)}
           disabled={!chunks.length}
         >
-          {!chunks.length ? <option value="">Upload a PDF first</option> : null}
+          {!chunks.length ? <option value="">Upload a document first</option> : null}
           {chunks.map((c) => (
             <option key={c.id} value={c.id}>
               {c.name}

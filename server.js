@@ -7,9 +7,22 @@ import nodemailer from 'nodemailer';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import { parseStudyMaterialBuffer } from './server/lib/ingestionParsers.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+/** Debug session 538766: mirror agent logs to workspace NDJSON when ingest is unavailable. */
+function agentDebugLog538766(payload) {
+  try {
+    fs.appendFileSync(
+      path.join(__dirname, 'debug-538766.log'),
+      `${JSON.stringify({ sessionId: '538766', ...payload, timestamp: Date.now() })}\n`,
+    );
+  } catch {
+    /* ignore */
+  }
+}
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -84,7 +97,7 @@ const supabase = (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
   : null;
 
 app.use(cors());
-app.use(express.json({ limit: '20mb' }));
+app.use(express.json({ limit: '30mb' }));
 app.use((req, res, next) => {
   const reqId = crypto.randomUUID();
   const started = Date.now();
@@ -478,6 +491,187 @@ async function embedAndStoreChunksForSource({ ownerId, sourceId, rows }) {
     return `Search index: embeddings not saved (${error.message}).`;
   }
   return null;
+}
+
+/** Map parser format to DB `sources.source_type` enum. */
+function ingestFormatToDbSourceType(format) {
+  if (format === 'pdf') return 'pdf';
+  if (format === 'text') return 'txt';
+  return 'doc';
+}
+
+/**
+ * Persist normalized study material (chunks, optional storage, embeddings, legacy row).
+ * @param {object} opts
+ * @param {string} opts.studentId
+ * @param {string} opts.title
+ * @param {string} opts.cleanedText
+ * @param {string} [opts.rawText]
+ * @param {Record<string, unknown>} [opts.extractionMeta]
+ * @param {'pdf'|'doc'|'txt'} opts.sourceType
+ * @param {string} [opts.mimeType]
+ * @param {number} [opts.sizeBytes]
+ * @param {string} [opts.checksumSha256]
+ * @param {number|null} [opts.pageCount]
+ * @param {Buffer} [opts.fileBuffer]
+ * @param {string} [opts.storageContentType]
+ * @param {string} [opts.storageExtension] e.g. ".pdf"
+ */
+async function persistLibraryMaterial(opts) {
+  const {
+    studentId,
+    title,
+    cleanedText,
+    rawText,
+    extractionMeta = {},
+    sourceType,
+    mimeType,
+    sizeBytes,
+    checksumSha256,
+    pageCount,
+    fileBuffer,
+    storageContentType,
+    storageExtension,
+  } = opts;
+
+  await ensureProfile(studentId);
+
+  if (checksumSha256) {
+    const { data: dupRows, error: dupErr } = await supabase
+      .from('sources')
+      .select('id')
+      .eq('owner_id', studentId)
+      .eq('checksum_sha256', checksumSha256)
+      .is('deleted_at', null)
+      .limit(1);
+    if (dupErr) throw dupErr;
+    if (dupRows?.[0]?.id) {
+      return {
+        ok: true,
+        id: dupRows[0].id,
+        deduplicated: true,
+        storageUploaded: false,
+        storageWarning: undefined,
+        embeddingDeferred: false,
+        warnings: ['This file matches material already in your library — reusing the existing copy.'],
+      };
+    }
+  }
+
+  const insertRow = {
+    owner_id: studentId,
+    title,
+    source_type: sourceType,
+    status: 'ready',
+    mime_type: mimeType || null,
+    size_bytes: sizeBytes != null ? Number(sizeBytes) : null,
+    checksum_sha256: checksumSha256 || null,
+  };
+
+  const { data: source, error: sourceError } = await supabase.from('sources').insert(insertRow).select('id').single();
+  if (sourceError) throw sourceError;
+
+  let storageUploaded = false;
+  let storageWarning = '';
+  if (fileBuffer?.length) {
+    try {
+      if (fileBuffer.length > 18 * 1024 * 1024) {
+        storageWarning =
+          'File exceeds 18 MB; text was saved but the binary was not stored in Supabase Storage.';
+      } else {
+        const ext = (storageExtension || '.bin').replace(/^\./, '');
+        const storagePath = `${studentId}/${source.id}.${ext}`;
+        const { error: upErr } = await supabase.storage.from('sources-private').upload(storagePath, fileBuffer, {
+          contentType: storageContentType || 'application/octet-stream',
+          upsert: true,
+        });
+        if (!upErr) {
+          storageUploaded = true;
+          await supabase
+            .from('sources')
+            .update({
+              storage_path: storagePath,
+              mime_type: mimeType || storageContentType || null,
+              size_bytes: fileBuffer.length,
+            })
+            .eq('id', source.id);
+        } else {
+          storageWarning = upErr.message || 'Storage upload failed (check bucket sources-private and policies).';
+          console.warn('[library/persist] storage upload:', upErr.message);
+        }
+      }
+    } catch (e) {
+      storageWarning = e?.message || String(e);
+      console.warn('[library/persist] storage:', e?.message || e);
+    }
+  }
+
+  const metaMerged = {
+    ...extractionMeta,
+    ingestState: 'ready',
+    persistedAt: new Date().toISOString(),
+  };
+
+  const { error: contentError } = await supabase.from('source_contents').insert({
+    source_id: source.id,
+    raw_text: rawText ?? cleanedText,
+    cleaned_text: cleanedText,
+    page_count: pageCount != null ? Number(pageCount) : null,
+    extraction_meta: metaMerged,
+  });
+  if (contentError) throw contentError;
+
+  let embeddingDeferred = false;
+  try {
+    const parts = chunkTextForStore(cleanedText);
+    const limited = parts.slice(0, MAX_RAG_EMBED_CHUNKS);
+    const chunkRows = limited.map((c, idx) => ({
+      source_id: source.id,
+      chunk_index: idx,
+      content: c,
+      token_estimate: Math.min(100000, Math.ceil(c.length / 4)),
+    }));
+    if (chunkRows.length) {
+      const { data: insertedChunks, error: chunkInsErr } = await supabase
+        .from('source_chunks')
+        .insert(chunkRows)
+        .select('id, chunk_index, content');
+      if (chunkInsErr) console.warn('[library/persist] source_chunks:', chunkInsErr.message);
+      else if (insertedChunks?.length) {
+        embeddingDeferred = true;
+        const ownerId = studentId;
+        const sourceId = source.id;
+        const rows = insertedChunks;
+        setImmediate(() => {
+          void embedAndStoreChunksForSource({ ownerId, sourceId, rows })
+            .then((warn) => {
+              if (warn) console.warn('[library/persist] embed (background):', warn);
+            })
+            .catch((e) => {
+              console.warn('[library/persist] embed (background):', e?.message || e);
+            });
+        });
+      }
+    }
+  } catch (e) {
+    console.warn('[library/persist] chunking:', e?.message || e);
+  }
+
+  const { error: legacyErr } = await supabase
+    .from('student_pdfs')
+    .insert({ student_id: studentId, name: title, content: cleanedText });
+  if (legacyErr) {
+    console.warn('[library/persist] legacy student_pdfs (optional):', legacyErr.message);
+  }
+
+  return {
+    ok: true,
+    id: source?.id || null,
+    storageUploaded,
+    storageWarning: storageWarning || undefined,
+    embeddingDeferred: embeddingDeferred || undefined,
+    deduplicated: false,
+  };
 }
 
 function analyzeOllamaTagsResponse(resp, base) {
@@ -975,9 +1169,9 @@ app.get('/api/library', async (req, res) => {
     ] = await Promise.all([
       supabase
         .from('sources')
-        .select('id,title,created_at,storage_path,size_bytes,source_contents(cleaned_text)')
+        .select('id,title,created_at,storage_path,size_bytes,mime_type,source_type,source_contents(cleaned_text)')
         .eq('owner_id', studentId)
-        .eq('source_type', 'pdf')
+        .in('source_type', ['pdf', 'doc', 'txt'])
         .is('deleted_at', null)
         .order('created_at', { ascending: false })
         .limit(1000),
@@ -1088,6 +1282,8 @@ app.get('/api/library', async (req, res) => {
         createdAt: s.created_at,
         storagePath: s.storage_path || null,
         sizeBytes: s.size_bytes != null ? Number(s.size_bytes) : null,
+        mimeType: s.mime_type || null,
+        sourceType: s.source_type || null,
       };
     });
     /** Nested embed can miss text (RLS/embed quirks); fill from source_contents directly. */
@@ -1320,6 +1516,145 @@ app.get('/api/library', async (req, res) => {
   }
 });
 
+function storageExtensionFromName(fileName, format) {
+  const m = String(fileName || '').match(/(\.[a-z0-9]{1,8})$/i);
+  if (m) return m[1].toLowerCase();
+  if (format === 'pdf') return '.pdf';
+  if (format === 'docx') return '.docx';
+  if (format === 'pptx') return '.pptx';
+  if (format === 'text') return '.txt';
+  if (format === 'image') return '.png';
+  return '.bin';
+}
+
+function storageMimeForIngest(format, mimeHint, fileName) {
+  const m = String(mimeHint || '').trim();
+  if (m) return m;
+  if (format === 'pdf') return 'application/pdf';
+  if (format === 'docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  if (format === 'pptx') return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+  if (format === 'text') {
+    const ext = (fileName.split('.').pop() || '').toLowerCase();
+    if (ext === 'md') return 'text/markdown';
+    if (ext === 'csv') return 'text/csv';
+    return 'text/plain';
+  }
+  if (format === 'image') return 'image/png';
+  return 'application/octet-stream';
+}
+
+app.post('/api/library/ingest', async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const studentId = String(req.body?.studentId || '').trim();
+  const fileName = String(req.body?.fileName || '').trim();
+  const mimeType = String(req.body?.mimeType || '').trim();
+  const fileBase64 = typeof req.body?.fileBase64 === 'string' ? req.body.fileBase64.trim() : '';
+  if (!studentId || !fileName || !fileBase64) {
+    return res.status(400).json({
+      error: 'Missing studentId/fileName/fileBase64.',
+      errorType: 'validation_error',
+    });
+  }
+  if (!isUuid(studentId)) {
+    return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.', errorType: 'validation_error' });
+  }
+  let buffer;
+  try {
+    buffer = Buffer.from(fileBase64, 'base64');
+  } catch {
+    return res.status(400).json({ error: 'Invalid base64 file payload.', errorType: 'validation_error' });
+  }
+  if (!buffer.length) {
+    return res.status(400).json({ error: 'Empty file.', errorType: 'validation_error' });
+  }
+
+  const _pEntry = {
+    location: 'server.js:/api/library/ingest:entry',
+    message: 'ingest',
+    data: {
+      fileName: fileName.slice(0, 200),
+      byteLength: buffer.length,
+      mimeType: mimeType || null,
+    },
+  };
+  agentDebugLog538766(_pEntry);
+
+  let parsed;
+  try {
+    parsed = await parseStudyMaterialBuffer(buffer, fileName, mimeType);
+  } catch (e) {
+    const code = e?.code || 'PARSE_FAILED';
+    const errType =
+      code === 'UNSUPPORTED_FORMAT' ? 'unsupported' : code === 'EMPTY_TEXT' ? 'parse_error' : 'parse_error';
+    const _pFail = {
+      location: 'server.js:/api/library/ingest:parse',
+      message: 'parse failed',
+      data: { code, detail: String(e?.message || e).slice(0, 400) },
+    };
+    agentDebugLog538766(_pFail);
+    return res.status(400).json({
+      error: e?.message || 'Could not parse file.',
+      errorType: errType,
+      details: { message: e?.message || String(e), code },
+    });
+  }
+
+  const sourceType = ingestFormatToDbSourceType(parsed.format);
+  const ext = storageExtensionFromName(fileName, parsed.format);
+  const storageMime = storageMimeForIngest(parsed.format, mimeType, fileName);
+
+  try {
+    const checksumSha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+    const result = await persistLibraryMaterial({
+      studentId,
+      title: fileName,
+      cleanedText: parsed.normalizedText,
+      rawText: parsed.rawText,
+      extractionMeta: parsed.extractionMeta,
+      sourceType,
+      mimeType: mimeType || storageMime,
+      sizeBytes: buffer.length,
+      checksumSha256,
+      pageCount: parsed.pageCount ?? null,
+      fileBuffer: buffer,
+      storageContentType: storageMime,
+      storageExtension: ext,
+    });
+
+    const _pOk = {
+      location: 'server.js:/api/library/ingest:success',
+      message: 'ingest saved',
+      data: {
+        sourceId: result.id,
+        deduplicated: !!result.deduplicated,
+        format: parsed.format,
+      },
+    };
+    agentDebugLog538766(_pOk);
+
+    return res.json({
+      ok: true,
+      id: result.id,
+      deduplicated: !!result.deduplicated,
+      storageUploaded: result.storageUploaded,
+      storageWarning: result.storageWarning,
+      embeddingDeferred: result.embeddingDeferred,
+      normalizedText: parsed.normalizedText,
+      warnings: [...(parsed.warnings || []), ...(result.warnings || [])],
+      qualityScore: parsed.qualityScore,
+      ingestFormat: parsed.format,
+    });
+  } catch (error) {
+    const _pCatch = {
+      location: 'server.js:/api/library/ingest:catch',
+      message: 'ingest persist failed',
+      data: { detail: String(error?.message || error).slice(0, 400) },
+    };
+    agentDebugLog538766(_pCatch);
+    return res.status(500).json(formatSupabaseError(error, 'Could not save material to your library.'));
+  }
+});
+
 app.post('/api/library/pdf', async (req, res) => {
   if (!requireSupabase(res)) return;
   const studentId = String(req.body?.studentId || '').trim();
@@ -1333,103 +1668,34 @@ app.post('/api/library/pdf', async (req, res) => {
     return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
   }
   try {
-    await ensureProfile(studentId);
-    // Always create a new source row so every upload is kept (same filename allowed).
-    const { data: source, error: sourceError } = await supabase
-      .from('sources')
-      .insert({ owner_id: studentId, title: name, source_type: 'pdf', status: 'ready' })
-      .select('id')
-      .single();
-    if (sourceError) throw sourceError;
+    const checksumBuf = pdfBase64 ? Buffer.from(pdfBase64, 'base64') : null;
+    const checksumSha256 = checksumBuf?.length
+      ? crypto.createHash('sha256').update(checksumBuf).digest('hex')
+      : crypto.createHash('sha256').update(Buffer.from(content, 'utf8')).digest('hex');
 
-    let storageUploaded = false;
-    let storageWarning = '';
-    if (pdfBase64) {
-      try {
-        const buf = Buffer.from(pdfBase64, 'base64');
-        if (buf.length > 18 * 1024 * 1024) {
-          storageWarning = 'PDF exceeds 18 MB; text was saved but the file was not stored in Supabase Storage.';
-        } else if (buf.length) {
-          const storagePath = `${studentId}/${source.id}.pdf`;
-          const { error: upErr } = await supabase.storage.from('sources-private').upload(storagePath, buf, {
-            contentType: 'application/pdf',
-            upsert: true,
-          });
-          if (!upErr) {
-            storageUploaded = true;
-            await supabase
-              .from('sources')
-              .update({
-                storage_path: storagePath,
-                mime_type: 'application/pdf',
-                size_bytes: buf.length,
-              })
-              .eq('id', source.id);
-          } else {
-            storageWarning = upErr.message || 'Storage upload failed (check bucket sources-private and policies).';
-            console.warn('[library/pdf] storage upload:', upErr.message);
-          }
-        }
-      } catch (e) {
-        storageWarning = e?.message || String(e);
-        console.warn('[library/pdf] storage:', e?.message || e);
-      }
-    }
+    const result = await persistLibraryMaterial({
+      studentId,
+      title: name,
+      cleanedText: content,
+      rawText: content,
+      extractionMeta: { ingestFormat: 'client_pdf', ingestPath: '/api/library/pdf' },
+      sourceType: 'pdf',
+      mimeType: 'application/pdf',
+      sizeBytes: checksumBuf?.length || Buffer.byteLength(content, 'utf8'),
+      checksumSha256,
+      pageCount: null,
+      fileBuffer: checksumBuf?.length ? checksumBuf : undefined,
+      storageContentType: 'application/pdf',
+      storageExtension: '.pdf',
+    });
 
-    const { error: contentError } = await supabase
-      .from('source_contents')
-      .insert({ source_id: source.id, raw_text: content, cleaned_text: content });
-    if (contentError) throw contentError;
-
-    let embeddingWarning = '';
-    let chunkPartCount = 0;
-    try {
-      const parts = chunkTextForStore(content);
-      chunkPartCount = parts.length;
-      const limited = parts.slice(0, MAX_RAG_EMBED_CHUNKS);
-      const chunkRows = limited.map((c, idx) => ({
-        source_id: source.id,
-        chunk_index: idx,
-        content: c,
-        token_estimate: Math.min(100000, Math.ceil(c.length / 4)),
-      }));
-      if (chunkRows.length) {
-        const { data: insertedChunks, error: chunkInsErr } = await supabase
-          .from('source_chunks')
-          .insert(chunkRows)
-          .select('id, chunk_index, content');
-        if (chunkInsErr) console.warn('[library/pdf] source_chunks:', chunkInsErr.message);
-        else if (insertedChunks?.length) {
-          try {
-            const embedWarn = await embedAndStoreChunksForSource({
-              ownerId: studentId,
-              sourceId: source.id,
-              rows: insertedChunks,
-            });
-            if (embedWarn) embeddingWarning = embedWarn;
-          } catch (e) {
-            const msg = e?.message || String(e);
-            console.warn('[library/pdf] embed:', msg);
-            embeddingWarning = `Search index: embedding failed (${msg}).`;
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('[library/pdf] chunking:', e?.message || e);
-    }
-
-    const { error: legacyErr } = await supabase
-      .from('student_pdfs')
-      .insert({ student_id: studentId, name, content });
-    if (legacyErr) {
-      console.warn('[library/pdf] legacy student_pdfs (optional):', legacyErr.message);
-    }
     return res.json({
       ok: true,
-      id: source?.id || null,
-      storageUploaded,
-      storageWarning: storageWarning || undefined,
-      embeddingWarning: embeddingWarning || undefined,
+      id: result.id,
+      storageUploaded: result.storageUploaded,
+      storageWarning: result.storageWarning,
+      embeddingDeferred: result.embeddingDeferred,
+      deduplicated: result.deduplicated,
     });
   } catch (error) {
     return res.status(500).json(formatSupabaseError(error, 'Could not save PDF.'));
@@ -1752,6 +2018,27 @@ app.post('/api/library/presentation', async (req, res) => {
   const sourceIdsBody = Array.isArray(req.body?.sourceIds) ? req.body.sourceIds : [];
   const slides = Array.isArray(req.body?.slides) ? req.body.slides : [];
   const references = Array.isArray(req.body?.references) ? req.body.references : [];
+  // #region agent log
+  {
+    const _p = {
+      location: 'server.js:/api/library/presentation:entry',
+      message: 'save presentation',
+      data: {
+        hypothesisId: 'H4',
+        hasStudentId: !!studentId,
+        slideCount: slides.length,
+        refCount: references.length,
+        titleLen: title.length,
+      },
+    };
+    agentDebugLog538766(_p);
+    fetch('http://127.0.0.1:7555/ingest/65a187b1-f84f-4fb8-91e9-b3378bd5e60a', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '538766' },
+      body: JSON.stringify({ sessionId: '538766', ..._p, timestamp: Date.now() }),
+    }).catch(() => {});
+  }
+  // #endregion
   if (!studentId || !slides.length) return res.status(400).json({ error: 'Missing studentId/slides.' });
   if (!isUuid(studentId)) return res.status(400).json({ error: 'studentId must be a valid Supabase auth user UUID.' });
   try {
@@ -1822,8 +2109,38 @@ app.post('/api/library/presentation', async (req, res) => {
       if (linkErr) throw linkErr;
     }
 
+    // #region agent log
+    {
+      const _p = {
+        location: 'server.js:/api/library/presentation:success',
+        message: 'presentation saved',
+        data: { hypothesisId: 'H4', presentationId: presData.id },
+      };
+      agentDebugLog538766(_p);
+      fetch('http://127.0.0.1:7555/ingest/65a187b1-f84f-4fb8-91e9-b3378bd5e60a', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '538766' },
+        body: JSON.stringify({ sessionId: '538766', ..._p, timestamp: Date.now() }),
+      }).catch(() => {});
+    }
+    // #endregion
     return res.json({ ok: true, presentationId: presData.id });
   } catch (error) {
+    // #region agent log
+    {
+      const _p = {
+        location: 'server.js:/api/library/presentation:catch',
+        message: 'save presentation failed',
+        data: { hypothesisId: 'H4', detail: String(error?.message || error).slice(0, 400) },
+      };
+      agentDebugLog538766(_p);
+      fetch('http://127.0.0.1:7555/ingest/65a187b1-f84f-4fb8-91e9-b3378bd5e60a', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '538766' },
+        body: JSON.stringify({ sessionId: '538766', ..._p, timestamp: Date.now() }),
+      }).catch(() => {});
+    }
+    // #endregion
     return res.status(500).json(formatSupabaseError(error, 'Could not save presentation.'));
   }
 });
@@ -3350,6 +3667,27 @@ app.post('/api/presentation', async (req, res) => {
   const sourceText = String(req.body?.sourceText || '').trim();
   const requestedSlides = Math.max(4, Math.min(16, Number(req.body?.slides || 8)));
 
+  // #region agent log
+  {
+    const _p = {
+      location: 'server.js:/api/presentation:entry',
+      message: 'presentation request',
+      data: {
+        hypothesisId: 'H1',
+        topicLen: topic.length,
+        sourcesLen: sources.length,
+        requestedSlides,
+      },
+    };
+    agentDebugLog538766(_p);
+    fetch('http://127.0.0.1:7555/ingest/65a187b1-f84f-4fb8-91e9-b3378bd5e60a', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '538766' },
+      body: JSON.stringify({ sessionId: '538766', ..._p, timestamp: Date.now() }),
+    }).catch(() => {});
+  }
+  // #endregion
+
   if (!topic) {
     return res.status(400).json({ error: 'Missing topic.' });
   }
@@ -3415,6 +3753,25 @@ ${JSON.stringify(sourceJson)}
   try {
     let presentation = await generatePresentationWithOllama(prompt);
     if (presentation.slides.length < Math.max(3, requestedSlides - 2)) {
+      // #region agent log
+      {
+        const _p = {
+          location: 'server.js:/api/presentation:fallbackPrompt',
+          message: 'using fallback prompt',
+          data: {
+            hypothesisId: 'H1',
+            slideCount: presentation.slides.length,
+            requestedSlides,
+          },
+        };
+        agentDebugLog538766(_p);
+        fetch('http://127.0.0.1:7555/ingest/65a187b1-f84f-4fb8-91e9-b3378bd5e60a', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '538766' },
+          body: JSON.stringify({ sessionId: '538766', ..._p, timestamp: Date.now() }),
+        }).catch(() => {});
+      }
+      // #endregion
       const fallbackPrompt = `
 Return strict JSON only:
 {
@@ -3430,8 +3787,42 @@ Create exactly ${requestedSlides} slides.
 `;
       presentation = await generatePresentationWithOllama(fallbackPrompt);
     }
+    // #region agent log
+    {
+      const _p = {
+        location: 'server.js:/api/presentation:success',
+        message: 'presentation generated',
+        data: {
+          hypothesisId: 'H1',
+          slideCount: Array.isArray(presentation?.slides) ? presentation.slides.length : -1,
+          refCount: Array.isArray(presentation?.references) ? presentation.references.length : -1,
+        },
+      };
+      agentDebugLog538766(_p);
+      fetch('http://127.0.0.1:7555/ingest/65a187b1-f84f-4fb8-91e9-b3378bd5e60a', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '538766' },
+        body: JSON.stringify({ sessionId: '538766', ..._p, timestamp: Date.now() }),
+      }).catch(() => {});
+    }
+    // #endregion
     return res.json(presentation);
   } catch (error) {
+    // #region agent log
+    {
+      const _p = {
+        location: 'server.js:/api/presentation:catch',
+        message: 'presentation generation failed',
+        data: { hypothesisId: 'H1', detail: String(error?.message || error).slice(0, 400) },
+      };
+      agentDebugLog538766(_p);
+      fetch('http://127.0.0.1:7555/ingest/65a187b1-f84f-4fb8-91e9-b3378bd5e60a', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '538766' },
+        body: JSON.stringify({ sessionId: '538766', ..._p, timestamp: Date.now() }),
+      }).catch(() => {});
+    }
+    // #endregion
     return res.status(500).json({ error: 'Could not generate presentation.', details: String(error) });
   }
 });

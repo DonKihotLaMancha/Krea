@@ -21,11 +21,23 @@ This document maps current endpoints to normalized Supabase schema and defines t
   - `{ pdfs: [...], maps: [...], notebook: [...] }`
 
 ### `POST /api/library/pdf`
-- Request: `{ studentId, name, content }`
+- Request: `{ studentId, name, content, pdfBase64? }` (legacy: client-extracted text; still supported)
 - Writes:
   - `sources`
   - `source_contents`
   - optional compatibility write to `student_pdfs`
+
+### `POST /api/library/ingest`
+- Request: `{ studentId, fileName, fileBase64, mimeType? }` (JSON; base64 file body, up to server JSON limit)
+- Parses PDF (pdf-parse), DOCX (mammoth), PPTX (JSZip slide XML), plaintext, or image OCR (tesseract.js).
+- Dedupes by SHA-256 of raw bytes (`sources.checksum_sha256`).
+- Writes:
+  - `sources` (`source_type`: `pdf` | `doc` | `txt`)
+  - `source_contents` (`extraction_meta` includes format, warnings, quality)
+  - `source_chunks` + async embeddings
+  - optional Storage upload to `sources-private`
+  - legacy `student_pdfs`
+- Response: `{ ok, id, deduplicated?, normalizedText, warnings[], ingestFormat, ... }`
 
 ### `POST /api/library/concept-map`
 - Request: `{ studentId, sourceName, title, map }`

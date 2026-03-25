@@ -1,0 +1,4 @@
+{"sessionId":"538766","location":"server.js:/api/library/presentation:entry","message":"save presentation","data":{"hypothesisId":"H4","hasStudentId":false,"slideCount":0,"refCount":0,"titleLen":12},"timestamp":1774407625082}
+{"sessionId":"538766","location":"server.js:/api/library/presentation:entry","message":"save presentation","data":{"hypothesisId":"H4","hasStudentId":false,"slideCount":0,"refCount":0,"titleLen":12},"timestamp":1774407625173}
+{"sessionId":"538766","location":"server.js:/api/library/ingest:entry","message":"ingest","data":{"fileName":"Unit 5.pdf","byteLength":525390,"mimeType":"application/pdf"},"timestamp":1774408630625}
+{"sessionId":"538766","location":"server.js:/api/library/ingest:success","message":"ingest saved","data":{"sourceId":"15f979c3-f6c9-4f04-9fc2-d7ad98b7ba04","deduplicated":false,"format":"pdf"},"timestamp":1774408632300}

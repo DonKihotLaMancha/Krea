@@ -21,13 +21,13 @@ export default function UploadCard({
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="text-lg font-semibold">Upload Study Material</h3>
         <span className="rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-900">
-          {chunks.length} PDF{chunks.length === 1 ? '' : 's'} in workspace
+          {chunks.length} file{chunks.length === 1 ? '' : 's'} in workspace
         </span>
       </div>
 
       <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50/80 p-4">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <p className="text-sm font-semibold text-slate-900">Saved PDFs</p>
+          <p className="text-sm font-semibold text-slate-900">Saved materials</p>
           {isSignedIn ? (
             <button
               type="button"
@@ -41,8 +41,8 @@ export default function UploadCard({
         </div>
         <p className="mb-3 text-xs leading-relaxed text-muted">
           {isSignedIn
-            ? 'These PDFs load from your account on each visit. If the server is briefly unavailable, the app can show the last copy saved in this browser (under the size limit). Click a row to select it for Flashcards, Notebook, Concept Map, and other tools.'
-            : 'Documents you add are kept in this browser only. Sign in to save PDFs to your account and open them on any device, then use “Refresh from account” on Ingest.'}
+            ? 'These materials load from your account on each visit. If the server is briefly unavailable, the app can show the last copy saved in this browser (under the size limit). Click a row to select it for Flashcards, Notebook, Concept Map, and other tools.'
+            : 'Documents you add are kept in this browser only. Sign in to save materials to your account and open them on any device, then use “Refresh from account” on Ingest.'}
         </p>
         {chunks.length ? (
           <ul className="space-y-2">
@@ -71,11 +71,11 @@ export default function UploadCard({
           </ul>
         ) : (
           <div className="rounded-lg border border-dashed border-slate-200 bg-white px-3 py-4 text-center text-sm text-muted">
-            <p className="font-medium text-slate-700">No PDFs loaded yet</p>
+            <p className="font-medium text-slate-700">No materials loaded yet</p>
             <p className="mt-1 text-xs">
               {isSignedIn
-                ? 'Upload a file below, or tap “Refresh from account” if you already saved PDFs on another session.'
-                : 'Upload a PDF or text file below to get started.'}
+                ? 'Upload a file below, or tap “Refresh from account” if you already saved files on another session.'
+                : 'Upload a PDF or text file below to get started (Office/images need sign-in).'}
             </p>
           </div>
         )}
@@ -87,11 +87,11 @@ export default function UploadCard({
         <UploadCloud className="mb-2" size={24} />
         <p className="text-sm font-medium">Add another file (drag and drop or click)</p>
         <p className="text-xs text-muted">
-          Text-based PDF works best. Saving to your account indexes text for Chat search (can take 1–3 minutes for large files). Flashcards generate automatically after upload, or use the button below for the selected PDF.
+          Signed in: PDF, DOCX, PPTX, text, and images (OCR) are digested on the server, cached, and saved to your account. Chat search indexing can take 1–3 minutes for large files. Flashcards generate automatically after upload.
         </p>
         <input
           type="file"
-          accept=".pdf,.txt,.md,.csv"
+          accept=".pdf,.txt,.md,.csv,.docx,.pptx,.png,.jpg,.jpeg,.webp,.gif,.bmp"
           className="hidden"
           disabled={ingestBusy}
           onChange={(e) => {
@@ -105,7 +105,7 @@ export default function UploadCard({
         disabled={!selected || isGenerating || ingestBusy}
         onClick={onGenerateLatest}
       >
-        {isGenerating ? 'Generating your study set…' : ingestBusy ? 'Reading or saving file…' : 'Generate flashcards (selected)'}
+        {isGenerating ? 'Generating your study set…' : ingestBusy ? 'Digesting or saving file…' : 'Generate flashcards (selected)'}
       </button>
       {(isGenerating || ingestBusy || progress > 0) ? (
         <div className="mt-3">

@@ -1,0 +1,3 @@
+{"sessionId":"538766","location":"server.js:/api/library/presentation:entry","message":"save presentation","data":{"hypothesisId":"H4","hasStudentId":false,"slideCount":0,"refCount":0,"titleLen":12},"timestamp":1774407625083}
+{"sessionId":"538766","location":"server.js:/api/library/presentation:entry","message":"save presentation","data":{"hypothesisId":"H4","hasStudentId":false,"slideCount":0,"refCount":0,"titleLen":12},"timestamp":1774407625174}
+{"sessionId":"538766","location":"App.jsx:saveLibraryIngest","message":"library ingest response","data":{"hypothesisId":"INGEST","ok":true,"status":200,"errSnippet":"","fileName":"Unit 5.pdf"},"timestamp":1774408632303}

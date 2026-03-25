@@ -72,6 +72,8 @@ function writeWorkspacePdfCache(studentId, chunks) {
       sourceId: c.sourceId ?? null,
       storagePath: c.storagePath ?? null,
       sizeBytes: c.sizeBytes != null ? c.sizeBytes : null,
+      mimeType: c.mimeType ?? null,
+      sourceType: c.sourceType ?? null,
     }));
     const payload = JSON.stringify(slim);
     if (payload.length > LOCAL_PDFS_MAX_BYTES) return;
@@ -102,6 +104,8 @@ function mapLibraryPdfToChunk(p) {
     createdAt: p.createdAt || null,
     storagePath: p.storagePath ?? null,
     sizeBytes: p.sizeBytes != null ? Number(p.sizeBytes) : null,
+    mimeType: p.mimeType ?? null,
+    sourceType: p.sourceType ?? null,
   };
 }
 
@@ -400,6 +404,64 @@ async function upsertStudent(studentId, name = 'Student') {
 
 /** Must exceed worst-case server indexing (embeddings); UI copy allows 1–3+ minutes for large PDFs. */
 const LIBRARY_PDF_SAVE_TIMEOUT_MS = 240_000;
+/** Server-side OCR / large PDF digest can exceed PDF-only timeout. */
+const LIBRARY_INGEST_TIMEOUT_MS = 300_000;
+
+async function saveLibraryIngest({ studentId, fileName, mimeType, fileBase64 }) {
+  if (!studentId) return null;
+  const resp = await fetchWithTimeout(
+    '/api/library/ingest',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        studentId,
+        fileName,
+        mimeType: mimeType || '',
+        fileBase64,
+      }),
+    },
+    LIBRARY_INGEST_TIMEOUT_MS,
+  );
+  const raw = await resp.text();
+  // #region agent log
+  fetch('http://127.0.0.1:7555/ingest/65a187b1-f84f-4fb8-91e9-b3378bd5e60a', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '538766' },
+    body: JSON.stringify({
+      sessionId: '538766',
+      location: 'App.jsx:saveLibraryIngest',
+      message: 'library ingest response',
+      data: {
+        hypothesisId: 'INGEST',
+        ok: resp.ok,
+        status: resp.status,
+        errSnippet: !resp.ok ? raw.slice(0, 220) : '',
+        fileName: fileName?.slice?.(0, 120) || '',
+      },
+      timestamp: Date.now(),
+    }),
+  }).catch(() => {});
+  // #endregion
+  if (!resp.ok) {
+    let detail = raw.replace(/\s+/g, ' ').trim().slice(0, 400);
+    try {
+      const j = JSON.parse(raw);
+      const nested =
+        j?.details && typeof j.details === 'object' ? String(j.details.message || '').trim() : '';
+      const top = typeof j?.error === 'string' ? j.error.trim() : '';
+      detail = nested || top || detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail || `Could not save to library (HTTP ${resp.status}).`);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error('Invalid response from library ingest.');
+  }
+}
 
 async function savePdfToLibrary({ studentId, name, content, pdfBase64 }) {
   if (!studentId) return null;
@@ -501,7 +563,7 @@ async function saveQuizToLibrary({ studentId, sourceName, sourceId, mode, diffic
 
 async function savePresentationToLibrary({ studentId, title, slides, references, sourceNames, sourceIds }) {
   if (!studentId || !Array.isArray(slides) || !slides.length) return;
-  await fetchWithTimeout('/api/library/presentation', {
+  const resp = await fetchWithTimeout('/api/library/presentation', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -513,6 +575,38 @@ async function savePresentationToLibrary({ studentId, title, slides, references,
       ...(Array.isArray(sourceIds) && sourceIds.length ? { sourceIds } : {}),
     }),
   }, 25000);
+  // #region agent log
+  const errText = !resp.ok ? await resp.text().catch(() => '') : '';
+  fetch('http://127.0.0.1:7555/ingest/65a187b1-f84f-4fb8-91e9-b3378bd5e60a', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '538766' },
+    body: JSON.stringify({
+      sessionId: '538766',
+      location: 'App.jsx:savePresentationToLibrary',
+      message: 'library presentation response',
+      data: {
+        hypothesisId: 'H3',
+        ok: resp.ok,
+        status: resp.status,
+        errSnippet: errText.slice(0, 220),
+      },
+      timestamp: Date.now(),
+    }),
+  }).catch(() => {});
+  // #endregion
+  if (!resp.ok) {
+    let detail = errText.replace(/\s+/g, ' ').trim().slice(0, 400);
+    try {
+      const j = JSON.parse(errText);
+      const nested =
+        j?.details && typeof j.details === 'object' ? String(j.details.message || '').trim() : '';
+      const top = typeof j?.error === 'string' ? j.error.trim() : '';
+      detail = nested || top || detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail || `Could not save presentation (HTTP ${resp.status}).`);
+  }
 }
 
 async function saveGradeToLibrary({ studentId, subject, score, weight }) {
@@ -817,7 +911,7 @@ export function StudentApp() {
   const [isCommandOpen, setIsCommandOpen] = useState(false);
   const [tab, setTab] = useState('Ingest');
   const [chunks, setChunks] = useState([]);
-  /** Selected library PDF (chunk id) — drives Flashcards, Notebook, Concept Map, etc. */
+  /** Selected library material (chunk id) — drives Flashcards, Notebook, Concept Map, etc. */
   const [activePdfId, setActivePdfId] = useState('');
   const [sectionCatalog, setSectionCatalog] = useState([]);
   const [conceptMapLibrary, setConceptMapLibrary] = useState([]);
@@ -1336,11 +1430,97 @@ export function StudentApp() {
       setNotice('Please select a file first.');
       return;
     }
+    const lower = file.name.toLowerCase();
+    const ext = lower.split('.').pop() || '';
+    const serverOnlyFormats = new Set(['docx', 'pptx', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tif', 'tiff']);
+
     setIngestBusy(true);
     setGenerationIndeterminate(true);
     setGenerationProgress(0);
     setGenerationStage('Preparing file…');
     try {
+      if (!studentId && serverOnlyFormats.has(ext)) {
+        setNotice('Sign in to digest Office documents and images on the server, then upload again.');
+        setGenerationProgress(0);
+        setGenerationStage('');
+        setGenerationIndeterminate(false);
+        return;
+      }
+
+      if (studentId) {
+        setGenerationIndeterminate(true);
+        setGenerationProgress(15);
+        setGenerationStage('Encoding file for server digest…');
+        let fileBase64;
+        try {
+          fileBase64 = await fileToBase64DataOnly(file);
+        } catch (e) {
+          throw new Error(e?.message || 'Could not read file.');
+        }
+        setGenerationProgress(35);
+        setGenerationStage('Digesting and saving to your account…');
+        const ingested = await saveLibraryIngest({
+          studentId,
+          fileName: file.name,
+          mimeType: file.type || '',
+          fileBase64,
+        });
+        const cleaned = String(ingested?.normalizedText || '').trim();
+        if (!cleaned) {
+          setNotice('Server returned no text for this file.');
+          setGenerationProgress(0);
+          setGenerationStage('');
+          setGenerationIndeterminate(false);
+          return;
+        }
+        const chunk = {
+          id: `${Date.now()}`,
+          name: file.name,
+          content: cleaned,
+          mimeType: file.type || ingested?.ingestFormat || null,
+        };
+        let chunkForGen = chunk;
+        setChunks((prev) => [chunk, ...prev]);
+        if (ingested?.id) {
+          chunkForGen = {
+            ...chunk,
+            id: `db-pdf-${ingested.id}`,
+            sourceId: ingested.id,
+            createdAt: new Date().toISOString(),
+          };
+          setChunks((prev) => prev.map((c) => (c.id === chunk.id ? chunkForGen : c)));
+          try {
+            const fresh = await loadLibrary(studentId);
+            applyLibraryData(fresh);
+          } catch {
+            /* keep local row if refresh fails */
+          }
+        }
+        const libParts = [];
+        if (ingested?.deduplicated) libParts.push('Same file as existing material — reusing your saved copy.');
+        if (ingested?.storageWarning) libParts.push(ingested.storageWarning);
+        if (ingested?.embeddingDeferred) {
+          libParts.push('Search indexing for chat is running in the background.');
+        }
+        if (Array.isArray(ingested?.warnings) && ingested.warnings.length) {
+          libParts.push(ingested.warnings.join(' '));
+        }
+        setNotice(
+          libParts.length
+            ? `Added “${file.name}” to your library. ${libParts.join(' ')}`
+            : `Added “${file.name}” to your library.`,
+        );
+        setGenerationProgress(100);
+        setGenerationStage('Completed');
+        setGenerationIndeterminate(false);
+        queueMicrotask(() => {
+          void generateForChunk(chunkForGen).catch((e) => {
+            setNotice(`Flashcard generation failed: ${e?.message || e}`);
+          });
+        });
+        return;
+      }
+
       const text = await fileToText(file, ({ progress, label, indeterminate }) => {
         if (typeof indeterminate === 'boolean') setGenerationIndeterminate(indeterminate);
         setGenerationProgress(progress);
@@ -1362,62 +1542,7 @@ export function StudentApp() {
       const chunk = { id: `${Date.now()}`, name: file.name, content: cleaned };
       let chunkForGen = chunk;
       setChunks((prev) => [chunk, ...prev]);
-      if (studentId) {
-        try {
-          let pdfBase64;
-          if (file.name.toLowerCase().endsWith('.pdf') && file.size <= 18_000_000) {
-            setGenerationIndeterminate(true);
-            setGenerationStage('Encoding PDF for your account…');
-            try {
-              pdfBase64 = await fileToBase64DataOnly(file);
-            } catch {
-              pdfBase64 = undefined;
-            }
-          }
-          setGenerationIndeterminate(true);
-          setGenerationStage('Saving to your account (indexing can take 1–3 minutes for large PDFs)…');
-          const saved = await savePdfToLibrary({
-            studentId,
-            name: chunk.name,
-            content: chunk.content,
-            pdfBase64,
-          });
-          if (saved?.id) {
-            chunkForGen = {
-              ...chunk,
-              id: `db-pdf-${saved.id}`,
-              sourceId: saved.id,
-              createdAt: new Date().toISOString(),
-            };
-            setChunks((prev) =>
-              prev.map((c) => (c.id === chunk.id ? chunkForGen : c)),
-            );
-            try {
-              const fresh = await loadLibrary(studentId);
-              applyLibraryData(fresh);
-            } catch {
-              /* keep local row if refresh fails */
-            }
-          }
-          const libParts = [];
-          if (saved?.storageWarning) libParts.push(saved.storageWarning);
-          if (saved?.embeddingWarning) libParts.push(saved.embeddingWarning);
-          if (saved?.id) {
-            setNotice(
-              libParts.length
-                ? `Added “${chunk.name}” to Saved PDFs. ${libParts.join(' ')}`
-                : `Added “${chunk.name}” to Saved PDFs.`,
-            );
-          } else if (libParts.length) {
-            setNotice(`Library saved. ${libParts.join(' ')}`);
-          }
-        } catch (e) {
-          setNotice(`PDF read OK, but not saved to your account: ${e?.message || 'API error'}`);
-        }
-      } else {
-        setNotice('Saved in this browser only — sign in to keep PDFs in your account across devices.');
-      }
-      // Hand off to flashcard generation without clearing the bar (avoids a blank frame); generateForChunk sets progress.
+      setNotice('Saved in this browser only — sign in to keep materials in your account across devices.');
       queueMicrotask(() => {
         void generateForChunk(chunkForGen).catch((e) => {
           setNotice(`Flashcard generation failed: ${e?.message || e}`);
@@ -1535,6 +1660,23 @@ export function StudentApp() {
     const sourceChunks = (Array.isArray(chunkIds) && chunkIds.length)
       ? chunks.filter((c) => chunkIds.includes(c.id))
       : (activeChunk ? [activeChunk] : []);
+    // #region agent log
+    fetch('http://127.0.0.1:7555/ingest/65a187b1-f84f-4fb8-91e9-b3378bd5e60a', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '538766' },
+      body: JSON.stringify({
+        sessionId: '538766',
+        location: 'App.jsx:generatePresentation:start',
+        message: 'generatePresentation',
+        data: {
+          hypothesisId: 'H2',
+          hasStudentId: !!studentId,
+          sourceChunkCount: sourceChunks.length,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
     if (!sourceChunks.length) {
       setNotice('Upload a PDF first, then generate a presentation from it.');
       setIsGeneratingPresentation(false);
@@ -1562,8 +1704,9 @@ export function StudentApp() {
               sourceNames: sourceChunks.map((c) => c.name),
               sourceIds: sourceChunks.map((c) => c.sourceId).filter(Boolean),
             });
-          } catch {
-            // Non-blocking persistence.
+          } catch (e) {
+            setNotice(`Could not save presentation to your account: ${e?.message || e}`);
+            return;
           }
         }
         setNotice(`Presentation generated: ${slideCountLabel(generated.slides.length)}.`);
@@ -1582,8 +1725,9 @@ export function StudentApp() {
             sourceNames: sourceChunks.map((c) => c.name),
             sourceIds: sourceChunks.map((c) => c.sourceId).filter(Boolean),
           });
-        } catch {
-          // Non-blocking persistence.
+        } catch (e) {
+          setNotice(`Could not save presentation to your account: ${e?.message || e}`);
+          return;
         }
       }
       setNotice(`AI returned no slides. Created backup outline (${slideCountLabel(fallback.slides.length)}).`);
@@ -1601,8 +1745,9 @@ export function StudentApp() {
             sourceNames: sourceChunks.map((c) => c.name),
             sourceIds: sourceChunks.map((c) => c.sourceId).filter(Boolean),
           });
-        } catch {
-          // Non-blocking persistence.
+        } catch (e) {
+          setNotice(`Could not save presentation to your account: ${e?.message || e}`);
+          return;
         }
       }
       setNotice(`${error?.message || 'AI model offline'} — generated backup outline (${slideCountLabel(fallback.slides.length)}).`);
