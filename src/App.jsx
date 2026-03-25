@@ -2316,8 +2316,6 @@ export function StudentApp() {
             setShowAnswer={setShowAnswer}
             onRight={() => markCard(true)}
             onWrong={() => markCard(false)}
-            sessionRight={deckSessionGrades.right}
-            sessionWrong={deckSessionGrades.wrong}
             latestBatchAt={latestBatchAt}
             isGenerating={isGenerating}
             onGenerateMore={() => activeChunk && generateForChunk(activeChunk, { append: true })}

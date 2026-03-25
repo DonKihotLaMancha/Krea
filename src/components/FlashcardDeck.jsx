@@ -11,8 +11,6 @@ export default function FlashcardDeck({
   setShowAnswer,
   onRight,
   onWrong,
-  sessionRight = 0,
-  sessionWrong = 0,
   latestBatchAt,
   onGenerateMore,
   onClear,
@@ -25,6 +23,7 @@ export default function FlashcardDeck({
   const [dragX, setDragX] = useState(0);
   const [gradeFlash, setGradeFlash] = useState(null);
   const [reviewedIds, setReviewedIds] = useState(() => new Set());
+  const [roundOutcomeById, setRoundOutcomeById] = useState(() => ({}));
   const [roundComplete, setRoundComplete] = useState(false);
   const deckSize = cards.length;
 
@@ -39,14 +38,12 @@ export default function FlashcardDeck({
 
   const handleRight = useCallback(() => {
     if (!currentCard || roundComplete) return;
-    let completedNow = false;
     setReviewedIds((prev) => {
       const next = new Set(prev);
       next.add(currentCard.id);
-      completedNow = next.size >= deckSize;
       return next;
     });
-    setRoundComplete(completedNow);
+    setRoundOutcomeById((prev) => ({ ...prev, [currentCard.id]: 'right' }));
     triggerGradeFlash('right');
     try {
       if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(12);
@@ -59,14 +56,12 @@ export default function FlashcardDeck({
 
   const handleWrong = useCallback(() => {
     if (!currentCard || roundComplete) return;
-    let completedNow = false;
     setReviewedIds((prev) => {
       const next = new Set(prev);
       next.add(currentCard.id);
-      completedNow = next.size >= deckSize;
       return next;
     });
-    setRoundComplete(completedNow);
+    setRoundOutcomeById((prev) => ({ ...prev, [currentCard.id]: 'wrong' }));
     triggerGradeFlash('wrong');
     try {
       if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate([18, 40, 18]);
@@ -88,8 +83,13 @@ export default function FlashcardDeck({
 
   useEffect(() => {
     setReviewedIds(new Set());
+    setRoundOutcomeById({});
     setRoundComplete(false);
   }, [deckSignature]);
+
+  useEffect(() => {
+    setRoundComplete(deckSize > 0 && reviewedIds.size >= deckSize);
+  }, [deckSize, reviewedIds]);
 
   const toggleFlip = useCallback(() => {
     if (roundComplete) return;
@@ -173,8 +173,25 @@ export default function FlashcardDeck({
     if (acted) suppressClickUntil.current = Date.now() + 320;
   };
 
-  const totalRated = sessionRight + sessionWrong;
-  const accuracy = totalRated ? Math.round((sessionRight / totalRated) * 100) : 0;
+  const roundRight = useMemo(
+    () => Object.values(roundOutcomeById).filter((v) => v === 'right').length,
+    [roundOutcomeById],
+  );
+  const roundWrong = useMemo(
+    () => Object.values(roundOutcomeById).filter((v) => v === 'wrong').length,
+    [roundOutcomeById],
+  );
+  const weakCards = useMemo(
+    () =>
+      Object.entries(roundOutcomeById)
+        .filter(([, v]) => v === 'wrong')
+        .map(([id]) => cards.find((c) => String(c.id) === String(id)))
+        .filter(Boolean)
+        .slice(0, 5),
+    [roundOutcomeById, cards],
+  );
+  const totalRated = roundRight + roundWrong;
+  const accuracy = totalRated ? Math.round((roundRight / totalRated) * 100) : 0;
 
   const cardShellClass =
     gradeFlash === 'right'
@@ -210,11 +227,13 @@ export default function FlashcardDeck({
         <>
           <div className="mb-4 min-h-[4.75rem] w-full max-w-xl mx-auto flex flex-col items-center justify-center gap-1.5 px-2">
             <p className="text-center text-sm font-medium text-slate-700">
-              {deckSize} card{deckSize === 1 ? '' : 's'} in this deck
+              Generated: {deckSize} card{deckSize === 1 ? '' : 's'}
               <span className="text-slate-400"> · </span>
-              <span className="text-emerald-700">Know: {sessionRight}</span>
+              <span className="text-emerald-700">Right: {roundRight}</span>
               <span className="text-slate-400"> · </span>
-              <span className="text-rose-700">Review: {sessionWrong}</span>
+              <span className="text-rose-700">Wrong: {roundWrong}</span>
+              <span className="text-slate-400"> · </span>
+              <span className="text-slate-700">Remaining: {Math.max(0, deckSize - reviewedIds.size)}</span>
             </p>
             <p className="text-center text-xs leading-snug text-slate-500">
               <strong className="font-medium text-slate-600">How it works:</strong> Know it moves this card to the back of the deck;
@@ -229,7 +248,7 @@ export default function FlashcardDeck({
                 You reviewed {reviewedIds.size} / {deckSize} cards.
               </p>
               <p className="mt-1 text-center text-sm text-slate-700">
-                Accuracy: <span className="font-semibold">{accuracy}%</span> ({sessionRight} known, {sessionWrong} review)
+                Accuracy: <span className="font-semibold">{accuracy}%</span> ({roundRight} right, {roundWrong} wrong)
               </p>
               <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700">
                 <p className="font-medium text-slate-800">Performance analysis</p>
@@ -240,18 +259,32 @@ export default function FlashcardDeck({
                 ) : (
                   <p className="mt-1">Foundation needs reinforcement. Do a shorter second round now and break difficult cards into smaller facts.</p>
                 )}
+                {weakCards.length ? (
+                  <div className="mt-3 rounded-md border border-rose-100 bg-rose-50 p-2.5">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-rose-700">Practice more on</p>
+                    <ul className="mt-1 space-y-1 text-sm text-rose-900">
+                      {weakCards.map((c) => (
+                        <li key={`weak-${c.id}`} className="line-clamp-2">
+                          - {c.question}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
               </div>
-              <button
-                type="button"
-                className="btn-primary mt-3 w-full"
-                onClick={() => {
-                  setReviewedIds(new Set());
-                  setRoundComplete(false);
-                  setShowAnswer(false);
-                }}
-              >
-                Start another round
-              </button>
+              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <button
+                  type="button"
+                  className="btn-primary w-full"
+                  disabled={isGenerating}
+                  onClick={onGenerateMore}
+                >
+                  {isGenerating ? 'Generating…' : 'Generate more new cards'}
+                </button>
+                <button type="button" className="btn-ghost w-full" disabled={isGenerating} onClick={onClear}>
+                  Clear set
+                </button>
+              </div>
             </div>
           ) : (
           <div className="relative mx-auto w-full max-w-xl pb-2">
